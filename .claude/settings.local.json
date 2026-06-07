@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(godot --editor)",
+      "Bash(\"C:\\\\Users\\\\Felix\\\\Downloads\\\\Godot_v4.6.3-stable_win64.exe\" \"C:\\\\Users\\\\Felix\\\\Documents\\\\commander\")",
+      "PowerShell(& \"C:\\\\Users\\\\Felix\\\\Downloads\\\\Godot_v4.6.3-stable_win64.exe\" \"C:\\\\Users\\\\Felix\\\\Documents\\\\commander\" 2>&1)",
+      "PowerShell(head -20)",
+      "Bash(gh --version)",
+      "Bash(gh auth *)",
+      "Bash(git config *)",
+      "Bash(echo \"name: $\\(git config --global user.name\\)\")",
+      "Bash(echo \"email: $\\(git config --global user.email\\)\")",
+      "Bash(git init *)",
+      "Bash(git add *)",
+      "Bash(git commit -q -m ' *)"
+    ]
+  }
+}

@@ -1,0 +1,43 @@
+[gd_scene load_steps=10 format=3 uid="uid://cofbtx05rm17s"]
+
+[ext_resource type="Script" path="res://scripts/game_manager.gd" id="1_gm"]
+[ext_resource type="PackedScene" uid="uid://dm815hkqh7v5d" path="res://player.tscn" id="2_player"]
+[ext_resource type="Script" uid="uid://cb8oyugu7jdf2" path="res://camera_2d.gd" id="3_cam"]
+[ext_resource type="Script" path="res://scripts/command_controller.gd" id="4_cmd"]
+[ext_resource type="Script" path="res://scripts/effects/corpse_field.gd" id="5_corpse"]
+[ext_resource type="Script" path="res://scripts/effects/smoke_field.gd" id="6_smoke"]
+[ext_resource type="Script" path="res://scripts/enemy_commander.gd" id="7_ai"]
+[ext_resource type="Script" path="res://scripts/ui/unit_info_panel.gd" id="8_ui"]
+[ext_resource type="Script" path="res://scripts/terrain.gd" id="9_terrain"]
+
+[node name="Main" type="Node2D"]
+script = ExtResource("1_gm")
+
+[node name="Terrain" type="Node2D" parent="."]
+script = ExtResource("9_terrain")
+
+[node name="Corpses" type="Node2D" parent="."]
+script = ExtResource("5_corpse")
+
+[node name="Battalions" type="Node2D" parent="."]
+
+[node name="Smoke" type="Node2D" parent="."]
+script = ExtResource("6_smoke")
+
+[node name="Couriers" type="Node2D" parent="."]
+
+[node name="Player" parent="." instance=ExtResource("2_player")]
+position = Vector2(0, 0)
+
+[node name="Camera2D" type="Camera2D" parent="."]
+zoom = Vector2(1, 1)
+script = ExtResource("3_cam")
+
+[node name="EnemyCommander" type="Node" parent="."]
+script = ExtResource("7_ai")
+
+[node name="CommandController" type="Node2D" parent="."]
+script = ExtResource("4_cmd")
+
+[node name="UI" type="CanvasLayer" parent="."]
+script = ExtResource("8_ui")

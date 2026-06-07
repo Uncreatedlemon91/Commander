@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://b0courier0gen1"]
+
+[ext_resource type="Script" path="res://scripts/units/courier.gd" id="1_courier_script"]
+
+[node name="Courier" type="Node2D"]
+script = ExtResource("1_courier_script")
