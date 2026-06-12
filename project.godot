@@ -11,14 +11,19 @@ config_version=5
 [application]
 
 config/name="Commander"
-run/main_scene="res://scenes/main_menu.tscn"
+run/main_scene="res://menu.tscn"
 config/features=PackedStringArray("4.6", "Forward Plus")
 config/icon="res://icon.svg"
+
+[audio]
+
+driver/enable_input=true
 
 [autoload]
 
 GameConfig="*res://scripts/game_config.gd"
 Net="*res://scripts/net.gd"
+Voip="*res://scripts/voip.gd"
 
 [input]
 

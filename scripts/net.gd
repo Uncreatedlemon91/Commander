@@ -1,88 +1,121 @@
 extends Node
 
-# Peer-to-peer networking (autoload). The host runs the authoritative simulation;
-# clients render synced state and send order requests to the host.
-#
-# Multiplayer here is server-authoritative:
-#   - Host + single-player run the full battalion simulation.
-#   - Clients do NOT simulate; they receive battalion state snapshots from the
-#     host and render them, and forward player orders to the host via RPC.
+# Peer-to-peer networking (autoload). Host-authoritative:
+#   - The HOST runs the full battle simulation (every battalion, the AI, combat).
+#   - CLIENTS render the host's synced battalion state, drive their own officer,
+#     and forward their orders + officer position to the host.
+# Each player commands ONE battalion (a slot = an index into the battalion array).
 
 signal lobby_updated
 
 const PORT := 24555
+# battalion slots players may take (interleaved sides, centres first)
+const HUMAN_SLOTS := [2, 7, 0, 5, 1, 6, 3, 8, 4, 9]
 
-var peers: Dictionary = {}   # peer_id -> team
-var game: Node = null        # set by GameManager when the battle loads
+var lobby: Dictionary = {}      # peer_id -> battalion slot (synced to everyone)
+var game: Node = null           # the running battle, set by game.gd
 
-func host_game(team: int) -> int:
+func host_game() -> int:
 	var p := ENetMultiplayerPeer.new()
-	var err := p.create_server(PORT, 32)
+	var err := p.create_server(PORT, 8)
 	if err != OK:
 		return err
 	multiplayer.multiplayer_peer = p
 	GameConfig.mode = "host"
-	GameConfig.local_team = team
-	peers[1] = team
+	lobby = { 1: HUMAN_SLOTS[0] }
+	GameConfig.local_slot = HUMAN_SLOTS[0]
 	multiplayer.peer_connected.connect(_on_peer_connected)
 	multiplayer.peer_disconnected.connect(_on_peer_disconnected)
 	emit_signal("lobby_updated")
 	return OK
 
-func join_game(ip: String, team: int) -> int:
+func join_game(ip: String) -> int:
 	var p := ENetMultiplayerPeer.new()
 	var err := p.create_client(ip, PORT)
 	if err != OK:
 		return err
 	multiplayer.multiplayer_peer = p
 	GameConfig.mode = "client"
-	GameConfig.local_team = team
-	multiplayer.connected_to_server.connect(_on_connected_to_server)
 	multiplayer.connection_failed.connect(_on_connection_failed)
 	return OK
 
-func _on_peer_connected(_id: int) -> void:
-	emit_signal("lobby_updated")
+func _on_peer_connected(id: int) -> void:
+	if multiplayer.is_server():
+		lobby[id] = _first_free_slot()
+		print("[NET] peer %d connected -> slot %d" % [id, lobby[id]])
+		_broadcast_lobby()
 
 func _on_peer_disconnected(id: int) -> void:
-	peers.erase(id)
-	emit_signal("lobby_updated")
-
-func _on_connected_to_server() -> void:
-	rpc_id(1, "_register", GameConfig.local_team)
+	lobby.erase(id)
+	if multiplayer.is_server():
+		_broadcast_lobby()
 
 func _on_connection_failed() -> void:
 	multiplayer.multiplayer_peer = null
 	GameConfig.mode = "single"
 
-@rpc("any_peer", "call_remote", "reliable")
-func _register(team: int) -> void:
-	if multiplayer.is_server():
-		peers[multiplayer.get_remote_sender_id()] = team
-		emit_signal("lobby_updated")
+func _first_free_slot() -> int:
+	for s in HUMAN_SLOTS:
+		if not (s in lobby.values()):
+			return s
+	return HUMAN_SLOTS[0]
 
-func human_teams() -> Array:
-	var set := {}
-	for v in peers.values():
-		set[v] = true
-	if GameConfig.mode == "host":
-		set[GameConfig.local_team] = true
-	return set.keys()
+# a player (local UI) asks for a battalion slot
+func request_slot(slot: int) -> void:
+	if multiplayer.is_server():
+		_set_slot(1, slot)
+	else:
+		rpc_id(1, "_req_slot", slot)
+
+@rpc("any_peer", "call_remote", "reliable")
+func _req_slot(slot: int) -> void:
+	if multiplayer.is_server():
+		_set_slot(multiplayer.get_remote_sender_id(), slot)
+
+func _set_slot(id: int, slot: int) -> void:
+	if (slot in lobby.values()) and lobby.get(id, -1) != slot:
+		return                        # already taken by someone else
+	lobby[id] = slot
+	_broadcast_lobby()
+
+func _broadcast_lobby() -> void:
+	rpc("_sync_lobby", lobby)
+	_sync_lobby(lobby)                # apply on the host too
+
+@rpc("authority", "call_local", "reliable")
+func _sync_lobby(l: Dictionary) -> void:
+	lobby = l
+	var myid := multiplayer.get_unique_id()
+	if lobby.has(myid):
+		GameConfig.local_slot = lobby[myid]
+	emit_signal("lobby_updated")
+
+func human_slots() -> Array:
+	return lobby.values()
+
+func slot_label(slot: int) -> String:
+	# slots 0..4 = French line, 5..9 = Allied line
+	if slot < 5:
+		return "FR %d" % (slot + 1)
+	return "AL %d" % (slot - 4)
 
 func start_game() -> void:
 	if multiplayer.is_server():
-		rpc("_load_battle")
+		var s := int(Time.get_unix_time_from_system()) ^ (randi() | 1)
+		rpc("_load_battle", s)
 
 @rpc("authority", "call_local", "reliable")
-func _load_battle() -> void:
-	get_tree().change_scene_to_file("res://node_2d.tscn")
+func _load_battle(seed_value: int) -> void:
+	GameConfig.match_seed = seed_value
+	print("[NET] loading battle (mode=%s, slot=%d)" % [GameConfig.mode, GameConfig.local_slot])
+	get_tree().change_scene_to_file("res://game.tscn")
 
-# --- orders from clients to host ---
+# --- client -> host: my officer + my orders ---
 
-func request_order(battalion_id: int, order: Dictionary) -> void:
-	rpc_id(1, "_srv_order", battalion_id, order)
+func send_input(off_pos: Vector3, off_facing: float, order: Dictionary) -> void:
+	rpc_id(1, "_srv_input", GameConfig.local_slot, off_pos, off_facing, order)
 
-@rpc("any_peer", "call_remote", "reliable")
-func _srv_order(battalion_id: int, order: Dictionary) -> void:
+@rpc("any_peer", "call_remote", "unreliable_ordered")
+func _srv_input(slot: int, off_pos: Vector3, off_facing: float, order: Dictionary) -> void:
 	if multiplayer.is_server() and game:
-		game.order_battalion(battalion_id, order)
+		game.net_apply_input(slot, off_pos, off_facing, order)

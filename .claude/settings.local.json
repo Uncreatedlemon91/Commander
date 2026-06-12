@@ -12,7 +12,28 @@
       "Bash(echo \"email: $\\(git config --global user.email\\)\")",
       "Bash(git init *)",
       "Bash(git add *)",
-      "Bash(git commit -q -m ' *)"
+      "Bash(git commit -q -m ' *)",
+      "Bash(sed -i '483d' \"C:/Users/Felix/Documents/commander/scripts/units/battalion.gd\")",
+      "Bash(sed -n '473,490p' \"C:/Users/Felix/Documents/commander/scripts/units/battalion.gd\")",
+      "PowerShell($godot = \"C:\\\\Users\\\\Felix\\\\Downloads\\\\Godot_v4.6.3-stable_win64.exe\\\\Godot_v4.6.3-stable_win64_console.exe\"; $proj = \"C:\\\\Users\\\\Felix\\\\Documents\\\\commander\"; & $godot --headless --path $proj --check-only --quit 2>&1 | Select-Object -Last 60)",
+      "PowerShell($log = \"$env:TEMP\\\\godot_check.log\"; Write-Output \"=== line count ===\"; \\(Get-Content $log | Measure-Object -Line\\).Lines; Write-Output \"=== full content ===\"; Get-Content $log)",
+      "PowerShell($log = \"$env:TEMP\\\\godot_run.log\"; Get-Content $log)",
+      "Bash(find . -iname \"*.mp3\")",
+      "Bash(find . -iname \"*musket*\")",
+      "Bash(python -)",
+      "Bash(rm -rf scripts/units scripts/effects scripts/ui scenes/units scenes/effects)",
+      "Bash(rm -f node_2d.tscn player.tscn scenes/main_menu.tscn scenes/commander.tscn scenes/objective.tscn)",
+      "Bash(rm -f Player.gd Player.gd.uid camera_2d.gd camera_2d.gd.uid)",
+      "Bash(rm -f scripts/game_manager.gd scripts/command_controller.gd scripts/commander.gd scripts/enemy_commander.gd scripts/terrain.gd scripts/objective.gd scripts/cinematic.gd scripts/sound_manager.gd scripts/main_menu.gd scripts/fog_overlay.gd)",
+      "Bash(rm -f scripts/game_manager.gd.uid scripts/command_controller.gd.uid scripts/commander.gd.uid scripts/enemy_commander.gd.uid scripts/terrain.gd.uid scripts/objective.gd.uid scripts/cinematic.gd.uid scripts/sound_manager.gd.uid scripts/main_menu.gd.uid scripts/fog_overlay.gd.uid)",
+      "Bash(grep -v \"^\\\\./\\\\.godot\")",
+      "Bash(git mv *)",
+      "Bash(git rm *)",
+      "Bash(rm -f spike_officer.tscn)",
+      "Bash(ls scripts/spike_officer.gd scripts/game.gd)",
+      "Bash(mv -f scripts/spike_officer.gd scripts/game.gd)",
+      "Bash(mv -f scripts/spike_officer.gd.uid scripts/game.gd.uid)",
+      "Bash(cat \"/c/Users/Felix/.claude/projects/C--Users-Felix-Documents-commander/memory/MEMORY.md\" 2>/dev/null || echo \"NO INDEX\")"
     ]
   }
 }
