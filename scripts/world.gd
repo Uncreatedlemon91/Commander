@@ -106,13 +106,17 @@ const RIDE_WALK := 4.0
 const RIDE_CANTER := 11.0
 const RIDE_TURN := 1.9            # rad/s at the canter
 var sun: DirectionalLight3D
-var hud: Label
+var hud: RichTextLabel
 var feed: RichTextLabel
 var feed_lines: Array[String] = []
 
 var men_mm: Array = [null, null]  # unit counters per faction
 var flag_mm: Array = [null, null] # counter base plates per faction
 var token_labels: Array[Label3D] = []   # name + strength over each counter
+var settlement_discs: Array[MeshInstance3D] = []   # owner-coloured disc under each town
+var settlement_labels: Array[Label3D] = []
+var objective_si := -1            # the settlement the player is directed to take
+var anim_t := 0.0                 # real-time accumulator for map pulses
 var deer_mm: MultiMesh
 var civ_mm: MultiMesh
 var smoke_p: GPUParticles3D
@@ -144,19 +148,21 @@ func _ready() -> void:
 	Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)   # the map is driven by the cursor
 
 func _build_sky() -> void:
+	# a clean MAP look: no sky, no fog/haze, flat even light. The whole map uses
+	# unshaded materials so it reads like paper regardless of the time of day.
 	var env := WorldEnvironment.new()
 	var e := Environment.new()
-	var sky := Sky.new()
-	sky.sky_material = ProceduralSkyMaterial.new()
-	e.background_mode = Environment.BG_SKY
-	e.sky = sky
-	e.fog_enabled = true
-	e.fog_light_color = Color(0.75, 0.80, 0.85)
-	e.fog_density = 0.00018
+	e.background_mode = Environment.BG_COLOR
+	e.background_color = Color(0.16, 0.19, 0.23)      # the table the map lies on
+	e.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	e.ambient_light_color = Color(1, 1, 1)
+	e.ambient_light_energy = 1.0
+	e.fog_enabled = false
 	env.environment = e
 	add_child(env)
 	sun = DirectionalLight3D.new()
 	sun.shadow_enabled = false
+	sun.light_energy = 1.0
 	add_child(sun)
 
 func _build_ground() -> void:
@@ -165,8 +171,8 @@ func _build_ground() -> void:
 	pm.size = Vector2(WORLD_SIZE, WORLD_SIZE)
 	g.mesh = pm
 	var m := StandardMaterial3D.new()
-	m.albedo_color = Color(0.34, 0.44, 0.26)   # rough meadow green
-	m.roughness = 1.0
+	m.albedo_color = Color(0.79, 0.76, 0.64)   # parchment / map paper
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	g.material_override = m
 	add_child(g)
 	ground_mi = g                 # kept so it stays visible (under a hosted battle)
@@ -229,29 +235,44 @@ func _build_settlements() -> void:
 	wmi.multimesh = wall_mm
 	var wmat := StandardMaterial3D.new()
 	wmat.vertex_color_use_as_albedo = true
+	wmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	wmi.material_override = wmat
 	add_child(wmi)
 	var rmi := MultiMeshInstance3D.new()
 	rmi.multimesh = roof_mm
 	var rmat := StandardMaterial3D.new()
-	rmat.albedo_color = Color(0.35, 0.26, 0.20)
+	rmat.albedo_color = Color(0.45, 0.32, 0.24)
+	rmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	rmi.material_override = rmat
 	add_child(rmi)
-	# name boards
-	for s in settlements:
+	# owner discs + name boards (coloured by who holds the town, updated each frame)
+	for si in range(settlements.size()):
+		var s := settlements[si]
+		var disc := MeshInstance3D.new()
+		var cyl := CylinderMesh.new()
+		cyl.top_radius = 60.0 + s.size * 28.0
+		cyl.bottom_radius = cyl.top_radius
+		cyl.height = 2.0
+		disc.mesh = cyl
+		disc.position = s.pos + Vector3(0, 1.0, 0)
+		var dmat := StandardMaterial3D.new()
+		dmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		disc.material_override = dmat
+		add_child(disc)
+		settlement_discs.append(disc)
 		var lb := Label3D.new()
 		lb.text = s.name
 		lb.font_size = 256
 		lb.pixel_size = 0.05
 		lb.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 		lb.position = s.pos + Vector3(0, 38, 0)
-		lb.modulate = Color(1, 0.95, 0.8, 0.9)
 		add_child(lb)
+		settlement_labels.append(lb)
 
 func _build_roads() -> void:
 	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.48, 0.40, 0.30)   # packed dirt
-	mat.roughness = 1.0
+	mat.albedo_color = Color(0.55, 0.45, 0.32)   # a drawn road line
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	for r in roads:
 		var a: Vector3 = settlements[r[0]].pos
 		var b: Vector3 = settlements[r[1]].pos
@@ -272,33 +293,33 @@ func _build_woods_and_fields() -> void:
 		[Vector3(-1500, 0, -1800), 1000.0], [Vector3(2400, 0, -700), 750.0],
 		[Vector3(-4000, 0, -3600), 800.0], [Vector3(4200, 0, 3600), 900.0],
 		[Vector3(900, 0, -3200), 850.0], [Vector3(-4400, 0, 2400), 700.0]]
+	# woods are drawn as flat green map patches (a few overlapping discs per grove),
+	# not 3D trees — clean and readable from above
 	var tree_mm := MultiMesh.new()
 	tree_mm.transform_format = MultiMesh.TRANSFORM_3D
-	var cone := CylinderMesh.new()
-	cone.top_radius = 0.0
-	cone.bottom_radius = 3.2
-	cone.height = 9.0
-	cone.radial_segments = 6
-	tree_mm.mesh = cone
-	tree_mm.instance_count = 2600
+	var disc := CylinderMesh.new()
+	disc.top_radius = 1.0
+	disc.bottom_radius = 1.0
+	disc.height = 1.0
+	disc.radial_segments = 16
+	tree_mm.mesh = disc
+	tree_mm.instance_count = groves.size() * 4
 	var ti := 0
 	for gr in groves:
 		var c: Vector3 = gr[0]
 		var rad: float = gr[1]
-		var n := int(2600.0 / groves.size())
-		for k in range(n):
-			if ti >= 2600:
-				break
+		for k in range(4):
 			var a := randf() * TAU
-			var d := sqrt(randf()) * rad
-			var sc := randf_range(0.7, 1.5)
-			var xf := Transform3D(Basis(Vector3.UP, randf() * TAU).scaled(Vector3(sc, sc, sc)), c + Vector3(cos(a) * d, 4.5 * sc, sin(a) * d))
-			tree_mm.set_instance_transform(ti, xf)
+			var off := randf_range(0.0, rad * 0.45)
+			var r2 := rad * randf_range(0.55, 0.95)
+			var p := c + Vector3(cos(a) * off, 0.5, sin(a) * off)
+			tree_mm.set_instance_transform(ti, Transform3D(Basis().scaled(Vector3(r2, 1.0, r2)), p))
 			ti += 1
 	var tmi := MultiMeshInstance3D.new()
 	tmi.multimesh = tree_mm
 	var tmat := StandardMaterial3D.new()
-	tmat.albedo_color = Color(0.16, 0.30, 0.16)
+	tmat.albedo_color = Color(0.36, 0.48, 0.30)   # muted map green
+	tmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	tmi.material_override = tmat
 	add_child(tmi)
 	# worked fields near settlements — big pale patches
@@ -321,40 +342,72 @@ func _build_woods_and_fields() -> void:
 	fmi.multimesh = fld_mm
 	var fmat := StandardMaterial3D.new()
 	fmat.vertex_color_use_as_albedo = true
-	fmat.roughness = 1.0
+	fmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	fmi.material_override = fmat
 	add_child(fmi)
 
+# a NATO-style infantry counter: a coloured field framed in ink with the crossed
+# diagonals (infantry) and two echelon ticks (II = battalion) along the top
+func _nato_infantry_tex(field: Color, ink: Color) -> ImageTexture:
+	var w := 200
+	var h := 128
+	var img := Image.create(w, h, false, Image.FORMAT_RGBA8)
+	img.fill(field)
+	var b := 9                                   # frame thickness
+	img.fill_rect(Rect2i(0, 0, w, b), ink)
+	img.fill_rect(Rect2i(0, h - b, w, b), ink)
+	img.fill_rect(Rect2i(0, 0, b, h), ink)
+	img.fill_rect(Rect2i(w - b, 0, b, h), ink)
+	var th := 7                                  # the infantry X
+	for x in range(b, w - b):
+		var fr := float(x - b) / float(w - 2 * b)
+		var y1 := b + int(fr * float(h - 2 * b))
+		var y2 := h - 1 - y1
+		for dy in range(-th, th + 1):
+			_putpx(img, x, y1 + dy, ink)
+			_putpx(img, x, y2 + dy, ink)
+	# echelon: II (battalion) centred above the frame
+	img.fill_rect(Rect2i(w / 2 - 16, 2, 6, b - 2), ink)
+	img.fill_rect(Rect2i(w / 2 + 10, 2, 6, b - 2), ink)
+	return ImageTexture.create_from_image(img)
+
+func _putpx(img: Image, x: int, y: int, c: Color) -> void:
+	if x >= 0 and y >= 0 and x < img.get_width() and y < img.get_height():
+		img.set_pixel(x, y, c)
+
 func _build_pools() -> void:
-	# units are drawn as MAP COUNTERS, not figures: a faction-coloured block on a
-	# base plate (the base is gold for your own battalion)
+	# units are drawn as NATO MAP COUNTERS, not figures: a faction-coloured infantry
+	# symbol on a base plate (the base is gold for your own battalion)
 	const MAX_COUNTERS := 30
 	for f in range(2):
 		var mm := MultiMesh.new()
 		mm.transform_format = MultiMesh.TRANSFORM_3D
-		var box := BoxMesh.new()
-		box.size = Vector3(70, 6, 44)          # the counter itself
-		mm.mesh = box
+		var plate := PlaneMesh.new()
+		plate.size = Vector2(120, 76)          # the NATO counter, lying flat, north-up
+		plate.orientation = PlaneMesh.FACE_Y
+		mm.mesh = plate
 		mm.instance_count = MAX_COUNTERS
 		var mi := MultiMeshInstance3D.new()
 		mi.multimesh = mm
 		var mat := StandardMaterial3D.new()
-		mat.albedo_color = FACTION_COLS[f]
-		mat.roughness = 0.9
+		mat.albedo_texture = _nato_infantry_tex(FACTION_COLS[f], Color(0.06, 0.06, 0.09))
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED   # crisp at any light
 		mi.material_override = mat
 		add_child(mi)
 		men_mm[f] = mm
 		var fm := MultiMesh.new()
 		fm.transform_format = MultiMesh.TRANSFORM_3D
 		fm.use_colors = true                   # per-counter base tint (gold = you)
-		var bbox := BoxMesh.new()
-		bbox.size = Vector3(80, 3, 54)          # the base plate under the counter
-		fm.mesh = bbox
+		var bplate := PlaneMesh.new()
+		bplate.size = Vector2(140, 92)          # the base plate / affiliation border
+		bplate.orientation = PlaneMesh.FACE_Y
+		fm.mesh = bplate
 		fm.instance_count = MAX_COUNTERS
 		var fmi := MultiMeshInstance3D.new()
 		fmi.multimesh = fm
 		var fmat := StandardMaterial3D.new()
 		fmat.vertex_color_use_as_albedo = true
+		fmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		fmi.material_override = fmat
 		add_child(fmi)
 		flag_mm[f] = fm
@@ -384,6 +437,7 @@ func _build_pools() -> void:
 	var dmat := StandardMaterial3D.new()
 	dmat.albedo_color = Color(0.45, 0.33, 0.22)
 	dmi.material_override = dmat
+	dmi.visible = false               # wildlife/civilians/traffic are off the operational map
 	add_child(dmi)
 	# civilians
 	civ_mm = MultiMesh.new()
@@ -400,6 +454,7 @@ func _build_pools() -> void:
 	var cmat := StandardMaterial3D.new()
 	cmat.albedo_color = Color(0.55, 0.52, 0.44)
 	cmi.material_override = cmat
+	cmi.visible = false
 	add_child(cmi)
 	# powder smoke over distant fights
 	smoke_p = GPUParticles3D.new()
@@ -483,7 +538,7 @@ var cam_focus := Vector3.ZERO      # the ground point the camera looks down at
 func _build_camera() -> void:
 	cam = Camera3D.new()
 	cam.far = 20000.0
-	cam_pitch = -1.05                # a steep operational-map look-down
+	cam_pitch = -1.4                 # near top-down, so the map reads flat
 	add_child(cam)
 	_place_map_cam()
 
@@ -607,30 +662,68 @@ func _ride_camera(delta: float) -> void:
 	cam.position = cam.position.lerp(want, clampf(delta * 6.0, 0, 1))
 	cam.look_at(off_pos + Vector3(0, 2.3, 0) + back * 2.0, Vector3.UP)
 
+var orders_lbl: RichTextLabel
+var controls_lbl: Label
+
 func _build_hud() -> void:
 	var ui := CanvasLayer.new()
 	add_child(ui)
 	ui_layer = ui
-	hud = Label.new()
-	hud.position = Vector2(14, 10)
-	hud.add_theme_color_override("font_color", Color(0.95, 0.93, 0.85))
-	hud.add_theme_font_size_override("font_size", 15)
+	# top status bar
+	var bar := ColorRect.new()
+	bar.color = Color(0.06, 0.07, 0.10, 0.72)
+	bar.anchor_right = 1.0
+	bar.offset_bottom = 80
+	bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ui.add_child(bar)
+	hud = RichTextLabel.new()
+	hud.bbcode_enabled = true
+	hud.scroll_active = false
+	hud.position = Vector2(16, 8)
+	hud.size = Vector2(1400, 28)
+	hud.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	ui.add_child(hud)
+	# the orders banner, just under the bar
+	orders_lbl = RichTextLabel.new()
+	orders_lbl.bbcode_enabled = true
+	orders_lbl.scroll_active = false
+	orders_lbl.fit_content = true
+	orders_lbl.position = Vector2(16, 48)
+	orders_lbl.size = Vector2(900, 28)
+	orders_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ui.add_child(orders_lbl)
+	# the war diary, bottom-left
 	feed = RichTextLabel.new()
 	feed.bbcode_enabled = true
 	feed.scroll_active = false
 	feed.position = Vector2(14, 0)
 	feed.anchor_top = 1.0
 	feed.anchor_bottom = 1.0
-	feed.offset_top = -190
+	feed.offset_top = -184
 	feed.offset_bottom = -12
 	feed.custom_minimum_size = Vector2(640, 0)
-	feed.size = Vector2(640, 178)
+	feed.size = Vector2(640, 172)
+	feed.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	ui.add_child(feed)
+	# controls hint, bottom-right, dim
+	controls_lbl = Label.new()
+	controls_lbl.add_theme_color_override("font_color", Color(0.65, 0.68, 0.74))
+	controls_lbl.add_theme_font_size_override("font_size", 12)
+	controls_lbl.anchor_top = 1.0
+	controls_lbl.anchor_bottom = 1.0
+	controls_lbl.anchor_left = 1.0
+	controls_lbl.anchor_right = 1.0
+	controls_lbl.offset_left = -520
+	controls_lbl.offset_top = -26
+	controls_lbl.offset_right = -12
+	controls_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	controls_lbl.text = "click: march   ·   WASD/edge: pan   ·   wheel: zoom   ·   RMB: rotate   ·   C: centre   ·   1/2/3: speed   ·   Esc: menu"
+	ui.add_child(controls_lbl)
 
 # ------------------------------------------------------------------ the war
 
 func _process(delta: float) -> void:
+	anim_t += delta
 	var dt := delta * tscale
 	clock += dt / 3600.0          # REAL TIME: one game hour per real hour
 	if clock >= 24.0:
@@ -640,7 +733,9 @@ func _process(delta: float) -> void:
 	_update_factions(dt)
 	_update_tokens(dt)
 	_update_capture(dt)
-	_update_life(dt)
+	# (wildlife/civilians/road traffic are disabled on the operational map)
+	if player_tok != null:
+		objective_si = fac_goal[player_tok.faction]   # your army's main effort = your orders
 	# meeting the enemy forms a battle on its own — no keypress. March clear before the
 	# dwell elapses to slip the engagement; hold contact and the lines lock and zoom in.
 	if player_tok == null or player_tok.state != "fight":
@@ -652,14 +747,13 @@ func _process(delta: float) -> void:
 			_inflate(pending)
 			return
 	_render_tokens()
+	_render_settlements()
 	_update_marker()
 	_update_hud()
 	_cam_move(delta)
 
 func _update_sun() -> void:
-	var elev := sin((clock - 6.0) / 12.0 * PI)
-	sun.rotation = Vector3(-maxf(0.05, elev) * 1.3, 0.6, 0)
-	sun.light_energy = clampf(elev * 0.7 + 0.7, 0.5, 1.2)   # the map stays readable at night
+	pass   # the map is flat-lit (unshaded); the clock still turns but the paper never dims
 
 # the operational appreciation: each faction periodically scores the settlements
 # (value x feasibility, hysteresis on the standing objective) and points its idle
@@ -939,7 +1033,27 @@ func _make_cart() -> Node3D:
 
 # ------------------------------------------------------------------ rendering
 
-# draw each battalion as a map counter (block + base plate) with a floating label
+# colour each town by who holds it; pulse the one you're ordered to take
+func _render_settlements() -> void:
+	for si in range(settlements.size()):
+		var s := settlements[si]
+		var col := Color(0.55, 0.55, 0.58)        # neutral
+		if s.owner == 0:
+			col = FACTION_COLS[0]
+		elif s.owner == 1:
+			col = FACTION_COLS[1]
+		var disc := settlement_discs[si]
+		var mat: StandardMaterial3D = disc.material_override
+		if si == objective_si:
+			var pulse := 0.5 + 0.5 * sin(anim_t * 4.0)
+			mat.albedo_color = col.lerp(Color(1.0, 0.85, 0.2), 0.55)
+			disc.scale = Vector3.ONE * (1.0 + 0.14 * pulse)
+		else:
+			mat.albedo_color = col
+			disc.scale = Vector3.ONE
+		settlement_labels[si].modulate = (Color(0.95, 0.95, 0.85) if s.owner < 0 else col.lightened(0.45))
+
+# draw each battalion as a map counter (NATO symbol + base plate) with a label
 func _render_tokens() -> void:
 	var li := 0
 	for f in range(2):
@@ -951,13 +1065,16 @@ func _render_tokens() -> void:
 				continue
 			if i >= mm.instance_count:
 				break
-			var yaw := atan2(t.dir.x, t.dir.z)
-			var basis := Basis(Vector3.UP, yaw)
-			# a routing unit's counter sits askew and low; a steady one stands square
-			var lift := 3.0 if t.state == "rout" else 6.0
-			mm.set_instance_transform(i, Transform3D(basis, t.pos + Vector3(0, lift, 0)))
-			fm.set_instance_transform(i, Transform3D(basis, t.pos + Vector3(0, 1.5, 0)))
-			fm.set_instance_color(i, Color(0.95, 0.8, 0.25) if t.is_player else Color(0.1, 0.1, 0.12))
+			# NATO counters stand north-up (not rotated to facing); a routing unit's
+			# counter tilts to read as broken
+			var basis := Basis()
+			if t.state == "rout":
+				basis = Basis(Vector3(0, 0, 1), 0.5)
+			mm.set_instance_transform(i, Transform3D(basis, t.pos + Vector3(0, 7, 0)))
+			fm.set_instance_transform(i, Transform3D(Basis(), t.pos + Vector3(0, 4, 0)))
+			var base_col := Color(0.95, 0.8, 0.25) if t.is_player else (
+				Color(0.85, 0.78, 0.66) if t.faction == 0 else Color(0.7, 0.74, 0.85))
+			fm.set_instance_color(i, base_col)
 			if li < token_labels.size():
 				var lb := token_labels[li]
 				lb.visible = true
@@ -979,16 +1096,22 @@ func _update_hud() -> void:
 	var men := [0, 0]
 	for t in tokens:
 		men[t.faction] += int(t.men)
-	var pline := ""
-	if player_tok != null:
-		pline = "      You: %s — %d men" % [player_tok.name, int(player_tok.men)]
-		if pending != null:
-			pline += "   ⚔ ENEMY MET — THE LINES ARE FORMING (march clear to slip away)"
-	var controls := "Click: march your battalion · WASD/edge: pan · wheel: zoom · RMB-drag: rotate · C: centre on you · 1/2/3: speed · Esc: menu"
-	hud.text = "Day %d — %02d:%02d      %s: %d towns, %d men      %s: %d towns, %d men      [%s]%s\n%s" % [
+	var spd := "real time" if tscale <= 1.0 else "preview ×%d" % int(tscale)
+	hud.text = "[b]Day %d[/b]   %02d:%02d   ·   [color=#d07068]%s[/color]  %d towns · %d men      [color=#7a93ea]%s[/color]  %d towns · %d men      [color=#8f98a8]· %s ·[/color]" % [
 		day, int(clock), int(fposmod(clock, 1.0) * 60.0),
-		FACTION_NAMES[0], hold[0], men[0], FACTION_NAMES[1], hold[1], men[1],
-		("real time" if tscale <= 1.0 else "preview x%d" % int(tscale)), pline, controls]
+		FACTION_NAMES[0], hold[0], men[0], FACTION_NAMES[1], hold[1], men[1], spd]
+	# the orders banner — the player's direction
+	var ot := ""
+	if pending != null:
+		ot = "[color=#ff7a6a][b]⚔ ENEMY MET[/b] — the lines are forming.  March clear to slip away.[/color]"
+	elif player_tok == null:
+		ot = "[color=#caa6a0]Your battalion is no more — you observe the war.[/color]"
+	elif objective_si >= 0:
+		ot = "[color=#ffd24a][b]ORDERS:[/b][/color] the army's main effort is [b]%s[/b] — bring the %s up in support.    [color=#8f98a8]You: %d men[/color]" % [
+			settlements[objective_si].name, player_tok.name, int(player_tok.men)]
+	else:
+		ot = "[color=#8f98a8]Awaiting orders from headquarters…    You: %s, %d men[/color]" % [player_tok.name, int(player_tok.men)]
+	orders_lbl.text = ot
 
 func _event(msg: String) -> void:
 	feed_lines.append("[color=#8a93a6]Day %d %02d:%02d[/color]  %s" % [day, int(clock), int(fposmod(clock, 1.0) * 60.0), msg])
