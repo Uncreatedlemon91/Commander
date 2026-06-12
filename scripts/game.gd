@@ -411,6 +411,12 @@ var _dmg_flash := 0.0             # red screen pulse when you take a hit
 var _dmg_rect: ColorRect
 
 var cam: Camera3D
+# --- HOST MODE (seam merge, staged): the tactical sim running INSIDE world.gd,
+# sharing its province terrain, chase camera and day/night instead of building
+# its own. Defaults off, so the standalone 70k battle is byte-for-byte unchanged.
+var hosted := false
+var host_origin := Vector3.ZERO    # where on the province this battle is fought (set as node pos)
+var host_done := false             # set true when an embedded battle is resolved & dismissed
 var _cam_yaw := PI                 # start looking from behind you toward the enemy
 var _cam_pitch := deg_to_rad(28.0) # 3rd-person orbit elevation (camera height)
 var _scope_pitch := 0.0            # spyglass look elevation (0 = level, + = up)
@@ -543,6 +549,7 @@ const FOV_NORMAL := 60.0
 const FOV_SCOPE := 16.0
 
 var _setup: BattleSetup            # the seam: the world this battle was handed
+var _inflated: bool = false        # this battle was inflated from a campaign engagement
 
 func _ready() -> void:
 	authoritative = GameConfig.mode != "client"
@@ -551,17 +558,19 @@ func _ready() -> void:
 	if GameConfig.setup == null:
 		GameConfig.setup = BattleSetup.default_field()
 	_setup = GameConfig.setup
+	_inflated = _setup.units.size() > 0    # a campaign engagement, not the 70k set-piece
 	_weather = _setup.weather
 	_time_of_day = _setup.time_of_day
 	_build_world()
-	_build_scenery()
+	if not hosted:
+		_build_scenery()            # host uses the province's own woods & fields
 	_build_officer()
 	_build_wounded_layer()
 	_spawn_armies()
 	_build_guns()
 	_spawn_cavalry()
 	_assign_brigades()
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED   # the battle owns the mouse once joined
 
 # ------------------------------------------------------------------ world
 
@@ -597,7 +606,8 @@ func _build_world() -> void:
 	env.adjustment_contrast = 1.07
 	env.adjustment_saturation = 1.14
 	we.environment = env
-	add_child(we)
+	if not hosted:                  # the province supplies sky, fog and grade
+		add_child(we)
 	_build_tod_palette()
 
 	sun = DirectionalLight3D.new()
@@ -609,7 +619,8 @@ func _build_world() -> void:
 	sun.directional_shadow_blend_splits = true
 	sun.shadow_blur = 1.1
 	sun.light_angular_distance = 0.6              # soft penumbra
-	add_child(sun)
+	if not hosted:                  # the province supplies the sun
+		add_child(sun)
 
 	var ground := MeshInstance3D.new()
 	var pm := PlaneMesh.new()
@@ -617,7 +628,8 @@ func _build_world() -> void:
 	ground.mesh = pm
 	ground_mat = _make_ground_material()
 	ground.material_override = ground_mat
-	add_child(ground)
+	if not hosted:                  # the province supplies the ground
+		add_child(ground)
 
 	rain_p = _build_rain()
 
@@ -920,6 +932,8 @@ func _build_world() -> void:
 		add_child(ap)
 		_audio_pool.append(ap)
 
+	# the battle builds its own camera even when hosted — as a child of this node it
+	# rides in local space, and the node's world position drops it on the province
 	cam = Camera3D.new()
 	cam.fov = 60.0
 	cam.far = 8000.0                  # see the distant hills on the horizon
@@ -1582,6 +1596,9 @@ func _build_officer() -> void:
 # ------------------------------------------------------------------ armies
 
 func _spawn_armies() -> void:
+	if _inflated:
+		_spawn_from_setup()
+		return
 	# which battalion indices are human-led (host knows all; single = just you)
 	var humans: Array = [GameConfig.local_slot]
 	if GameConfig.mode == "host":
@@ -1654,6 +1671,62 @@ func _spawn_armies() -> void:
 				_reslot(player)
 	if player == null:
 		player = battalions[clampi(GameConfig.local_slot, 0, battalions.size() - 1)]
+
+# INFLATION (Phase 2): spawn exactly the battalions the campaign engagement
+# involves, each carrying its real history. Positions come authored from the
+# world (the two forces already facing each other), so the fight begins in
+# contact rather than from a fresh deployment.
+func _spawn_from_setup() -> void:
+	for ui in range(_setup.units.size()):
+		var u: BattleSetup.BattUnit = _setup.units[ui]
+		var team := u.team
+		var face: float = u.facing
+		var b := Batt.new()
+		b.team = team
+		b.idx = ui
+		b.pos = u.pos
+		b.spawn = b.pos
+		b.facing = face
+		b.formation = "line"                 # they meet already deployed for the fight
+		b.off_facing = face
+		b.off_pos = b.pos + Vector3(sin(face), 0, cos(face)) * 14.0
+		b.human = (u.human_slot == GameConfig.local_slot)
+		b.is_player = b.human
+		b.companies = 6 if team == 0 else 10
+		b.ammo = u.ammo
+		b.morale = u.morale
+		b.exp_mul = clampf(2.0 - u.experience, 0.72, 1.45)
+		b.rname = u.name
+		b.inst_col = Color(u.facing_col.r, u.facing_col.g, u.facing_col.b, float(u.coat_idx) / 3.0)
+		b.last_pos = b.pos
+		var mp := AudioStreamPlayer3D.new()
+		mp.max_distance = 700.0
+		mp.unit_size = 14.0
+		mp.volume_db = 4.0
+		add_child(mp)
+		b.march_player = mp
+		_fill_figs(b)
+		while b.figs.size() > u.men and b.figs.size() > 0:
+			b.figs.pop_back()                # the survivors who marched here, no more
+		_start_strength[team] += b.figs.size()
+		_make_flag(b, team)
+		battalions.append(b)
+		if b.is_player:
+			player = b
+			player.order = Order.IDLE
+			off_pos = b.pos - Vector3(sin(face), 0, cos(face)) * 8.0
+			off_facing = face
+			off_vis = face
+			_cam_yaw = face + PI
+			_reslot(player)
+	if player == null and not battalions.is_empty():
+		# no friendly human unit present — watch as an observer attached to team 0
+		for b in battalions:
+			if b.team == 0:
+				player = b
+				break
+	# an inflated meeting engagement needs no long deployment lull
+	_deploy_t = minf(_deploy_t, 12.0)
 
 func _make_flag(b: Batt, team: int) -> void:
 	b.flag = Node3D.new()
@@ -1839,7 +1912,7 @@ func _build_guns() -> void:
 	for team in [0, 1]:
 		var zline := -262.0 if team == 0 else 262.0   # posted behind the line of battle
 		var face := 0.0 if team == 0 else PI
-		for bi in range(BATTERIES_PER_TEAM):
+		for bi in range(0 if _inflated else BATTERIES_PER_TEAM):   # v1 inflation: foot only
 			# batteries spread across the whole army front, behind the first line
 			var bx := (float(bi) - (BATTERIES_PER_TEAM - 1) * 0.5) * 640.0
 			var span := (GUNS_PER_BATTERY - 1) * GUN_SPACING
@@ -2124,7 +2197,7 @@ func _gun_fire_cav(g: Gun, c: Cav) -> void:
 	var fwd := Vector3(sin(g.facing), 0, cos(g.facing))
 	var muzzle := g.pos + fwd * 1.5 + Vector3(0, 0.95, 0)
 	g.recoil = 0.55
-	var near := cam != null and cam.global_position.distance_to(g.pos) < LOD_VFAR
+	var near := cam != null and cam.position.distance_to(g.pos) < LOD_VFAR
 	if g.node and near:
 		_emit_flash(muzzle)
 		_emit_flash(muzzle)
@@ -2133,7 +2206,7 @@ func _gun_fire_cav(g: Gun, c: Cav) -> void:
 			_emit_gun_smoke(muzzle + fwd * randf_range(0.0, 0.8), fwd)
 		_muzzle_light(muzzle)
 	_play_cannon(muzzle)
-	var prox := clampf(1.0 - cam.global_position.distance_to(g.pos) / 160.0, 0.0, 1.0) if cam else 0.0
+	var prox := clampf(1.0 - cam.position.distance_to(g.pos) / 160.0, 0.0, 1.0) if cam else 0.0
 	if prox > 0.0:
 		_shake = minf(_shake + prox * 0.6, SHAKE_MAX)
 	_cav_lose(c, randi_range(4, 9), near)
@@ -2170,7 +2243,7 @@ func _gun_fire(g: Gun, foe: Batt) -> void:
 	var d := g.pos.distance_to(foe.pos)
 	# muzzle blast: a deep gout of flame and smoke, a stab of light, a heavy report
 	g.recoil = 0.55
-	if g.node and cam.global_position.distance_to(g.pos) < LOD_VFAR:
+	if g.node and cam.position.distance_to(g.pos) < LOD_VFAR:
 		_emit_flash(muzzle)
 		_emit_flash(muzzle)
 		_emit_fire(muzzle, fwd)
@@ -2180,7 +2253,7 @@ func _gun_fire(g: Gun, foe: Batt) -> void:
 			_emit_gun_smoke(muzzle + fwd * randf_range(0.0, 0.8), fwd)
 		_muzzle_light(muzzle)
 	_play_cannon(muzzle)
-	var prox := clampf(1.0 - cam.global_position.distance_to(g.pos) / 160.0, 0.0, 1.0)
+	var prox := clampf(1.0 - cam.position.distance_to(g.pos) / 160.0, 0.0, 1.0)
 	if prox > 0.0:
 		_shake = minf(_shake + prox * 0.6, SHAKE_MAX)
 		_flash_amt = minf(_flash_amt + prox * 0.14, 0.32)
@@ -2223,7 +2296,7 @@ func _play_cannon(pos: Vector3) -> void:
 	var ap: AudioStreamPlayer3D = _audio_pool[_audio_i]
 	_audio_i = (_audio_i + 1) % AUDIO_POOL
 	ap.stream = stream
-	ap.global_position = pos
+	ap.global_position = to_global(pos)
 	ap.volume_db = 16.0
 	ap.pitch_scale = randf_range(0.92, 1.06)
 	ap.play()
@@ -2420,7 +2493,7 @@ func _update_marching_drums(_delta: float) -> void:
 		var moved := b.pos.distance_to(b.last_pos)
 		b.last_pos = b.pos
 		var moving := moved > 0.004 and not b.spent and b.state != "routing" and not b.drummer_down
-		var near := cam.global_position.distance_to(b.pos) < 950.0   # drums carry down the line
+		var near := cam.position.distance_to(b.pos) < 950.0   # drums carry down the line
 		if moving and near:
 			if not b.marching:
 				b.marching = true                                  # struck up on the move
@@ -2429,7 +2502,7 @@ func _update_marching_drums(_delta: float) -> void:
 				mp.play()
 			elif not mp.playing:
 				mp.play()                                          # keep it going while marching
-			mp.global_position = b.pos + Vector3(0, 1.0, 0)
+			mp.global_position = to_global(b.pos + Vector3(0, 1.0, 0))
 		elif b.marching or mp.playing:
 			b.marching = false
 			mp.stop()                                              # halted — the drum stops
@@ -2449,7 +2522,7 @@ func _update_drums(delta: float) -> void:
 	var ap: AudioStreamPlayer3D = _audio_pool[_audio_i]
 	_audio_i = (_audio_i + 1) % AUDIO_POOL
 	ap.stream = snd_drum
-	ap.global_position = off_pos + Vector3(0, 1.0, 0)
+	ap.global_position = to_global(off_pos + Vector3(0, 1.0, 0))
 	ap.volume_db = lerpf(4.0, -7.0, 1.0 - m)
 	ap.pitch_scale = randf_range(0.98, 1.02)
 	ap.play()
@@ -3089,7 +3162,7 @@ func _spawn_cavalry() -> void:
 		var z := -320.0 if team == 0 else 320.0
 		var face := 0.0 if team == 0 else PI
 		var half := maxi(1, CAV_PER_TEAM / 2)
-		for r in range(CAV_PER_TEAM):
+		for r in range(0 if _inflated else CAV_PER_TEAM):   # v1 inflation: foot only
 			var c := Cav.new()
 			c.team = team
 			c.idx = team * CAV_PER_TEAM + r
@@ -3138,7 +3211,7 @@ func _update_cavalry(delta: float) -> void:
 					c.hoof_player.stream = snd_hooves
 					c.hoof_player.pitch_scale = randf_range(0.95, 1.05)
 					c.hoof_player.play()
-				c.hoof_player.global_position = c.pos + Vector3(0, 1.0, 0)
+				c.hoof_player.global_position = to_global(c.pos + Vector3(0, 1.0, 0))
 			elif c.hoof_player.playing:
 				c.hoof_player.stop()
 		c.decide_cd -= delta
@@ -3256,7 +3329,7 @@ func _cav_decide(c: Cav) -> void:
 
 # The moment of impact.
 func _cav_resolve(c: Cav) -> void:
-	var near := cam != null and cam.global_position.distance_to(c.pos) < LOD_VFAR
+	var near := cam != null and cam.position.distance_to(c.pos) < LOD_VFAR
 	var clash := c.pos + Vector3(0, 1.0, 0)
 	match c.target_kind:
 		"batt":
@@ -3297,7 +3370,7 @@ func _cav_resolve(c: Cav) -> void:
 			e.state = "retiring"
 	if near:
 		_play_melee(clash)
-		var prox := clampf(1.0 - cam.global_position.distance_to(c.pos) / 140.0, 0.0, 1.0)
+		var prox := clampf(1.0 - cam.position.distance_to(c.pos) / 140.0, 0.0, 1.0)
 		_shake = minf(_shake + prox * 0.5, SHAKE_MAX)
 	c.state = "retiring"                                # blown — retire and rally
 	c.target = null
@@ -3416,8 +3489,16 @@ func _add_dead_horse(pos: Vector3, yaw: float, _team: int) -> void:
 func _assign_brigades() -> void:
 	_build_dead_horses()
 	brigades.clear()
+	# data-driven: chunk each team's battalions (in spawn order) into brigades. For
+	# the 70k field this reproduces the fixed-index OOB exactly; for an inflated
+	# campaign force of any size it just works from whatever spawned.
 	for team in [0, 1]:
-		for bri in range(BRIGADES_PER_TEAM):
+		var mine: Array = []
+		for b in battalions:
+			if b.team == team:
+				mine.append(b)
+		var nbri: int = int(ceil(float(mine.size()) / float(BATTS_PER_BRIGADE)))
+		for bri in range(nbri):
 			var br := Brigade.new()
 			br.team = team
 			br.idx = team * BRIGADES_PER_TEAM + bri
@@ -3425,13 +3506,15 @@ func _assign_brigades() -> void:
 			br.corps = br.division / DIVISIONS_PER_CORPS
 			br.line2 = (br.division % DIVISIONS_PER_CORPS) == 1   # the corps' second line
 			for k in range(BATTS_PER_BRIGADE):
-				var gi: int = team * BATT_PER_TEAM + bri * BATTS_PER_BRIGADE + k
-				if gi < battalions.size():
-					var b: Batt = battalions[gi]
+				var gi: int = bri * BATTS_PER_BRIGADE + k
+				if gi < mine.size():
+					var b: Batt = mine[gi]
 					b.brigade = br
 					br.battalions.append(b)
 					if b.is_player:
 						br.is_player = true
+			if br.battalions.is_empty():
+				continue
 			br.anchor = _live_center(br.battalions)
 			br.objective = br.anchor
 			br.facing = 0.0 if team == 0 else PI
@@ -4099,7 +4182,7 @@ func _sim_charge(b: Batt, delta: float) -> void:
 		b.pos += to.normalized() * CHARGE_SPEED * delta
 		return
 	# impact: shock felt by the camera + a clash of steel
-	var prox := clampf(1.0 - cam.global_position.distance_to(b.pos) / 120.0, 0.0, 1.0)
+	var prox := clampf(1.0 - cam.position.distance_to(b.pos) / 120.0, 0.0, 1.0)
 	if prox > 0.0:
 		_shake = minf(_shake + prox * 0.5, SHAKE_MAX)
 		_flash_amt = minf(_flash_amt + prox * 0.12, 0.3)
@@ -4333,7 +4416,7 @@ func _drop_fig(b: Batt, idx: int, dir: Vector3) -> void:
 
 # returns render stride (1/2/3) or 0 to skip entirely (off-screen / too far)
 func _batt_lod(b: Batt) -> int:
-	var d := cam.global_position.distance_to(b.pos)
+	var d := cam.position.distance_to(b.pos)
 	if d > LOD_VFAR:
 		return 0
 	var seen := d < 80.0
@@ -4617,7 +4700,7 @@ func team_color(team: int) -> Color:
 func _drop_dead(pos: Vector3, team: int, knock_dir: Vector3, seen: bool) -> void:
 	# the expensive theatrics (blood, ragdolls, crawling wounded) are reserved for
 	# deaths NEAR the camera; the far battle still fills with corpses, cheaply
-	if seen and cam != null and cam.global_position.distance_to(pos) > 280.0:
+	if seen and cam != null and cam.position.distance_to(pos) > 280.0:
 		seen = false
 	if seen:
 		_emit_blood(pos, knock_dir)          # a spray of blood at the moment of the hit
@@ -4729,7 +4812,7 @@ func _spawn_ragdoll(pos: Vector3, team: int, knock_dir: Vector3) -> bool:
 	rb.freeze = true
 	# start already toppling away from the fire so the capsule can't stand on its end
 	var basis := Basis(perp, randf_range(0.5, 0.9)) * Basis(Vector3.UP, randf() * TAU)
-	rb.global_transform = Transform3D(basis, Vector3(pos.x, CAP_HALF + 0.05, pos.z))
+	rb.global_transform = Transform3D(basis, to_global(Vector3(pos.x, CAP_HALF + 0.05, pos.z)))
 	rb.freeze = false
 	rb.linear_velocity = kd * randf_range(1.5, 3.0) + Vector3(0, randf_range(1.0, 2.2), 0)
 	# a strong tumble (mostly about the topple axis) guarantees he goes down flat
@@ -4746,7 +4829,7 @@ func _update_ragdolls(delta: float) -> void:
 		if float(r["t"]) > RAGDOLL_TIME or settled:
 			# always bake a body LYING FLAT on the ground at his final spot, so nobody
 			# is ever frozen mid-stand
-			_add_corpse(rb.global_position, rb.rotation.y, int(r["team"]))
+			_add_corpse(to_local(rb.global_position), rb.rotation.y, int(r["team"]))
 			rb.freeze = true
 			rb.position = Vector3(0, -200, 0)
 			r["active"] = false
@@ -4876,7 +4959,7 @@ func _show_bill() -> void:
 	var pcol := "9fe0a0" if prestige >= 0 else "ff9a8a"
 	var txt := "[center][b]%s[/b]\n" % title
 	txt += "[color=#6f7888]——————————————[/color]\n"
-	var cav_start := CAV_PER_TEAM * CAV_MEN
+	var cav_start := (0 if _inflated else CAV_PER_TEAM * CAV_MEN)
 	txt += "[color=#cdd6e6]Our losses[/color]  [color=#ffe9a8]%d[/color] of %d men · %d horse · %d guns silenced\n" \
 		% [_start_strength[pt] - men_now[pt], _start_strength[pt], cav_start - horse_now[pt], guns_lost[pt]]
 	txt += "[color=#cdd6e6]Theirs[/color]  [color=#ffe9a8]%d[/color] of %d men · %d horse · %d guns silenced\n" \
@@ -5040,7 +5123,7 @@ func _update_cam(delta: float) -> void:
 	var scope_pos := target + look_dir * 0.6
 	cam.position = orbit_pos.lerp(scope_pos, _scope_amt)
 	var look_pt := target.lerp(target + look_dir * 80.0, _scope_amt)
-	cam.look_at(look_pt, Vector3.UP)
+	cam.look_at(to_global(look_pt), Vector3.UP)   # to_global = identity at origin, offset-safe when hosted
 	if _shake > 0.001:
 		cam.position += Vector3(randf_range(-1, 1), randf_range(-1, 1), randf_range(-1, 1)) * _shake
 
@@ -5115,7 +5198,12 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_ENTER:
 				if battle_over and _bill_panel and _bill_panel.visible:
 					Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-					get_tree().change_scene_to_file("res://menu.tscn")   # the day is done
+					if hosted:
+						host_done = true     # the world frees this battle and resumes the war
+					elif GameConfig.return_to_world:   # interim scene-swap path
+						get_tree().change_scene_to_file("res://world.tscn")
+					else:
+						get_tree().change_scene_to_file("res://menu.tscn")   # the day is done
 				elif authoritative and not _battle_begun:
 					_begin_battle()       # advance the step-off
 			KEY_E:
@@ -5245,18 +5333,18 @@ func _apply_net_order(b: Batt, o: Dictionary) -> void:
 # Light up the firing line, shake the camera, and wash the screen for a near volley.
 func _volley_cinematic(b: Batt, pts: Array) -> void:
 	# dynamic lights only for volleys near enough to light anything you can see
-	if cam != null and cam.global_position.distance_to(b.pos) > 420.0:
+	if cam != null and cam.position.distance_to(b.pos) > 420.0:
 		return
 	var n := mini(6, pts.size())
 	for k in range(n):
 		var p: Vector3 = pts[(k * pts.size()) / n]
 		var l: OmniLight3D = _lights[_light_i]
 		_light_i = (_light_i + 1) % _lights.size()
-		l.global_position = p + Vector3(0, 0.4, 0)
+		l.global_position = to_global(p + Vector3(0, 0.4, 0))
 		l.light_color = Color(1.0, 0.78, 0.45)
 		l.light_energy = 7.5 + _night * 9.0
 		l.omni_range = 18.0 + _night * 12.0
-	var d := cam.global_position.distance_to(b.pos)
+	var d := cam.position.distance_to(b.pos)
 	var prox := clampf(1.0 - d / 130.0, 0.0, 1.0)
 	if prox > 0.0:
 		# a felt "suppress": a gentle camera tremor and a smoky vignette closing in,
@@ -5485,7 +5573,7 @@ func _emit_muzzle_bloom(pos: Vector3, fwd: Vector3) -> void:
 			Color(3.4 * bright, 1.9 * bright, 0.7 * bright), Color.WHITE, BLOOM_FLAGS)
 	# at night a real flash of light leaps from the muzzle (pooled, so only the nearest
 	# shots throw light — which is plenty for the flicker across a firing line)
-	if _night > 0.25 and cam and cam.global_position.distance_to(pos) < 110.0:
+	if _night > 0.25 and cam and cam.position.distance_to(pos) < 110.0:
 		var l: OmniLight3D = _lights[_light_i]
 		_light_i = (_light_i + 1) % _lights.size()
 		l.position = pos
@@ -5555,12 +5643,12 @@ func _load_first(names: Array) -> AudioStream:
 func _play_voice(stream: AudioStream, pos: Vector3, reach := 130.0) -> void:
 	if stream == null or cam == null:
 		return
-	if cam.global_position.distance_to(pos) > reach:
+	if cam.position.distance_to(pos) > reach:
 		return
 	var ap: AudioStreamPlayer3D = _audio_pool[_audio_i]
 	_audio_i = (_audio_i + 1) % AUDIO_POOL
 	ap.stream = stream
-	ap.global_position = pos + Vector3(0, 1.6, 0)
+	ap.global_position = to_global(pos + Vector3(0, 1.6, 0))
 	ap.volume_db = 6.0
 	ap.pitch_scale = randf_range(0.96, 1.04)
 	ap.play()
@@ -5571,7 +5659,7 @@ func _play_volley(pos: Vector3) -> void:
 	var ap: AudioStreamPlayer3D = _audio_pool[_audio_i]
 	_audio_i = (_audio_i + 1) % AUDIO_POOL
 	ap.stream = snd_volley[randi() % snd_volley.size()]
-	ap.global_position = pos
+	ap.global_position = to_global(pos)
 	ap.volume_db = 11.0
 	ap.pitch_scale = randf_range(0.9, 1.1)   # wider variation = raggeder volley
 	ap.play()
@@ -5582,7 +5670,7 @@ func _play_melee(pos: Vector3) -> void:
 	var ap: AudioStreamPlayer3D = _audio_pool[_audio_i]
 	_audio_i = (_audio_i + 1) % AUDIO_POOL
 	ap.stream = snd_melee
-	ap.global_position = pos
+	ap.global_position = to_global(pos)
 	ap.volume_db = 8.0
 	ap.pitch_scale = randf_range(0.95, 1.05)
 	ap.play()
@@ -5594,7 +5682,7 @@ func _play_shot(pos: Vector3) -> void:
 	var ap: AudioStreamPlayer3D = _audio_pool[_audio_i]
 	_audio_i = (_audio_i + 1) % AUDIO_POOL
 	ap.stream = snd_shots[randi() % snd_shots.size()]
-	ap.global_position = pos
+	ap.global_position = to_global(pos)
 	ap.volume_db = -3.0
 	ap.pitch_scale = randf_range(0.92, 1.12)
 	ap.play()
@@ -5955,7 +6043,7 @@ func _client_volley(b: Batt) -> void:
 
 func _client_melee(pos: Vector3) -> void:
 	_play_melee(pos)
-	var prox := clampf(1.0 - cam.global_position.distance_to(pos) / 120.0, 0.0, 1.0)
+	var prox := clampf(1.0 - cam.position.distance_to(pos) / 120.0, 0.0, 1.0)
 	if prox > 0.0:
 		_shake = minf(_shake + prox * 0.5, SHAKE_MAX)
 		_flash_amt = minf(_flash_amt + prox * 0.12, 0.3)

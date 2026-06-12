@@ -13,3 +13,9 @@ var battle_goal: String = ""
 # THE SEAM: the campaign/menu/host authors a BattleSetup here before loading the
 # battle; game.gd consumes it and writes `result` + survivor states back into it.
 var setup = null   # : BattleSetup (null -> the battle builds a default field)
+
+# PHASE 2 — inflation handoff. The province (world.gd) survives the scene change
+# to the battle and back inside these (this autoload persists across scenes).
+var return_to_world: bool = false   # battle should return to world.tscn, not the menu
+var world_state: Dictionary = {}    # the whole province, serialized across the battle
+var battle_tokens: Array = []       # ids of the world tokens that inflated into this battle

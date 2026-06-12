@@ -144,6 +144,11 @@ func _on_single() -> void:
 	_enter_select()
 
 func _on_world() -> void:
+	# a fresh province — discard any stowed campaign and battle handoff state
+	GameConfig.world_state = {}
+	GameConfig.return_to_world = false
+	GameConfig.setup = null
+	GameConfig.battle_tokens = []
 	get_tree().change_scene_to_file("res://world.tscn")
 
 # ------------------------------------------------- battalion select (the OOB)

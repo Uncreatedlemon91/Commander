@@ -23,6 +23,12 @@ const ENGAGE_RANGE := 220.0       # opposing columns this close lock into a figh
 const CAPTURE_RANGE := 120.0
 const FACTION_NAMES := ["The Crown", "The Continentals"]
 const FACTION_COLS := [Color(0.74, 0.28, 0.26), Color(0.30, 0.40, 0.80)]
+# regimental facings, mirrored from the tactical sim so a token's dress carries
+# unchanged into its inflated battle
+const FACINGS_0 := [Color(0.95, 0.92, 0.85), Color(0.85, 0.15, 0.15), Color(0.92, 0.80, 0.15),
+	Color(0.65, 0.10, 0.35), Color(0.95, 0.50, 0.12), Color(0.45, 0.70, 0.90)]
+const FACINGS_1 := [Color(0.92, 0.85, 0.30), Color(0.20, 0.45, 0.20), Color(0.10, 0.15, 0.40),
+	Color(0.95, 0.95, 0.92), Color(0.55, 0.12, 0.45), Color(0.05, 0.05, 0.06)]
 
 # ------------------------------------------------------------------ data
 
@@ -35,6 +41,7 @@ class Settlement:
 	var cart_cd: float = 0.0
 
 class Token:                      # one battalion, as the world sees it
+	var id: int = 0               # stable across the inflation scene-change
 	var name: String
 	var faction: int
 	var men: float = 700.0
@@ -47,6 +54,9 @@ class Token:                      # one battalion, as the world sees it
 	var enemy: Token = null
 	var brigade: int = 0
 	var smoke_cd: float = 0.0
+	var is_player: bool = false   # the battalion the player commands
+	var facing_col: Color = Color.WHITE
+	var coat_idx: int = 0
 
 class Cart:
 	var node: Node3D
@@ -58,6 +68,16 @@ var settlements: Array[Settlement] = []
 var roads: Array = []             # [i, j] settlement index pairs
 var adj: Dictionary = {}          # settlement idx -> Array of neighbour idx
 var tokens: Array[Token] = []
+var next_id := 1
+var player_tok: Token = null      # the battalion the player commands
+var pending: Token = null         # enemy token the player has met, awaiting "give battle"
+var follow := false               # camera rides above the player's column
+var in_battle := false            # a hosted tactical battle is live on the province
+var battle_sim: Node3D = null     # the embedded game.gd instance
+var ui_layer: CanvasLayer         # the campaign HUD layer (hidden during a battle)
+var ground_mi: MeshInstance3D     # the province ground (kept visible under a battle)
+var contact_t := 0.0              # dwell since meeting the enemy; battle forms on its own
+const CONTACT_DELAY := 1.3        # seconds in contact before the lines engage (no F needed)
 var carts: Array[Cart] = []
 var civs: Array = []              # { home: int, pos, tgt }
 var deer: Array = []              # { pos, tgt, flee }
@@ -71,13 +91,28 @@ var tscale := 1.0                 # DEV ONLY preview speed (keys 1/2/3)
 var cam: Camera3D
 var cam_yaw := 0.0
 var cam_pitch := -0.5
+
+# --- the mounted officer: how the player actually moves through the province ---
+# (third person is the game; the overhead free-fly below is a DEV view only)
+var ride_mode := false            # (legacy ride removed; kept false so the map marker shows)
+var officer: Node3D
+var off_pos := Vector3.ZERO
+var off_yaw := 0.0                # the horse's heading
+var off_speed := 0.0             # current pace, m/s
+var look_yaw := 0.0              # free-look offset around the horse
+var look_pitch := -0.05
+var gait_t := 0.0
+const RIDE_WALK := 4.0
+const RIDE_CANTER := 11.0
+const RIDE_TURN := 1.9            # rad/s at the canter
 var sun: DirectionalLight3D
 var hud: Label
 var feed: RichTextLabel
 var feed_lines: Array[String] = []
 
-var men_mm: Array = [null, null]  # marching columns per faction
-var flag_mm: Array = [null, null]
+var men_mm: Array = [null, null]  # unit counters per faction
+var flag_mm: Array = [null, null] # counter base plates per faction
+var token_labels: Array[Label3D] = []   # name + strength over each counter
 var deer_mm: MultiMesh
 var civ_mm: MultiMesh
 var smoke_p: GPUParticles3D
@@ -91,11 +126,22 @@ func _ready() -> void:
 	_build_roads()
 	_build_woods_and_fields()
 	_build_pools()
-	_spawn_armies()
+	var returning: bool = not GameConfig.world_state.is_empty()
+	if returning:
+		_restore_world(GameConfig.world_state)
+	else:
+		_spawn_armies()
 	_spawn_life()
 	_build_camera()
 	_build_hud()
-	_event("The province wakes. %s hold the south, %s the north." % [FACTION_NAMES[0], FACTION_NAMES[1]])
+	if returning:
+		_apply_battle_result()
+	else:
+		_event("The province wakes. %s hold the south, %s the north." % [FACTION_NAMES[0], FACTION_NAMES[1]])
+		_event("You command [b]%s[/b]. Click the map to march. A battle begins when you close on the enemy." % player_tok.name)
+	if player_tok != null:
+		_center_on(player_tok.pos)
+	Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)   # the map is driven by the cursor
 
 func _build_sky() -> void:
 	var env := WorldEnvironment.new()
@@ -123,6 +169,7 @@ func _build_ground() -> void:
 	m.roughness = 1.0
 	g.material_override = m
 	add_child(g)
+	ground_mi = g                 # kept so it stays visible (under a hosted battle)
 
 func _add_settlement(n: String, x: float, z: float, size: int, owner: int) -> void:
 	var s := Settlement.new()
@@ -279,39 +326,49 @@ func _build_woods_and_fields() -> void:
 	add_child(fmi)
 
 func _build_pools() -> void:
-	# marching men: 24 figures drawn per battalion token, in column of march
+	# units are drawn as MAP COUNTERS, not figures: a faction-coloured block on a
+	# base plate (the base is gold for your own battalion)
+	const MAX_COUNTERS := 30
 	for f in range(2):
 		var mm := MultiMesh.new()
 		mm.transform_format = MultiMesh.TRANSFORM_3D
-		var cap := CapsuleMesh.new()
-		cap.radius = 0.34
-		cap.height = 1.9
-		cap.radial_segments = 6
-		cap.rings = 2
-		mm.mesh = cap
-		mm.instance_count = 24 * 24      # up to 24 tokens a side drawn
+		var box := BoxMesh.new()
+		box.size = Vector3(70, 6, 44)          # the counter itself
+		mm.mesh = box
+		mm.instance_count = MAX_COUNTERS
 		var mi := MultiMeshInstance3D.new()
 		mi.multimesh = mm
 		var mat := StandardMaterial3D.new()
 		mat.albedo_color = FACTION_COLS[f]
+		mat.roughness = 0.9
 		mi.material_override = mat
 		add_child(mi)
 		men_mm[f] = mm
 		var fm := MultiMesh.new()
 		fm.transform_format = MultiMesh.TRANSFORM_3D
-		var fq := PlaneMesh.new()
-		fq.size = Vector2(4.0, 2.6)
-		fq.orientation = PlaneMesh.FACE_Z
-		fm.mesh = fq
-		fm.instance_count = 24
+		fm.use_colors = true                   # per-counter base tint (gold = you)
+		var bbox := BoxMesh.new()
+		bbox.size = Vector3(80, 3, 54)          # the base plate under the counter
+		fm.mesh = bbox
+		fm.instance_count = MAX_COUNTERS
 		var fmi := MultiMeshInstance3D.new()
 		fmi.multimesh = fm
 		var fmat := StandardMaterial3D.new()
-		fmat.albedo_color = FACTION_COLS[f].lightened(0.25)
-		fmat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		fmat.vertex_color_use_as_albedo = true
 		fmi.material_override = fmat
 		add_child(fmi)
 		flag_mm[f] = fm
+	# a label pool — unit name + strength floating over each counter
+	for k in range(MAX_COUNTERS * 2):
+		var lb := Label3D.new()
+		lb.font_size = 110
+		lb.pixel_size = 0.16
+		lb.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		lb.no_depth_test = true
+		lb.outline_size = 24
+		lb.visible = false
+		add_child(lb)
+		token_labels.append(lb)
 	# deer
 	deer_mm = MultiMesh.new()
 	deer_mm.transform_format = MultiMesh.TRANSFORM_3D
@@ -377,14 +434,22 @@ func _spawn_armies() -> void:
 		for bg in range(3):
 			for k in range(4):
 				var t := Token.new()
+				t.id = next_id
+				next_id += 1
 				t.faction = f
 				t.brigade = bg
 				var n := bg * 4 + k + 1
 				t.name = "%d%s %s" % [n, _ord(n), "of Foot" if f == 0 else "Provincials"]
 				t.experience = randf_range(0.85, 1.2)
+				t.facing_col = (FACINGS_0 if f == 0 else FACINGS_1)[bg % 6]
+				t.coat_idx = 1 if k == 3 else 0
 				var a := randf() * TAU
 				t.pos = cap_pos + Vector3(cos(a), 0, sin(a)) * randf_range(60.0, 90.0 + bg * 60.0)
 				tokens.append(t)
+	# the player takes the 1st of Foot, leading the Crown's first brigade
+	player_tok = tokens[0]
+	player_tok.is_player = true
+	player_tok.name = "1st of Foot (yours)"
 
 func _spawn_life() -> void:
 	for s in settlements:
@@ -394,17 +459,158 @@ func _spawn_life() -> void:
 		var p := Vector3(randf_range(-1, 1), 0, randf_range(-1, 1)) * WORLD_SIZE * 0.42
 		deer.append({ "pos": p, "tgt": p, "flee": 0.0 })
 
+var player_marker: Label3D
+
+func _update_marker() -> void:
+	if player_marker == null:
+		player_marker = Label3D.new()
+		player_marker.font_size = 200
+		player_marker.pixel_size = 0.06
+		player_marker.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		player_marker.modulate = Color(1.0, 0.92, 0.4)
+		player_marker.no_depth_test = true
+		add_child(player_marker)
+	if player_tok == null or ride_mode:    # in third person you ARE the marker
+		player_marker.visible = false
+		return
+	player_marker.visible = true
+	player_marker.text = "▼ YOU" + ("   ⚔ CONTACT — the lines are forming" if pending != null else "")
+	player_marker.position = player_tok.pos + Vector3(0, 120, 0)
+
+var cam_height := 2600.0          # how high the map camera floats (wheel zooms)
+var cam_focus := Vector3.ZERO      # the ground point the camera looks down at
+
 func _build_camera() -> void:
 	cam = Camera3D.new()
-	cam.far = 16000.0
-	cam.position = Vector3(0, 2400, 3800)
-	cam_pitch = -0.55
+	cam.far = 20000.0
+	cam_pitch = -1.05                # a steep operational-map look-down
 	add_child(cam)
-	_apply_cam()
+	_place_map_cam()
+
+# keep the camera floating above its focus point at the current height/pitch
+func _place_map_cam() -> void:
+	var back := cam_height / tan(-cam_pitch)        # ground distance behind the focus
+	var offset := Vector3(0, cam_height, back).rotated(Vector3.UP, cam_yaw)
+	cam.position = cam_focus + offset
+	cam.rotation = Vector3(cam_pitch, cam_yaw, 0)
+
+func _center_on(p: Vector3) -> void:
+	cam_focus = Vector3(p.x, 0, p.z)
+	_place_map_cam()
+
+# the player's mounted officer — the same dark-bay charger he rides in battle,
+# now carrying him across the whole province in third person
+func _build_officer() -> void:
+	officer = Node3D.new()
+	add_child(officer)
+	var horse := MeshInstance3D.new()
+	var hc := CapsuleMesh.new()
+	hc.radius = 0.34
+	hc.height = 1.95
+	hc.radial_segments = 8
+	horse.mesh = hc
+	horse.rotation.z = PI * 0.5            # lay the body horizontal
+	horse.position = Vector3(0, 0.95, 0)
+	var hmat := StandardMaterial3D.new()
+	hmat.albedo_color = Color(0.20, 0.13, 0.08)
+	horse.material_override = hmat
+	officer.add_child(horse)
+	var neck := MeshInstance3D.new()
+	var nc := CapsuleMesh.new()
+	nc.radius = 0.16
+	nc.height = 1.0
+	neck.mesh = nc
+	neck.rotation.x = 0.7
+	neck.position = Vector3(0, 1.35, 0.85)
+	neck.material_override = hmat
+	officer.add_child(neck)
+	var rider := MeshInstance3D.new()
+	var rc := CapsuleMesh.new()
+	rc.radius = 0.22
+	rc.height = 1.1
+	rider.mesh = rc
+	rider.position = Vector3(0, 1.85, -0.1)
+	var rmat := StandardMaterial3D.new()
+	rmat.albedo_color = FACTION_COLS[0].darkened(0.1)   # your faction's coat
+	rider.material_override = rmat
+	officer.add_child(rider)
+	var hat := MeshInstance3D.new()
+	var hatc := CylinderMesh.new()
+	hatc.top_radius = 0.0
+	hatc.bottom_radius = 0.2
+	hatc.height = 0.32
+	hat.mesh = hatc
+	hat.position = Vector3(0, 2.62, -0.1)
+	var black := StandardMaterial3D.new()
+	black.albedo_color = Color(0.05, 0.05, 0.06)
+	hat.material_override = black
+	officer.add_child(hat)
+
+func _start_ride() -> void:
+	if player_tok != null:
+		off_pos = player_tok.pos
+		off_yaw = 0.0 if player_tok.faction == 0 else PI   # face out into the field
+	officer.position = off_pos
+	cam.position = off_pos + Vector3(0, 6, -14)
+
+func _update_ride(dt: float) -> void:
+	if officer == null:
+		return
+	if not ride_mode or player_tok == null:
+		officer.visible = false
+		return
+	officer.visible = true
+	# rein and spur: A/D steer the horse, W/S the pace, Shift to canter
+	var turn := 0.0
+	if Input.is_physical_key_pressed(KEY_A):
+		turn += 1.0
+	if Input.is_physical_key_pressed(KEY_D):
+		turn -= 1.0
+	off_yaw += turn * RIDE_TURN * dt
+	var top := RIDE_CANTER if Input.is_physical_key_pressed(KEY_SHIFT) else RIDE_WALK
+	var want := 0.0
+	if Input.is_physical_key_pressed(KEY_W):
+		want = top
+	elif Input.is_physical_key_pressed(KEY_S):
+		want = -RIDE_WALK * 0.5
+	off_speed = move_toward(off_speed, want, 9.0 * dt)
+	var fwd := Vector3(sin(off_yaw), 0, cos(off_yaw))
+	off_pos += fwd * off_speed * dt
+	off_pos.x = clampf(off_pos.x, -WORLD_SIZE * 0.5, WORLD_SIZE * 0.5)
+	off_pos.z = clampf(off_pos.z, -WORLD_SIZE * 0.5, WORLD_SIZE * 0.5)
+	gait_t += dt * (8.0 if off_speed > RIDE_WALK + 0.5 else 4.5) * clampf(absf(off_speed) / RIDE_WALK, 0.0, 1.5)
+	var bob := absf(sin(gait_t)) * 0.10 * clampf(absf(off_speed) / RIDE_WALK, 0.0, 1.0)
+	officer.position = off_pos + Vector3(0, bob, 0)
+	officer.rotation.y = off_yaw
+	# you ARE your battalion's location: your 700 men march where you ride
+	player_tok.pos = off_pos
+	player_tok.dir = fwd
+	if player_tok.state == "fight":
+		# ride clear of the enemy and the stand-off breaks
+		if player_tok.enemy == null or off_pos.distance_to(player_tok.enemy.pos) > ENGAGE_RANGE * 1.4:
+			player_tok.state = "hold"
+			player_tok.enemy = null
+			pending = null
+	else:
+		player_tok.state = "hold"
+		player_tok.path = []
+	# free-look eases back to straight ahead while riding hard
+	if off_speed > 1.0:
+		look_yaw = move_toward(look_yaw, 0.0, dt * 1.5)
+
+func _ride_camera(delta: float) -> void:
+	if officer == null:
+		return
+	var yaw := off_yaw + look_yaw
+	var back := Vector3(sin(yaw), 0, cos(yaw))
+	var want := off_pos - back * 11.0 + Vector3(0, 4.6 - look_pitch * 6.0, 0)
+	cam.position = cam.position.lerp(want, clampf(delta * 6.0, 0, 1))
+	cam.look_at(off_pos + Vector3(0, 2.3, 0) + back * 2.0, Vector3.UP)
 
 func _build_hud() -> void:
 	var ui := CanvasLayer.new()
 	add_child(ui)
+	ui_layer = ui
 	hud = Label.new()
 	hud.position = Vector2(14, 10)
 	hud.add_theme_color_override("font_color", Color(0.95, 0.93, 0.85))
@@ -435,14 +641,25 @@ func _process(delta: float) -> void:
 	_update_tokens(dt)
 	_update_capture(dt)
 	_update_life(dt)
+	# meeting the enemy forms a battle on its own — no keypress. March clear before the
+	# dwell elapses to slip the engagement; hold contact and the lines lock and zoom in.
+	if player_tok == null or player_tok.state != "fight":
+		pending = null
+		contact_t = 0.0
+	elif pending != null:
+		contact_t += delta
+		if contact_t > CONTACT_DELAY:
+			_inflate(pending)
+			return
 	_render_tokens()
+	_update_marker()
 	_update_hud()
 	_cam_move(delta)
 
 func _update_sun() -> void:
 	var elev := sin((clock - 6.0) / 12.0 * PI)
 	sun.rotation = Vector3(-maxf(0.05, elev) * 1.3, 0.6, 0)
-	sun.light_energy = clampf(elev * 1.3 + 0.18, 0.04, 1.2)
+	sun.light_energy = clampf(elev * 0.7 + 0.7, 0.5, 1.2)   # the map stays readable at night
 
 # the operational appreciation: each faction periodically scores the settlements
 # (value x feasibility, hysteresis on the standing objective) and points its idle
@@ -470,8 +687,8 @@ func _update_factions(dt: float) -> void:
 			_event("%s march on [b]%s[/b]." % [FACTION_NAMES[f], settlements[best].name])
 		# point idle battalions at the objective; keep one brigade home as garrison
 		for t in tokens:
-			if t.faction != f or t.state != "hold":
-				continue
+			if t.faction != f or t.state != "hold" or t.is_player:
+				continue                  # the player commands his own battalion
 			var tgt: int = fac_goal[f] if t.brigade > 0 else (0 if f == 0 else 8)
 			if tgt == -1:
 				continue
@@ -579,6 +796,12 @@ func _resolve_fight(t: Token, dt: float) -> void:
 	if e == null or e.men < 60.0 or e.state == "rout":
 		t.state = "hold"
 		t.enemy = null
+		return
+	# the player's own fights are NOT abstracted away — they hold, lines drawn up,
+	# until he gives battle (F, which inflates to the full tactical sim) or marches off
+	if t.is_player or e.is_player:
+		if player_tok != null and player_tok.state == "fight":
+			pending = player_tok.enemy
 		return
 	t.men -= e.men * 0.0030 * e.experience * dt
 	t.morale -= dt * (2.0 * e.men / maxf(t.men, 1.0)) * 0.55
@@ -716,32 +939,38 @@ func _make_cart() -> Node3D:
 
 # ------------------------------------------------------------------ rendering
 
+# draw each battalion as a map counter (block + base plate) with a floating label
 func _render_tokens() -> void:
+	var li := 0
 	for f in range(2):
 		var mm: MultiMesh = men_mm[f]
 		var fm: MultiMesh = flag_mm[f]
 		var i := 0
-		var fi := 0
 		for t in tokens:
 			if t.faction != f:
 				continue
-			var fwd := t.dir
-			var right := Vector3(fwd.z, 0, -fwd.x)
-			# a column of march: 12 ranks of 2, strung out behind the head
-			for r in range(12):
-				for c in range(2):
-					if i >= mm.instance_count:
-						break
-					var p := t.pos - fwd * float(r) * 2.2 + right * (float(c) - 0.5) * 1.6
-					mm.set_instance_transform(i, Transform3D(Basis(Vector3.UP, atan2(fwd.x, fwd.z)), p + Vector3(0, 0.95, 0)))
-					i += 1
-			if fi < fm.instance_count:
-				fm.set_instance_transform(fi, Transform3D(Basis(Vector3.UP, atan2(fwd.x, fwd.z)), t.pos + Vector3(0, 5.0, 0)))
-				fi += 1
+			if i >= mm.instance_count:
+				break
+			var yaw := atan2(t.dir.x, t.dir.z)
+			var basis := Basis(Vector3.UP, yaw)
+			# a routing unit's counter sits askew and low; a steady one stands square
+			var lift := 3.0 if t.state == "rout" else 6.0
+			mm.set_instance_transform(i, Transform3D(basis, t.pos + Vector3(0, lift, 0)))
+			fm.set_instance_transform(i, Transform3D(basis, t.pos + Vector3(0, 1.5, 0)))
+			fm.set_instance_color(i, Color(0.95, 0.8, 0.25) if t.is_player else Color(0.1, 0.1, 0.12))
+			if li < token_labels.size():
+				var lb := token_labels[li]
+				lb.visible = true
+				lb.text = "%s\n%d" % [t.name, int(t.men)]
+				lb.modulate = Color(1, 0.95, 0.6) if t.is_player else Color(0.92, 0.92, 0.96)
+				lb.position = t.pos + Vector3(0, 60, 0)
+				li += 1
+			i += 1
 		for j in range(i, mm.instance_count):
 			mm.set_instance_transform(j, Transform3D().scaled(Vector3.ZERO))
-		for j in range(fi, fm.instance_count):
 			fm.set_instance_transform(j, Transform3D().scaled(Vector3.ZERO))
+	for j in range(li, token_labels.size()):
+		token_labels[j].visible = false
 
 func _update_hud() -> void:
 	var hold := [0, 0, 0]
@@ -750,10 +979,16 @@ func _update_hud() -> void:
 	var men := [0, 0]
 	for t in tokens:
 		men[t.faction] += int(t.men)
-	hud.text = "Day %d — %02d:%02d      %s: %d towns, %d men      %s: %d towns, %d men      [%s]\nWASD fly · RMB look · Q/E down/up · Shift fast · 1/2/3 preview speed (dev) · Esc menu" % [
+	var pline := ""
+	if player_tok != null:
+		pline = "      You: %s — %d men" % [player_tok.name, int(player_tok.men)]
+		if pending != null:
+			pline += "   ⚔ ENEMY MET — THE LINES ARE FORMING (march clear to slip away)"
+	var controls := "Click: march your battalion · WASD/edge: pan · wheel: zoom · RMB-drag: rotate · C: centre on you · 1/2/3: speed · Esc: menu"
+	hud.text = "Day %d — %02d:%02d      %s: %d towns, %d men      %s: %d towns, %d men      [%s]%s\n%s" % [
 		day, int(clock), int(fposmod(clock, 1.0) * 60.0),
 		FACTION_NAMES[0], hold[0], men[0], FACTION_NAMES[1], hold[1], men[1],
-		("real time" if tscale <= 1.0 else "preview x%d" % int(tscale))]
+		("real time" if tscale <= 1.0 else "preview x%d" % int(tscale)), pline, controls]
 
 func _event(msg: String) -> void:
 	feed_lines.append("[color=#8a93a6]Day %d %02d:%02d[/color]  %s" % [day, int(clock), int(fposmod(clock, 1.0) * 60.0), msg])
@@ -764,36 +999,77 @@ func _event(msg: String) -> void:
 
 # ------------------------------------------------------------------ free camera
 
+# click the ground to march your battalion to the nearest settlement there
+func _order_march(screen_pos: Vector2) -> void:
+	if player_tok == null:
+		return
+	var from := cam.project_ray_origin(screen_pos)
+	var dir := cam.project_ray_normal(screen_pos)
+	if absf(dir.y) < 1e-5:
+		return
+	var d := -from.y / dir.y
+	if d <= 0.0:
+		return
+	var hit := from + dir * d
+	var si := _nearest_settlement(hit)
+	var path := _route(_nearest_settlement(player_tok.pos), si)
+	if path.is_empty():
+		path = [si]
+	player_tok.path = path
+	player_tok.state = "march"
+	pending = null
+	if player_tok.enemy != null:        # break off any stand-off
+		player_tok.enemy = null
+	_event("[color=#cfe] You march for %s.[/color]" % settlements[si].name)
+
 func _apply_cam() -> void:
 	cam.rotation = Vector3(cam_pitch, cam_yaw, 0)
 
+# pan and zoom the operational map
 func _cam_move(delta: float) -> void:
-	var sp := 900.0 if Input.is_physical_key_pressed(KEY_SHIFT) else 250.0
-	var mv := Vector3.ZERO
-	if Input.is_physical_key_pressed(KEY_W):
-		mv -= cam.global_transform.basis.z
-	if Input.is_physical_key_pressed(KEY_S):
-		mv += cam.global_transform.basis.z
-	if Input.is_physical_key_pressed(KEY_A):
-		mv -= cam.global_transform.basis.x
-	if Input.is_physical_key_pressed(KEY_D):
-		mv += cam.global_transform.basis.x
-	if Input.is_physical_key_pressed(KEY_E):
-		mv += Vector3.UP
-	if Input.is_physical_key_pressed(KEY_Q):
-		mv -= Vector3.UP
-	cam.position += mv.normalized() * sp * delta if mv.length_squared() > 0.0 else Vector3.ZERO
-	cam.position.y = clampf(cam.position.y, 6.0, 6000.0)
+	if follow and player_tok != null:        # keep your battalion centred
+		cam_focus = cam_focus.lerp(Vector3(player_tok.pos.x, 0, player_tok.pos.z), clampf(delta * 3.0, 0, 1))
+		_place_map_cam()
+		return
+	var sp := (cam_height / 2600.0) * (2200.0 if Input.is_physical_key_pressed(KEY_SHIFT) else 950.0)
+	var fwd := -Vector3(sin(cam_yaw), 0, cos(cam_yaw))   # screen-up across the ground
+	var right := Vector3(cos(cam_yaw), 0, -sin(cam_yaw))
+	var pan := Vector3.ZERO
+	if Input.is_physical_key_pressed(KEY_W) or Input.is_physical_key_pressed(KEY_UP):
+		pan += fwd
+	if Input.is_physical_key_pressed(KEY_S) or Input.is_physical_key_pressed(KEY_DOWN):
+		pan -= fwd
+	if Input.is_physical_key_pressed(KEY_D) or Input.is_physical_key_pressed(KEY_RIGHT):
+		pan += right
+	if Input.is_physical_key_pressed(KEY_A) or Input.is_physical_key_pressed(KEY_LEFT):
+		pan -= right
+	if pan.length_squared() > 0.0:
+		cam_focus += pan.normalized() * sp * delta
+		var lim := WORLD_SIZE * 0.5
+		cam_focus.x = clampf(cam_focus.x, -lim, lim)
+		cam_focus.z = clampf(cam_focus.z, -lim, lim)
+		_place_map_cam()
 
 func _unhandled_input(ev: InputEvent) -> void:
-	if ev is InputEventMouseButton and ev.button_index == MOUSE_BUTTON_RIGHT:
-		Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED if ev.pressed else Input.MOUSE_MODE_VISIBLE)
-	elif ev is InputEventMouseMotion and Input.get_mouse_mode() == Input.MOUSE_MODE_CAPTURED:
-		cam_yaw -= ev.relative.x * 0.0028
-		cam_pitch = clampf(cam_pitch - ev.relative.y * 0.0028, -1.5, 1.4)
-		_apply_cam()
+	if ev is InputEventMouseButton and ev.pressed:
+		match ev.button_index:
+			MOUSE_BUTTON_LEFT:
+				_order_march(ev.position)
+			MOUSE_BUTTON_WHEEL_UP:
+				cam_height = clampf(cam_height - 350.0, 600.0, 7000.0)
+				_place_map_cam()
+			MOUSE_BUTTON_WHEEL_DOWN:
+				cam_height = clampf(cam_height + 350.0, 600.0, 7000.0)
+				_place_map_cam()
+	elif ev is InputEventMouseMotion and Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
+		cam_yaw -= ev.relative.x * 0.005       # drag right-mouse to rotate the map
+		_place_map_cam()
 	elif ev is InputEventKey and ev.pressed:
 		match ev.physical_keycode:
+			KEY_C, KEY_SPACE:                  # centre on your battalion
+				follow = not follow
+				if follow and player_tok != null:
+					_center_on(player_tok.pos)
 			KEY_1:
 				tscale = 1.0
 			KEY_2:
@@ -801,10 +1077,200 @@ func _unhandled_input(ev: InputEvent) -> void:
 			KEY_3:
 				tscale = 30.0
 			KEY_ESCAPE:
-				if Input.get_mouse_mode() == Input.MOUSE_MODE_CAPTURED:
-					Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
-				else:
-					get_tree().change_scene_to_file("res://menu.tscn")
+				get_tree().change_scene_to_file("res://menu.tscn")
+
+# ------------------------------------------------------------ inflation (Phase 2)
+
+# Give battle: the nearby tokens on both sides are authored into a BattleSetup and
+# the full tactical sim is summoned from them. The world is frozen and stowed in
+# the autoload so it survives the scene change and resumes when the day is decided.
+func _inflate(foe: Token) -> void:
+	var R := 850.0
+	var friends: Array = []
+	var foes: Array = []
+	for t in tokens:
+		if t.state == "rout":
+			continue
+		if t.faction == player_tok.faction and t.pos.distance_to(player_tok.pos) < R:
+			friends.append(t)
+		elif t.faction == foe.faction and t.pos.distance_to(foe.pos) < R:
+			foes.append(t)
+	friends.erase(player_tok)            # the player always leads, never sliced out
+	friends.push_front(player_tok)
+	foes.erase(foe)
+	foes.push_front(foe)
+	friends = friends.slice(0, 12)
+	foes = foes.slice(0, 12)
+	var s := BattleSetup.new()
+	s.seed_value = randi() | 1
+	s.weather = "clear"
+	s.time_of_day = clock
+	GameConfig.battle_tokens = []
+	var idx := 0
+	var player_idx := 0
+	var player_local := Vector3.ZERO   # the player batt's authored spot, so we can land it under you
+	for side in [[friends, 0, 0.0, -200.0], [foes, 1, PI, 200.0]]:
+		var lst: Array = side[0]
+		var team: int = side[1]
+		var face: float = side[2]
+		var zline: float = side[3]
+		for i in range(lst.size()):
+			var t: Token = lst[i]
+			var u := BattleSetup.BattUnit.new()
+			u.name = t.name
+			u.team = team
+			u.men = int(t.men)
+			u.experience = t.experience
+			u.morale = t.morale
+			u.facing_col = t.facing_col
+			u.coat_idx = t.coat_idx
+			u.brigade = t.brigade
+			u.facing = face
+			u.pos = Vector3((float(i) - (lst.size() - 1) * 0.5) * 110.0, 0, zline)
+			if t == player_tok:
+				u.human_slot = idx
+				player_idx = idx
+				player_local = u.pos
+			s.units.append(u)
+			GameConfig.battle_tokens.append(t.id)
+			idx += 1
+	GameConfig.setup = s
+	GameConfig.local_slot = player_idx
+	GameConfig.return_to_world = true              # the battle returns here when decided
+	GameConfig.world_state = _serialize_world()    # the province survives the battle
+	_event("You give battle! %d battalions against %d. Zooming to the field…" % [friends.size(), foes.size()])
+	# ZOOM INTO THE BATTLE: the campaign map's natural transition is a scene change to
+	# the full third-person tactical sim, which writes results back into world_state.
+	get_tree().change_scene_to_file("res://game.tscn")
+
+# hide the province's props (houses, woods, fields, roads, marching figures, deer,
+# civilians) so they don't poke through a hosted battle — but KEEP the ground, since
+# the battle is gated to render on the world's terrain. Restored when the battle ends.
+func _hide_props(hidden: bool) -> void:
+	for ch in get_children():
+		if ch == ground_mi or ch == battle_sim:
+			continue
+		if ch is MeshInstance3D or ch is MultiMeshInstance3D:
+			ch.visible = not hidden
+	for c in carts:
+		if c.node != null:
+			c.node.visible = not hidden
+
+# the embedded battle has resolved and been dismissed: fold the result into the
+# province, tear the battle down, and hand control back to the saddle
+func _end_hosted_battle() -> void:
+	_apply_battle_result()        # casualties / rout / destruction back into the tokens
+	if battle_sim != null and is_instance_valid(battle_sim):
+		battle_sim.queue_free()
+	battle_sim = null
+	in_battle = false
+	pending = null
+	contact_t = 0.0
+	_hide_props(false)            # the province's props return
+	if officer != null:
+		officer.visible = true
+	if ui_layer != null:
+		ui_layer.visible = true
+	if cam != null:
+		cam.current = true        # take the camera back from the battle
+	if player_tok != null:
+		off_pos = player_tok.pos
+		off_speed = 0.0
+		ride_mode = true
+		Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+	else:
+		ride_mode = false
+		Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
+	_event("You return to the saddle.")
+
+func _serialize_world() -> Dictionary:
+	var ts: Array = []
+	for t in tokens:
+		ts.append({ "id": t.id, "name": t.name, "fac": t.faction, "men": t.men,
+			"exp": t.experience, "mor": t.morale, "px": t.pos.x, "pz": t.pos.z,
+			"brig": t.brigade, "state": t.state, "path": t.path.duplicate(),
+			"fr": t.facing_col.r, "fg": t.facing_col.g, "fb": t.facing_col.b,
+			"coat": t.coat_idx, "pl": t.is_player })
+	var ss: Array = []
+	for s in settlements:
+		ss.append({ "owner": s.owner, "cap": s.cap_t })
+	return { "tokens": ts, "sett": ss, "clock": clock, "day": day,
+		"goal": fac_goal.duplicate(), "next_id": next_id }
+
+func _restore_world(d: Dictionary) -> void:
+	tokens.clear()
+	for td in d.get("tokens", []):
+		var t := Token.new()
+		t.id = int(td["id"])
+		t.name = td["name"]
+		t.faction = int(td["fac"])
+		t.men = float(td["men"])
+		t.experience = float(td["exp"])
+		t.morale = float(td["mor"])
+		t.pos = Vector3(td["px"], 0, td["pz"])
+		t.brigade = int(td["brig"])
+		t.state = td["state"]
+		t.path = (td["path"] as Array).duplicate()
+		t.facing_col = Color(td["fr"], td["fg"], td["fb"])
+		t.coat_idx = int(td["coat"])
+		t.is_player = bool(td["pl"])
+		if t.is_player:
+			player_tok = t
+		tokens.append(t)
+	var ss: Array = d.get("sett", [])
+	for i in range(mini(ss.size(), settlements.size())):
+		settlements[i].owner = int(ss[i]["owner"])
+		settlements[i].cap_t = float(ss[i]["cap"])
+	clock = float(d.get("clock", 7.0))
+	day = int(d.get("day", 1))
+	fac_goal = d.get("goal", [-1, -1])
+	next_id = int(d.get("next_id", tokens.size() + 1))
+
+# fold the battle's outcome back into the province: casualties, who broke, who held
+func _apply_battle_result() -> void:
+	var res: Dictionary = {}
+	if GameConfig.setup != null:
+		res = GameConfig.setup.result
+	var bt: Array = GameConfig.battle_tokens
+	var by_id := {}
+	for t in tokens:
+		by_id[t.id] = t
+	var seen := {}
+	for rec in res.get("survivors", []):
+		var si := int(rec["idx"])
+		if si < 0 or si >= bt.size():
+			continue
+		var tid: int = bt[si]
+		seen[tid] = true
+		if by_id.has(tid):
+			var t: Token = by_id[tid]
+			t.men = float(rec["men"])
+			t.morale = float(rec["morale"])
+			if rec.get("state", "") == "routing" or t.men < 60.0:
+				_rout_token(t)
+	# any battle participant not in the survivor list was destroyed
+	for tid in bt:
+		if not seen.has(tid) and by_id.has(tid):
+			var t2: Token = by_id[tid]
+			if t2 != null:
+				_event("[color=#caa]%s was destroyed in the battle.[/color]" % t2.name)
+				tokens.erase(t2)
+	var winner: int = res.get("winner", -1)   # battle team: 0 = your faction, 1 = enemy
+	_event("[color=#9fe0a0]The field is decided.[/color] %s held the ground." % (
+		"Your side" if winner == 0 else "The enemy"))
+	GameConfig.world_state = {}               # consumed; next battle re-stows
+	GameConfig.return_to_world = false
+	follow = true
+	if player_tok == null or not tokens.has(player_tok):
+		_event("[color=#ff8] Your battalion is no more. You watch the war as a free camera.[/color]")
+		player_tok = null
+		follow = false
+
+func _rout_token(t: Token) -> void:
+	t.state = "rout"
+	var home := 0 if t.faction == 0 else 8
+	t.path = _route(_nearest_settlement(t.pos), home)
+	t.enemy = null
 
 func _ord(n: int) -> String:
 	if n % 100 in [11, 12, 13]:
