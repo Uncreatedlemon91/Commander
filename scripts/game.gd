@@ -73,8 +73,10 @@ const START_ROUNDS := 50.0        # cartridges a man carries into the fight
 const AMMO_PER_SHOT := 0.004      # how fast a firing line eats through its supply
 const FIRE_RANGE := 82.0          # smoothbore musket: in range at ~90 yards
 const DEPLOY_RANGE := 78.0        # AI halts & deploys to a firing line within this
+const DECISIVE_RANGE := 46.0      # a steady attacking line presses to THIS (point-blank) to decide it
 const HIT_POINT_BLANK := 0.24     # fraction of muskets that go off effectively at the muzzle
 const HIT_FALLOFF := 1.0          # effectiveness ~ (1 - d/range)^this (effective ~55 yds)
+const ENFILADE_BONUS := 2.6       # fire raking down a line (into its flank) is murderous
 # --- every ball is now a real ray with a cone of dispersion (cannon = none; the
 #     smoothbore musket spreads, the pistol spreads more over its tiny range) ---
 const BULLET_R := 0.34            # how near a ball must pass a man to strike him (m)
@@ -101,6 +103,11 @@ const MORALE_PER_CASUALTY := 0.7
 const VOLLEY_SHOCK := 0.045       # morale shock per musket in a simultaneous volley
 const VOLLEY_CASUALTY_MULT := 1.3 # massed-volley casualties also bite morale harder
 const INDEP_MULT := 0.4           # independent fire: casualties, little moral effect
+# the held first volley: muskets levelled, loaded, waiting — released by the officer
+# at point-blank, it is the deadliest thing on the field
+const HELD_VOLLEY_RANGE := 55.0   # paces close enough for the murderous close volley
+const HELD_VOLLEY_HIT := 1.55     # the fresh, levelled volley strikes far harder
+const HELD_VOLLEY_SHOCK := 2.3    # and shatters nerve far beyond the bodies it drops
 const MORALE_RECOVER := 3.0       # per second once out of the fight
 const ROUT_SPEED := 3.4           # broken men run
 const AIM_LEAD := 0.7             # a man levels his musket this long before he's loaded
@@ -352,6 +359,10 @@ const MAX_NCO := 14
 var _lights: Array = []                   # pooled muzzle-flash OmniLights
 var _light_i := 0
 var _shake := 0.0
+# the player's personal objective in this battle (theme 6)
+var _obj_text := ""
+var _obj_target: Batt = null
+var _obj_done := false
 var _flash_rect: ColorRect                # screen flash on a near volley
 var _flash_amt := 0.0
 var _suppress_rect: TextureRect           # smoky vignette that pulses on nearby fire
@@ -495,7 +506,7 @@ const CMD_PAGES := {
 	"fire": [
 		[KEY_1, "1", "Volley fire (as one)", "volley"],
 		[KEY_2, "2", "Independent fire", "fire_at_will"],
-		[KEY_3, "3", "Hold fire", "hold_fire"],
+		[KEY_3, "3", "Hold fire  —  then press F to GIVE FIRE", "hold_fire"],
 		[KEY_4, "4", "Send for cartridges", "resupply"],
 	],
 }
@@ -570,6 +581,7 @@ func _ready() -> void:
 	_build_guns()
 	_spawn_cavalry()
 	_assign_brigades()
+	_set_objective()                  # your personal charge for the day
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED   # the battle owns the mouse once joined
 
 # ------------------------------------------------------------------ world
@@ -1690,8 +1702,8 @@ func _spawn_from_setup() -> void:
 		b.formation = "line"                 # they meet already deployed for the fight
 		b.off_facing = face
 		b.off_pos = b.pos + Vector3(sin(face), 0, cos(face)) * 14.0
-		b.human = (u.human_slot == GameConfig.local_slot)
-		b.is_player = b.human
+		b.human = (u.human_slot >= 0)                          # any player-commanded unit
+		b.is_player = (u.human_slot == GameConfig.local_slot)  # the one THIS peer drives
 		b.companies = 6 if team == 0 else 10
 		b.ammo = u.ammo
 		b.morale = u.morale
@@ -2459,6 +2471,7 @@ func _process(delta: float) -> void:
 		_update_couriers(delta)
 		_update_combat(delta)            # your own sabre, pistol and mortality
 		_update_prestige()               # your renown rises and falls with the butcher's bill
+		_update_objective()              # has your personal objective been won?
 		_update_battle_flow(delta)       # deployment, army collapse, victory & defeat
 		_net_broadcast(delta)
 	else:
@@ -2586,7 +2599,18 @@ func _update_firing(b: Batt, delta: float) -> void:
 		b.has_target = false             # friends in the lane — the muskets come up
 		b.fire_now = false
 		return
-	var hc := _hit_chance(b.pos.distance_to(tpos))
+	# ENFILADE: fire raking down the LENGTH of an enemy line (into its flank/end) is
+	# far deadlier than fire into its front — a ball that misses one man takes the
+	# man behind. Measure how aligned our fire is with the target line's frontage.
+	var enf_mult := 1.0
+	if not aim_gun and not aim_cav and foe != null:
+		var fB := Vector3(sin(foe.facing), 0, cos(foe.facing))
+		var rightB := Vector3(fB.z, 0, -fB.x)        # the enemy line's length axis
+		var dirh := tpos - b.pos
+		dirh.y = 0.0
+		if dirh.length() > 0.1:
+			var enf := absf(dirh.normalized().dot(rightB))   # 0 frontal .. 1 raking the line
+			enf_mult = 1.0 + enf * enf * ENFILADE_BONUS
 	var maxy := -1e9
 	for f0 in b.figs:
 		maxy = maxf(maxy, (f0["slot"] as Vector2).y)
@@ -2615,6 +2639,9 @@ func _update_firing(b: Batt, delta: float) -> void:
 				_play_voice(snd_v_ready, b.off_pos)
 	var atwill := (not b.volley_fire) and (not b.rolling)
 	var commanded := b.fire_now and (not b.rolling)
+	# a HELD volley — loaded, levelled, released on the officer's word — strikes home and
+	# shatters nerve. At point-blank it is the deadliest fire on the field.
+	var held_close := commanded and b.volley_fire and not b.auto_volley and b.pos.distance_to(tpos) < HELD_VOLLEY_RANGE
 	var shaken := 1.4 if b.state == "shaken" else 1.0
 	var vis := b.visible
 
@@ -2668,7 +2695,14 @@ func _update_firing(b: Batt, delta: float) -> void:
 					_emit_smoke(mp, fwd)
 					_emit_muzzle_bloom(mp, fwd)
 					volley_pts.append(mp)
-			if randf() < hc:
+			# THIS man's own range to the enemy decides his shot, lifted by enfilade and a held volley
+			var mfwd := (tpos.x - w.x) * fwd.x + (tpos.z - w.z) * fwd.z   # forward range to the enemy line
+			if mfwd < 2.0:
+				mfwd = Vector2(w.x - tpos.x, w.z - tpos.z).length()
+			var mhc := _hit_chance(mfwd) * enf_mult
+			if held_close:
+				mhc *= HELD_VOLLEY_HIT
+			if randf() < minf(0.97, mhc):
 				if aim_cav:
 					kills += 1
 					felled += 1
@@ -2701,14 +2735,20 @@ func _update_firing(b: Batt, delta: float) -> void:
 		for k in range(sources):
 			_play_volley(volley_pts[int((float(k) + 0.5) / float(sources) * volley_pts.size())])
 		_volley_cinematic(b, volley_pts)
+		# YOUR own volley lands as a punch — bigger when you held it to point-blank
+		if b.is_player:
+			_shake = minf(_shake + (0.5 if held_close else 0.28), SHAKE_MAX)
+			_flash_amt = minf(_flash_amt + (0.3 if held_close else 0.12), 0.6)
 	if massed and GameConfig.mode == "host":
 		_fx.append([FX_VOLLEY, b.idx])       # clients reproduce the volley locally
 	# morale shock only lands on a battalion (gun crews and troopers just bleed men)
 	if not aim_gun and not aim_cav and foe != null:
 		if massed:
-			# a wall of fire crashing out at once shocks far beyond the bodies it drops
-			foe.morale -= kills * MORALE_PER_CASUALTY * VOLLEY_CASUALTY_MULT + massed_men * VOLLEY_SHOCK
-			foe.flinch = minf(foe.flinch + massed_men * 0.004 + float(kills) * 0.04, 1.5)
+			# a wall of fire crashing out at once shocks far beyond the bodies it drops;
+			# a held point-blank volley shatters them
+			var shock_mult := HELD_VOLLEY_SHOCK if held_close else 1.0
+			foe.morale -= (kills * MORALE_PER_CASUALTY * VOLLEY_CASUALTY_MULT + massed_men * VOLLEY_SHOCK) * shock_mult
+			foe.flinch = minf(foe.flinch + massed_men * 0.004 + float(kills) * 0.04 + (0.8 if held_close else 0.0), 2.0)
 			foe.calm_t = 0.0
 		elif kills > 0:
 			# independent fire: the men just trickle down — little moral impact
@@ -4104,7 +4144,7 @@ func _sim_ai(b: Batt, delta: float) -> void:
 	if foe != null:
 		foe_d = b.pos.distance_to(foe.pos)
 	if foe != null and foe_d <= DEPLOY_RANGE:
-		# in contact: form line, face him, stand and fire (charge only if ordered to assault)
+		# in contact: form line and face him
 		if not b.skirmish and b.formation != "line":
 			b.formation = "line"
 			_reslot(b)
@@ -4112,12 +4152,20 @@ func _sim_ai(b: Batt, delta: float) -> void:
 		to.y = 0.0
 		if to.length() > 0.3:
 			b.facing = atan2(to.x, to.z)
-		b.off_pos = b.pos + to.normalized() * 10.0
-		b.off_facing = b.facing
+		var dir := to.normalized()
 		var weak := foe.state != "steady" or foe.morale < BRIG_ASSAULT_MORALE
 		var dry := b.ammo <= 0.0          # no powder left — close with the bayonet
+		var aggressive: bool = b.ai_posture in ["advance", "engage", "assault"]
+		# CLOSE THE RANGE: a steady attacking line does not stand and trade useless
+		# long-range fire — it presses forward to decisive range, firing as it comes,
+		# until one side breaks or the bayonet goes in. (A defender holds his ground.)
+		if b.state == "steady" and aggressive and b.melee_foe == null and foe_d > DECISIVE_RANGE:
+			b.pos += dir * BATT_SPEED * 0.7 * delta
+		b.off_pos = b.pos + dir * 10.0
+		b.off_facing = b.facing
+		# CHARGE HOME: once the enemy wavers (or your powder is spent), go in with the bayonet
 		if not b.officer_down and b.charge_cool <= 0.0 and b.state == "steady" and foe_d < CHARGE_RANGE \
-				and ((b.ai_posture == "assault" and weak) or dry):
+				and ((aggressive and weak) or dry):
 			_begin_charge(b, foe)
 		return
 	# not in contact: carry out the brigade's movement order
@@ -4920,7 +4968,27 @@ func _update_battle_flow(delta: float) -> void:
 func _begin_battle() -> void:
 	_battle_begun = true
 	_deploy_t = 0.0
-	_send_player_despatch("[color=#ffd773]The army advances![/color] Drums beating, colours uncased.", {})
+	var ord := ("  [color=#cdd6e6]Your charge:[/color] %s" % _obj_text) if _obj_text != "" else ""
+	_send_player_despatch("[color=#ffd773]The army advances![/color] Drums beating, colours uncased.%s" % ord, {})
+
+# Your personal objective for the day: break the battalion opposite you.
+func _set_objective() -> void:
+	_obj_done = false
+	_obj_text = ""
+	_obj_target = null
+	if player == null:
+		return
+	var tgt := _nearest_enemy_in_range(player, 6000.0)
+	_obj_target = tgt
+	_obj_text = ("Break the %s to your front." % _unit_name(tgt)) if tgt != null else "Hold the line and break the enemy before you."
+
+func _update_objective() -> void:
+	if _obj_done or _obj_target == null or player == null:
+		return
+	if _obj_target.spent or _obj_target.figs.is_empty() or _obj_target.state == "routing":
+		_obj_done = true
+		prestige += 10                   # the day's work, done
+		_send_player_despatch("[color=#9fe0a0]Objective won![/color] The %s breaks before you." % _unit_name(_obj_target), {})
 
 # The whole army gives way: every battalion runs, the enemy takes heart, and after a
 # few minutes of pursuit the field falls quiet and the bill is presented.
@@ -4965,6 +5033,9 @@ func _show_bill() -> void:
 	txt += "[color=#cdd6e6]Theirs[/color]  [color=#ffe9a8]%d[/color] of %d men · %d horse · %d guns silenced\n" \
 		% [_start_strength[et] - men_now[et], _start_strength[et], cav_start - horse_now[et], guns_lost[et]]
 	txt += "[color=#cdd6e6]Your battalion[/color]  %d effectives remain\n" % player.figs.size()
+	if _obj_text != "":
+		var obj_stat := "[color=#9fe0a0]✓ achieved[/color]" if _obj_done else "[color=#ff9a8a]✗ unfulfilled[/color]"
+		txt += "[color=#cdd6e6]Your charge[/color]  %s  %s\n" % [_obj_text, obj_stat]
 	txt += "[color=#cdd6e6]Prestige banked[/color]  [color=#%s]%+d[/color]\n" % [pcol, prestige]
 	txt += "[color=#6f7888]——————————————\nEnter — return to the menu[/color][/center]"
 	_bill_label.text = txt
@@ -5106,6 +5177,16 @@ func _fire_pistol() -> void:
 		_drop_fig(hit["b"], hit["i"], sd)
 		prestige += 1                    # felled by your own hand
 
+# "GIVE FIRE!" — the officer's own word to his battalion. Instant (you are with them),
+# it releases a held volley NOW; held close, it is murderous.
+func _give_fire() -> void:
+	if player == null or player.figs.is_empty():
+		return
+	if player.charging or player.melee_foe != null or player.state == "routing":
+		return
+	player.fire_now = true                  # _update_firing fires every loaded man as one
+	_play_voice(snd_v_fire, player.off_pos)
+
 func _update_cam(delta: float) -> void:
 	# spyglass: raise the glass (RMB) -> narrow the FOV and mask to a circle
 	_scope_amt = move_toward(_scope_amt, 1.0 if _scoped else 0.0, delta * 6.0)
@@ -5210,6 +5291,8 @@ func _unhandled_input(event: InputEvent) -> void:
 				_talk()                   # hail your sergeant / a nearby unit / the general
 			KEY_G:
 				_fire_pistol()            # one shot from the horse-pistol, point-blank
+			KEY_F:
+				_give_fire()              # "GIVE FIRE!" — release your battalion's volley now
 			KEY_N:
 				_time_of_day = fposmod(_time_of_day + 1.5, 24.0)   # push the clock forward
 			KEY_M:

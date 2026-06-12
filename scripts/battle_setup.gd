@@ -70,6 +70,44 @@ static func default_field() -> BattleSetup:
 	#  the campaign will instead author every unit here, carrying real histories)
 	return s
 
+# A MULTIPLAYER skirmish: two lines of `per_side` battalions facing off, with the
+# claimed lobby slots assigned to their human commanders. Small enough to sync.
+static func skirmish(per_side: int, claimed: Array) -> BattleSetup:
+	var s := BattleSetup.new()
+	s.seed_value = randi() | 1
+	var fac0 := [Color(0.95, 0.92, 0.85), Color(0.85, 0.15, 0.15), Color(0.92, 0.80, 0.15)]
+	var fac1 := [Color(0.92, 0.85, 0.30), Color(0.20, 0.45, 0.20), Color(0.10, 0.15, 0.40)]
+	for team in [0, 1]:
+		var face := 0.0 if team == 0 else PI
+		var z := -240.0 if team == 0 else 240.0
+		for i in range(per_side):
+			var u := BattUnit.new()
+			u.team = team
+			u.men = 700
+			u.ammo = 50.0
+			u.morale = 100.0
+			u.experience = 1.0
+			u.brigade = i / 4
+			u.coat_idx = 0
+			var pal: Array = fac0 if team == 0 else fac1
+			u.facing_col = pal[(i / 4) % pal.size()]
+			u.pos = Vector3((float(i) - (per_side - 1) * 0.5) * 96.0, 0, z)
+			u.facing = face
+			var idx := team * per_side + i
+			u.name = "%d%s %s" % [i + 1, _ord_suffix(i + 1), "of Foot" if team == 0 else "Provincials"]
+			u.human_slot = idx if (idx in claimed) else -1
+			s.units.append(u)
+	return s
+
+static func _ord_suffix(n: int) -> String:
+	if n % 100 in [11, 12, 13]:
+		return "th"
+	match n % 10:
+		1: return "st"
+		2: return "nd"
+		3: return "rd"
+	return "th"
+
 func to_dict() -> Dictionary:
 	var ud: Array = []
 	for u in units:

@@ -49,14 +49,35 @@ class Token:                      # one battalion, as the world sees it
 	var morale: float = 100.0
 	var pos: Vector3
 	var dir: Vector3 = Vector3.FORWARD
-	var path: Array = []          # settlement indices still to visit
+	var path: Array = []          # (legacy road waypoints — movement is free now)
+	var dest: Vector3             # where this battalion is marching, cross-country
+	var has_dest: bool = false
 	var state: String = "hold"    # hold | march | fight | rout
 	var enemy: Token = null
+	var division: int = 0
 	var brigade: int = 0
 	var smoke_cd: float = 0.0
 	var is_player: bool = false   # the battalion the player commands
 	var facing_col: Color = Color.WHITE
 	var coat_idx: int = 0
+
+class HQ:                         # a command post: army / division / brigade
+	var faction: int
+	var level: int                # 0 army, 1 division, 2 brigade
+	var idx: int                  # which division/brigade it commands
+	var name: String
+	var pos: Vector3
+	var node: Node3D
+	var label: Label3D
+	var courier_cd: float = 0.0
+
+class Courier:                    # a rider carrying orders or news between posts
+	var faction: int
+	var pos: Vector3
+	var target                    # an HQ or Token (we track its live position)
+	var msg: String
+	var to_player: bool = false
+	var node: Node3D
 
 class Cart:
 	var node: Node3D
@@ -83,6 +104,15 @@ var civs: Array = []              # { home: int, pos, tgt }
 var deer: Array = []              # { pos, tgt, flee }
 var fac_goal := [-1, -1]          # current operational objective per faction
 var fac_cd := [5.0, 9.0]          # appreciation timers (staggered)
+var hqs: Array = []               # army/division/brigade command posts
+var couriers: Array = []          # riders carrying orders and news
+var hills: Array = []             # { name, pos } hilltops — strategic high ground
+var strong_points: Array = []     # { pos, kind, name, holder } woods + hills to hold
+const DIVS_PER_SIDE := 2
+const BDES_PER_DIV := 2
+const BNS_PER_BDE := 3
+const MARCH_ARRIVE := 60.0        # how close counts as "arrived"
+const COURIER_SPEED := 22.0       # a galloper carries faster than a marching column
 
 var clock := 7.0                  # hour of day, 1:1 real time
 var day := 1
@@ -128,13 +158,16 @@ func _ready() -> void:
 	_build_ground()
 	_build_settlements()
 	_build_roads()
+	_build_hills()
 	_build_woods_and_fields()
+	_build_strong_points()
 	_build_pools()
 	var returning: bool = not GameConfig.world_state.is_empty()
 	if returning:
 		_restore_world(GameConfig.world_state)
 	else:
 		_spawn_armies()
+	_spawn_hqs()                   # command posts (rebuilt fresh; not serialized)
 	_spawn_life()
 	_build_camera()
 	_build_hud()
@@ -286,13 +319,16 @@ func _build_roads() -> void:
 		mi.rotation.y = atan2(b.x - a.x, b.z - a.z)
 		add_child(mi)
 
-func _build_woods_and_fields() -> void:
-	# woodland blobs — ambush country between the settlements
-	var groves := [
+func _grove_list() -> Array:
+	return [
 		[Vector3(-2600, 0, 1600), 900.0], [Vector3(1400, 0, 1400), 800.0],
 		[Vector3(-1500, 0, -1800), 1000.0], [Vector3(2400, 0, -700), 750.0],
 		[Vector3(-4000, 0, -3600), 800.0], [Vector3(4200, 0, 3600), 900.0],
 		[Vector3(900, 0, -3200), 850.0], [Vector3(-4400, 0, 2400), 700.0]]
+
+func _build_woods_and_fields() -> void:
+	# woodland blobs — ambush country between the settlements
+	var groves := _grove_list()
 	# woods are drawn as flat green map patches (a few overlapping discs per grove),
 	# not 3D trees — clean and readable from above
 	var tree_mm := MultiMesh.new()
@@ -345,6 +381,129 @@ func _build_woods_and_fields() -> void:
 	fmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	fmi.material_override = fmat
 	add_child(fmi)
+
+# hilltops — strategic high ground, drawn as contour rings with a name
+func _build_hills() -> void:
+	hills = [
+		{ "name": "Vimy Ridge", "pos": Vector3(-1900, 0, 900) },
+		{ "name": "Telegraph Hill", "pos": Vector3(1600, 0, -400) },
+		{ "name": "Round Top", "pos": Vector3(-300, 0, -2400) },
+		{ "name": "Signal Heights", "pos": Vector3(3000, 0, 1700) },
+		{ "name": "Beacon Hill", "pos": Vector3(-3400, 0, -1100) }]
+	for h in hills:
+		var c: Vector3 = h["pos"]
+		# concentric flat discs read as contour lines / high ground (largest darkest)
+		for ring in range(3):
+			var rm := MeshInstance3D.new()
+			var cyl := CylinderMesh.new()
+			var rad := 420.0 - ring * 130.0
+			cyl.top_radius = rad
+			cyl.bottom_radius = rad
+			cyl.height = 2.0
+			cyl.radial_segments = 28
+			rm.mesh = cyl
+			rm.position = c + Vector3(0, 0.4 + ring * 0.2, 0)
+			var rmat := StandardMaterial3D.new()
+			rmat.albedo_color = Color(0.66, 0.56, 0.40).lerp(Color(0.80, 0.72, 0.55), float(ring) / 2.0)
+			rmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			rm.material_override = rmat
+			add_child(rm)
+		var lb := Label3D.new()
+		lb.text = "△ " + h["name"]
+		lb.font_size = 180
+		lb.pixel_size = 0.09
+		lb.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		lb.modulate = Color(0.6, 0.45, 0.32)
+		lb.position = c + Vector3(0, 26, 0)
+		add_child(lb)
+
+# the points the armies want to HOLD — woods (cover/ambush) and hilltops
+# (observation/command of the ground). Settlements are separate (capture goals).
+func _build_strong_points() -> void:
+	for gr in _grove_list():
+		strong_points.append({ "pos": gr[0], "kind": "woods", "name": "the woods", "holder": -1 })
+	for h in hills:
+		strong_points.append({ "pos": h["pos"], "kind": "hill", "name": h["name"], "holder": -1 })
+
+# command posts — one army, two division, four brigade per side, posted behind
+# their formations and sending couriers up and down the chain
+func _spawn_hqs() -> void:
+	for h in hqs:
+		if h.node != null:
+			h.node.queue_free()
+	hqs.clear()
+	for f in range(2):
+		_make_hq(f, 0, 0, "%s — Army HQ" % FACTION_NAMES[f])
+		for dv in range(DIVS_PER_SIDE):
+			_make_hq(f, 1, dv, "%d%s Division HQ" % [dv + 1, _ord(dv + 1)])
+		for bd in range(DIVS_PER_SIDE * BDES_PER_DIV):
+			_make_hq(f, 2, bd, "%d%s Brigade HQ" % [bd + 1, _ord(bd + 1)])
+
+func _make_hq(f: int, level: int, idx: int, name: String) -> void:
+	var hq := HQ.new()
+	hq.faction = f
+	hq.level = level
+	hq.idx = idx
+	hq.name = name
+	hq.pos = _hq_anchor(hq)
+	hq.courier_cd = randf_range(8.0, 22.0)
+	# a flat command-post marker: a faction diamond with a lighter inner diamond,
+	# bigger for higher command — reads clearly from the top-down map
+	var node := Node3D.new()
+	var size := [230.0, 165.0, 120.0][level]
+	var plate := MeshInstance3D.new()
+	var pm := PlaneMesh.new()
+	pm.size = Vector2(size, size)
+	pm.orientation = PlaneMesh.FACE_Y
+	plate.mesh = pm
+	plate.rotation.y = PI * 0.25      # a diamond
+	plate.position = Vector3(0, 9, 0)
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = FACTION_COLS[f]
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	plate.material_override = mat
+	node.add_child(plate)
+	var inner := MeshInstance3D.new()
+	var ipm := PlaneMesh.new()
+	ipm.size = Vector2(size * 0.58, size * 0.58)
+	ipm.orientation = PlaneMesh.FACE_Y
+	inner.mesh = ipm
+	inner.rotation.y = PI * 0.25
+	inner.position = Vector3(0, 10, 0)
+	var imat := StandardMaterial3D.new()
+	imat.albedo_color = FACTION_COLS[f].lightened(0.45)
+	imat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	inner.material_override = imat
+	node.add_child(inner)
+	node.position = hq.pos
+	add_child(node)
+	hq.node = node
+	var lb := Label3D.new()
+	lb.text = ["★ ", "✦ ", ""][level] + name
+	lb.font_size = [200, 150, 120][level]
+	lb.pixel_size = 0.11
+	lb.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	lb.modulate = FACTION_COLS[f].lightened(0.35)
+	lb.position = Vector3(0, size * 0.4 + 22.0, 0)
+	node.add_child(lb)
+	hq.label = lb
+	hqs.append(hq)
+
+# where a command post sits: behind the centroid of the units it commands
+func _hq_anchor(hq: HQ) -> Vector3:
+	var c := Vector3.ZERO
+	var n := 0
+	for t in tokens:
+		if t.faction != hq.faction:
+			continue
+		if hq.level == 0 or (hq.level == 1 and t.division == hq.idx) or (hq.level == 2 and t.brigade == hq.idx):
+			c += t.pos
+			n += 1
+	if n == 0:
+		return settlements[0 if hq.faction == 0 else 8].pos
+	c /= float(n)
+	var rear := 1.0 if hq.faction == 0 else -1.0      # the rear is toward your own base (−/＋z)
+	return c + Vector3(0, 0, rear * (180.0 + (2 - hq.level) * 120.0))
 
 # a NATO-style infantry counter: a coloured field framed in ink with the crossed
 # diagonals (infantry) and two echelon ticks (II = battalion) along the top
@@ -483,24 +642,29 @@ func _build_pools() -> void:
 	add_child(smoke_p)
 
 func _spawn_armies() -> void:
-	# 3 brigades of 4 battalions a side for the preview war (~8,400 men each)
+	# each side: an army of 2 divisions, 2 brigades each, 3 battalions each (12 bns)
 	for f in range(2):
 		var cap_pos: Vector3 = settlements[0 if f == 0 else 8].pos
-		for bg in range(3):
-			for k in range(4):
-				var t := Token.new()
-				t.id = next_id
-				next_id += 1
-				t.faction = f
-				t.brigade = bg
-				var n := bg * 4 + k + 1
-				t.name = "%d%s %s" % [n, _ord(n), "of Foot" if f == 0 else "Provincials"]
-				t.experience = randf_range(0.85, 1.2)
-				t.facing_col = (FACINGS_0 if f == 0 else FACINGS_1)[bg % 6]
-				t.coat_idx = 1 if k == 3 else 0
-				var a := randf() * TAU
-				t.pos = cap_pos + Vector3(cos(a), 0, sin(a)) * randf_range(60.0, 90.0 + bg * 60.0)
-				tokens.append(t)
+		for dv in range(DIVS_PER_SIDE):
+			for bd in range(BDES_PER_DIV):
+				var bg := dv * BDES_PER_DIV + bd
+				for k in range(BNS_PER_BDE):
+					var t := Token.new()
+					t.id = next_id
+					next_id += 1
+					t.faction = f
+					t.division = dv
+					t.brigade = bg
+					var n := bg * BNS_PER_BDE + k + 1
+					t.name = "%d%s %s" % [n, _ord(n), "of Foot" if f == 0 else "Provincials"]
+					t.experience = randf_range(0.85, 1.2)
+					t.facing_col = (FACINGS_0 if f == 0 else FACINGS_1)[bg % 6]
+					t.coat_idx = 1 if k == BNS_PER_BDE - 1 else 0
+					# spread the brigade across a frontage near its corner of the capital
+					var spread := Vector3((float(bd) - 0.5) * 360.0 + (float(k) - 1) * 120.0, 0,
+						(float(dv) - 0.5) * 360.0) + Vector3(randf_range(-40, 40), 0, randf_range(-40, 40))
+					t.pos = cap_pos + spread
+					tokens.append(t)
 	# the player takes the 1st of Foot, leading the Crown's first brigade
 	player_tok = tokens[0]
 	player_tok.is_player = true
@@ -733,6 +897,9 @@ func _process(delta: float) -> void:
 	_update_factions(dt)
 	_update_tokens(dt)
 	_update_capture(dt)
+	_update_strong_points()
+	_update_hqs(dt)
+	_update_couriers(dt)
 	# (wildlife/civilians/road traffic are disabled on the operational map)
 	if player_tok != null:
 		objective_si = fac_goal[player_tok.faction]   # your army's main effort = your orders
@@ -779,18 +946,33 @@ func _update_factions(dt: float) -> void:
 		if best != -1 and best != fac_goal[f]:
 			fac_goal[f] = best
 			_event("%s march on [b]%s[/b]." % [FACTION_NAMES[f], settlements[best].name])
-		# point idle battalions at the objective; keep one brigade home as garrison
-		for t in tokens:
-			if t.faction != f or t.state != "hold" or t.is_player:
-				continue                  # the player commands his own battalion
-			var tgt: int = fac_goal[f] if t.brigade > 0 else (0 if f == 0 else 8)
-			if tgt == -1:
+		var goal_pos: Vector3 = settlements[fac_goal[f]].pos if fac_goal[f] >= 0 else settlements[0 if f == 0 else 8].pos
+		# each brigade takes a sector of the advance and spreads into a frontage;
+		# a brigade that finds itself near a strong point peels off to hold it
+		var nbde := DIVS_PER_SIDE * BDES_PER_DIV
+		for bg in range(nbde):
+			var bts: Array = []
+			for t in tokens:
+				if t.faction == f and t.brigade == bg and not t.is_player and t.state in ["hold", "march"]:
+					bts.append(t)
+			if bts.is_empty():
 				continue
-			var from := _nearest_settlement(t.pos)
-			var p := _route(from, tgt)
-			if p.size() > 0:
-				t.path = p
-				t.state = "march"
+			var bc := Vector3.ZERO
+			for t in bts:
+				bc += t.pos
+			bc /= float(bts.size())
+			var lateral := (float(bg) - (nbde - 1) * 0.5) * 760.0
+			var aim := goal_pos + Vector3(lateral, 0, 0)
+			var sp = _nearest_strong_point(bc, f)
+			if sp != null and bc.distance_to(sp["pos"]) < 1500.0:
+				aim = sp["pos"]                      # take and hold the high ground / woods
+			for i in range(bts.size()):
+				var t: Token = bts[i]
+				var off := Vector3((float(i) - (bts.size() - 1) * 0.5) * 170.0, 0, 0)
+				t.dest = aim + off
+				t.has_dest = true
+				if t.state == "hold":
+					t.state = "march"
 
 func _fac_center(f: int) -> Vector3:
 	var c := Vector3.ZERO
@@ -835,21 +1017,167 @@ func _route(from: int, to: int) -> Array:
 	path.pop_front()              # drop the start node
 	return path
 
+# marching is faster on a road: how much, by proximity to the nearest road
+func _road_factor(pos: Vector3) -> float:
+	var best := 1e18
+	for r in roads:
+		best = minf(best, _pt_seg_dist(pos, settlements[r[0]].pos, settlements[r[1]].pos))
+		if best < 60.0:
+			break
+	if best < 90.0:
+		return 1.8
+	if best < 240.0:
+		return 1.3
+	return 1.0
+
+func _pt_seg_dist(p: Vector3, a: Vector3, b: Vector3) -> float:
+	var ab := b - a
+	var tt := clampf((p - a).dot(ab) / maxf(ab.length_squared(), 1.0), 0.0, 1.0)
+	var proj := a + ab * tt
+	return Vector2(p.x - proj.x, p.z - proj.z).length()
+
+# the nearest strong point this faction does not already hold
+func _nearest_strong_point(pos: Vector3, f: int):
+	var best = null
+	var bd := 1e18
+	for sp in strong_points:
+		if sp["holder"] == f:
+			continue
+		var d: float = pos.distance_squared_to(sp["pos"])
+		if d < bd:
+			bd = d
+			best = sp
+	return best
+
+# a strong point is held by whoever has a battalion sitting on it
+func _update_strong_points() -> void:
+	for sp in strong_points:
+		var here := [false, false]
+		for t in tokens:
+			if t.state != "rout" and t.pos.distance_to(sp["pos"]) < 420.0:
+				here[t.faction] = true
+		if here[0] != here[1]:
+			sp["holder"] = 0 if here[0] else 1
+
+func _place_name(pos: Vector3) -> String:
+	var best := "the open ground"
+	var bd := 1e18
+	for s in settlements:
+		var d: float = pos.distance_squared_to(s.pos)
+		if d < bd:
+			bd = d
+			best = s.name
+	for sp in strong_points:
+		var d2: float = pos.distance_squared_to(sp["pos"])
+		if d2 < bd:
+			bd = d2
+			best = sp["name"]
+	return best
+
+# ----------------------------------------------------- command posts & couriers
+
+func _update_hqs(dt: float) -> void:
+	for hq in hqs:
+		hq.pos = hq.pos.lerp(_hq_anchor(hq), clampf(dt * 0.4, 0, 1))
+		if hq.node != null:
+			hq.node.position = hq.pos
+		hq.courier_cd -= dt
+		if hq.courier_cd <= 0.0:
+			hq.courier_cd = randf_range(14.0, 30.0)
+			_dispatch_courier(hq)
+
+func _dispatch_courier(hq: HQ) -> void:
+	var f := hq.faction
+	var obj: String = settlements[fac_goal[f]].name if fac_goal[f] >= 0 else "the front"
+	if hq.level == 0:                         # army -> a division
+		var subs := _hq_subs(f, 1, -1)
+		if not subs.is_empty():
+			_spawn_courier(hq, subs[randi() % subs.size()], "Army HQ: press the advance — objective %s." % obj, false)
+	elif hq.level == 1:                       # division -> one of its brigades
+		var dsubs := _hq_subs(f, 2, hq.idx)
+		if not dsubs.is_empty():
+			_spawn_courier(hq, dsubs[randi() % dsubs.size()], "%s: carry your sector forward." % hq.name, false)
+	else:                                     # brigade -> a battalion (often the player)
+		var bns: Array = []
+		var pl = null
+		for t in tokens:
+			if t.faction == f and t.brigade == hq.idx:
+				bns.append(t)
+				if t.is_player:
+					pl = t
+		if bns.is_empty():
+			return
+		var tgt = bns[randi() % bns.size()]
+		if pl != null and randf() < 0.6:
+			tgt = pl
+		var to_player: bool = tgt.is_player
+		var msg := ""
+		if to_player:
+			msg = "Brigade HQ to the %s — advance in support of the attack on %s." % [tgt.name, obj]
+		_spawn_courier(hq, tgt, msg, to_player)
+
+func _hq_subs(f: int, level: int, div: int) -> Array:
+	var out: Array = []
+	for h in hqs:
+		if h.faction == f and h.level == level and (div < 0 or (h.idx / BDES_PER_DIV) == div):
+			out.append(h)
+	return out
+
+func _spawn_courier(from_hq: HQ, target, msg: String, to_player: bool) -> void:
+	var c := Courier.new()
+	c.faction = from_hq.faction
+	c.pos = from_hq.pos
+	c.target = target
+	c.msg = msg
+	c.to_player = to_player
+	var node := MeshInstance3D.new()
+	var sph := SphereMesh.new()
+	sph.radius = 16.0
+	sph.height = 32.0
+	node.mesh = sph
+	var m := StandardMaterial3D.new()
+	m.albedo_color = Color(1.0, 0.85, 0.3) if to_player else FACTION_COLS[from_hq.faction].lightened(0.25)
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	node.material_override = m
+	node.position = c.pos + Vector3(0, 30, 0)
+	add_child(node)
+	c.node = node
+	couriers.append(c)
+
+func _update_couriers(dt: float) -> void:
+	for i in range(couriers.size() - 1, -1, -1):
+		var c: Courier = couriers[i]
+		if c.target == null or not (c.target in hqs or c.target in tokens):
+			c.node.queue_free()
+			couriers.remove_at(i)
+			continue
+		var tp: Vector3 = c.target.pos
+		var d := c.pos.distance_to(tp)
+		if d < 90.0:
+			if c.to_player and c.msg != "":
+				_event("[color=#ffd24a]✉ Despatch:[/color] %s" % c.msg)
+			c.node.queue_free()
+			couriers.remove_at(i)
+			continue
+		c.pos += (tp - c.pos) / d * COURIER_SPEED * dt
+		c.node.position = c.pos + Vector3(0, 30, 0)
+
 func _update_tokens(dt: float) -> void:
-	# movement and engagement
+	# movement and engagement — units march cross-country to a point, faster on roads
 	for t in tokens:
 		match t.state:
 			"march", "rout":
-				if t.path.is_empty():
-					t.state = "hold" if t.state == "march" else "hold"
+				if not t.has_dest:
+					t.state = "hold"
 					continue
-				var tgt: Vector3 = settlements[t.path[0]].pos
-				var d := t.pos.distance_to(tgt)
-				if d < 50.0:
-					t.path.pop_front()
+				var d := t.pos.distance_to(t.dest)
+				if d < MARCH_ARRIVE:
+					t.has_dest = false
+					t.state = "hold"
 					continue
-				var sp := ROUT_SPEED if t.state == "rout" else MARCH_SPEED
-				t.dir = (tgt - t.pos) / d
+				var base_sp := ROUT_SPEED if t.state == "rout" else MARCH_SPEED
+				var sp := base_sp * (1.0 if t.state == "rout" else _road_factor(t.pos))
+				t.dir = (t.dest - t.pos) / d
 				t.pos += t.dir * sp * dt
 				if t.state == "rout":
 					t.morale = minf(100.0, t.morale + dt * 0.6)
@@ -904,10 +1232,7 @@ func _resolve_fight(t: Token, dt: float) -> void:
 		t.smoke_cd = 0.6
 		smoke_p.emit_particle(Transform3D(Basis(), t.pos + Vector3(randf_range(-20, 20), 8, randf_range(-20, 20))), Vector3(0, 1, 0), Color.WHITE, Color.WHITE, 5)
 	if t.morale < 35.0:
-		t.state = "rout"
-		var home := 0 if t.faction == 0 else 8
-		t.path = _route(_nearest_settlement(t.pos), home)
-		t.enemy = null
+		_rout_token(t)
 		if e.enemy == t:
 			e.enemy = null
 			e.state = "hold"
@@ -1134,16 +1459,13 @@ func _order_march(screen_pos: Vector2) -> void:
 	if d <= 0.0:
 		return
 	var hit := from + dir * d
-	var si := _nearest_settlement(hit)
-	var path := _route(_nearest_settlement(player_tok.pos), si)
-	if path.is_empty():
-		path = [si]
-	player_tok.path = path
+	player_tok.dest = Vector3(hit.x, 0, hit.z)   # march cross-country to the chosen ground
+	player_tok.has_dest = true
 	player_tok.state = "march"
 	pending = null
 	if player_tok.enemy != null:        # break off any stand-off
 		player_tok.enemy = null
-	_event("[color=#cfe] You march for %s.[/color]" % settlements[si].name)
+	_event("[color=#cfe]You march for %s.[/color]" % _place_name(player_tok.dest))
 
 func _apply_cam() -> void:
 	cam.rotation = Vector3(cam_pitch, cam_yaw, 0)
@@ -1311,7 +1633,7 @@ func _serialize_world() -> Dictionary:
 	for t in tokens:
 		ts.append({ "id": t.id, "name": t.name, "fac": t.faction, "men": t.men,
 			"exp": t.experience, "mor": t.morale, "px": t.pos.x, "pz": t.pos.z,
-			"brig": t.brigade, "state": t.state, "path": t.path.duplicate(),
+			"brig": t.brigade, "div": t.division, "state": t.state,
 			"fr": t.facing_col.r, "fg": t.facing_col.g, "fb": t.facing_col.b,
 			"coat": t.coat_idx, "pl": t.is_player })
 	var ss: Array = []
@@ -1332,8 +1654,8 @@ func _restore_world(d: Dictionary) -> void:
 		t.morale = float(td["mor"])
 		t.pos = Vector3(td["px"], 0, td["pz"])
 		t.brigade = int(td["brig"])
-		t.state = td["state"]
-		t.path = (td["path"] as Array).duplicate()
+		t.division = int(td.get("div", 0))
+		t.state = "hold"              # re-tasked by the AI on the next appreciation
 		t.facing_col = Color(td["fr"], td["fg"], td["fb"])
 		t.coat_idx = int(td["coat"])
 		t.is_player = bool(td["pl"])
@@ -1391,8 +1713,8 @@ func _apply_battle_result() -> void:
 
 func _rout_token(t: Token) -> void:
 	t.state = "rout"
-	var home := 0 if t.faction == 0 else 8
-	t.path = _route(_nearest_settlement(t.pos), home)
+	t.dest = settlements[0 if t.faction == 0 else 8].pos   # flee for home
+	t.has_dest = true
 	t.enemy = null
 
 func _ord(n: int) -> String:

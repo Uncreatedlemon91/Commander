@@ -9,8 +9,11 @@ extends Node
 signal lobby_updated
 
 const PORT := 24555
-# battalion slots players may take (interleaved sides, centres first)
-const HUMAN_SLOTS := [2, 7, 0, 5, 1, 6, 3, 8, 4, 9]
+# the multiplayer skirmish is per_side battalions a team; the claimable command
+# slots are global unit indices: 0..MP_PER_SIDE-1 = team 0, the rest = team 1.
+const MP_PER_SIDE := 8
+# interleaved so the first players to join end up on opposing sides
+const HUMAN_SLOTS := [0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15]
 
 var lobby: Dictionary = {}      # peer_id -> battalion slot (synced to everyone)
 var game: Node = null           # the running battle, set by game.gd
@@ -94,20 +97,23 @@ func human_slots() -> Array:
 	return lobby.values()
 
 func slot_label(slot: int) -> String:
-	# slots 0..4 = French line, 5..9 = Allied line
-	if slot < 5:
-		return "FR %d" % (slot + 1)
-	return "AL %d" % (slot - 4)
+	if slot < MP_PER_SIDE:
+		return "Foot %d" % (slot + 1)
+	return "Prov %d" % (slot - MP_PER_SIDE + 1)
 
 func start_game() -> void:
 	if multiplayer.is_server():
-		var s := int(Time.get_unix_time_from_system()) ^ (randi() | 1)
-		rpc("_load_battle", s)
+		# author the shared skirmish (small enough to sync) and hand it to everyone
+		var setup := BattleSetup.skirmish(MP_PER_SIDE, lobby.values())
+		rpc("_load_battle", setup.to_dict())
 
 @rpc("authority", "call_local", "reliable")
-func _load_battle(seed_value: int) -> void:
-	GameConfig.match_seed = seed_value
-	print("[NET] loading battle (mode=%s, slot=%d)" % [GameConfig.mode, GameConfig.local_slot])
+func _load_battle(setup_dict: Dictionary) -> void:
+	var setup := BattleSetup.from_dict(setup_dict)
+	GameConfig.setup = setup
+	GameConfig.match_seed = setup.seed_value
+	GameConfig.return_to_world = false
+	print("[NET] loading battle (mode=%s, slot=%d, %d battalions)" % [GameConfig.mode, GameConfig.local_slot, setup.units.size()])
 	get_tree().change_scene_to_file("res://game.tscn")
 
 # --- client -> host: my officer + my orders ---
