@@ -93,7 +93,7 @@ static func skirmish(per_side: int, claimed: Array) -> BattleSetup:
 			u.facing_col = pal[(i / 4) % pal.size()]
 			u.pos = Vector3((float(i) - (per_side - 1) * 0.5) * 96.0, 0, z)
 			u.facing = face
-			var idx := team * per_side + i
+			var idx: int = int(team) * per_side + i
 			u.name = "%d%s %s" % [i + 1, _ord_suffix(i + 1), "of Foot" if team == 0 else "Provincials"]
 			u.human_slot = idx if (idx in claimed) else -1
 			s.units.append(u)

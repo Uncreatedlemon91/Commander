@@ -212,6 +212,7 @@ class Batt:
 	var exp_mul: float = 1.0       # drill quality: veterans reload faster, recruits slower
 	var march_player: AudioStreamPlayer3D   # the drummer's marching cadence while moving
 	var last_pos: Vector3          # to detect whether the battalion is moving this frame
+	var fire_pos: Vector3          # position at the last firing tick (no fire on the move)
 	var marching: bool = false
 	# --- the command group can be shot away: officer, colours, drummer ---
 	var colours_down: bool = false   # the colour-bearer is down, the colours on the ground
@@ -245,6 +246,7 @@ class Gun:
 	var brigade = null          # the Brigade this battery answers to
 	var fire_mission = null     # an enemy Batt the commander has ordered it to engage
 	var move_to: Vector3        # where the commander wants the piece posted
+	var cmd_t: float = 0.0      # seconds this piece is under the PLAYER's hand (not the brigade's)
 	var limber_state: String = "deployed"   # deployed | limbering | moving | unlimbering
 	var limber_t: float = 0.0   # timer for the current limber/unlimber transition
 	var limber_group: Node3D    # the limber cart + horse team (shown only while limbered)
@@ -344,8 +346,12 @@ const FACINGS_0 := [Color(0.95, 0.92, 0.85), Color(0.85, 0.15, 0.15), Color(0.92
 	Color(0.65, 0.10, 0.35), Color(0.95, 0.50, 0.12), Color(0.45, 0.70, 0.90)]
 const FACINGS_1 := [Color(0.92, 0.85, 0.30), Color(0.20, 0.45, 0.20), Color(0.10, 0.15, 0.40),
 	Color(0.95, 0.95, 0.92), Color(0.55, 0.12, 0.45), Color(0.05, 0.05, 0.06)]
-const COATS_0 := [Color(0.30, 0.38, 0.78), Color(0.19, 0.25, 0.52), Color(0.15, 0.19, 0.42)]
-const COATS_1 := [Color(0.74, 0.30, 0.30), Color(0.24, 0.42, 0.27), Color(0.52, 0.20, 0.20)]
+# each army wears ONE distinctive coat — Blue vs Red — and only the facings (collar)
+# change from regiment to regiment. (All three variants are the same colour now.)
+const ARMY_BLUE := Color(0.07, 0.10, 0.30)   # navy blue
+const ARMY_RED := Color(0.64, 0.15, 0.15)
+const COATS_0 := [ARMY_BLUE, ARMY_BLUE, ARMY_BLUE]
+const COATS_1 := [ARMY_RED, ARMY_RED, ARMY_RED]
 
 var battalions: Array[Batt] = []
 var player: Batt
@@ -355,7 +361,8 @@ var musket_mm: Array = [null, null]      # a placeholder musket per rendered sol
 var musket_prev: Array[int] = [0, 0]
 var bearer_mm: MultiMesh                  # colour-bearer per battalion
 var nco_mm: MultiMesh                     # company sergeants + rear file-closers
-const MAX_NCO := 14
+var spontoon_mm: MultiMesh               # the half-pikes (spontoons) the NCOs carry
+const MAX_NCO := 16   # sergeants + file-closers + the colour party's two guards
 var _lights: Array = []                   # pooled muzzle-flash OmniLights
 var _light_i := 0
 var _shake := 0.0
@@ -645,17 +652,14 @@ func _build_world() -> void:
 
 	rain_p = _build_rain()
 
+	var soldier_mesh := _soldier_mesh()   # a blocky man (head/chest/two legs), legs swing in-shader
 	for team in [0, 1]:
 		var mmi := MultiMeshInstance3D.new()
 		var mm := MultiMesh.new()
 		mm.transform_format = MultiMesh.TRANSFORM_3D
-		var cap := CapsuleMesh.new()
-		cap.radius = CAP_RADIUS
-		cap.height = CAP_HEIGHT
-		cap.radial_segments = 6          # 70,000 men a side — every vertex counts
-		cap.rings = 2
-		mm.mesh = cap
+		mm.mesh = soldier_mesh
 		mm.use_colors = true              # per-instance: rgb = facings, a = coat variant
+		mm.use_custom_data = true         # per-instance: r=wear  g=gait phase  b=march amount
 		mm.instance_count = MAX_PER_TEAM
 		mmi.multimesh = mm
 		mmi.material_override = _soldier_shader(team)
@@ -665,22 +669,17 @@ func _build_world() -> void:
 		for i in range(MAX_PER_TEAM):
 			mm.set_instance_transform(i, _zero_xf())
 			mm.set_instance_color(i, def)
+			mm.set_instance_custom_data(i, Color(1, 1, 1, 1))
 
 	# a placeholder musket (thin box) per soldier — shouldered, levelled to fire
 	for team in [0, 1]:
 		var gmi := MultiMeshInstance3D.new()
 		var gmm := MultiMesh.new()
 		gmm.transform_format = MultiMesh.TRANSFORM_3D
-		var box := BoxMesh.new()
-		box.size = Vector3(0.05, 0.05, 1.3)
-		gmm.mesh = box
+		gmm.mesh = _musket_mesh()
 		gmm.instance_count = MAX_PER_TEAM
 		gmi.multimesh = gmm
-		var gunmat := StandardMaterial3D.new()
-		gunmat.albedo_color = Color(0.16, 0.11, 0.07)
-		gunmat.roughness = 0.7
-		gunmat.metallic = 0.25
-		gmi.material_override = gunmat
+		gmi.material_override = _musket_shader()
 		add_child(gmi)
 		musket_mm[team] = gmm
 		for i in range(MAX_PER_TEAM):
@@ -701,22 +700,20 @@ func _build_world() -> void:
 		var cmi := MultiMeshInstance3D.new()
 		var cmm := MultiMesh.new()
 		cmm.transform_format = MultiMesh.TRANSFORM_3D
-		var ccap := CapsuleMesh.new()
-		ccap.radius = CAP_RADIUS
-		ccap.height = CAP_HEIGHT
-		ccap.radial_segments = 6
-		ccap.rings = 2
-		cmm.mesh = ccap
+		cmm.mesh = soldier_mesh           # blocky fallen men, banded just like the living
+		cmm.use_colors = true
+		cmm.use_custom_data = true
 		cmm.instance_count = CORPSE_MAX
 		cmi.multimesh = cmm
-		var cmat := StandardMaterial3D.new()
-		cmat.albedo_color = team_color(team).darkened(0.12)   # same colour, a touch muddied
-		cmat.roughness = 1.0
-		cmi.material_override = cmat
+		cmi.material_override = _soldier_shader(team)   # shako / coat / facings / trousers, static
 		add_child(cmi)
 		corpse_mm[team] = cmm
+		var cfac: Color = FACINGS_0[0] if team == 0 else FACINGS_1[0]
+		var ccol := Color(cfac.r, cfac.g, cfac.b, 0.0)
 		for i in range(CORPSE_MAX):
 			cmm.set_instance_transform(i, _zero_xf())
+			cmm.set_instance_color(i, ccol)                                  # banded coat/facings
+			cmm.set_instance_custom_data(i, Color(randf_range(0.7, 1.0), 0.0, 0.0, 0.0))   # wear; no march/arm
 
 	# an invisible ground plane so ragdolls have something to fall onto
 	_floor = StaticBody3D.new()
@@ -742,10 +739,7 @@ func _build_world() -> void:
 		rcs.shape = rcap
 		rb.add_child(rcs)
 		var rmi := MeshInstance3D.new()
-		var rmesh := CapsuleMesh.new()
-		rmesh.radius = CAP_RADIUS
-		rmesh.height = CAP_HEIGHT
-		rmi.mesh = rmesh
+		rmi.mesh = soldier_mesh           # a blocky man tumbling, matching the line
 		var rmat := StandardMaterial3D.new()
 		rmi.material_override = rmat
 		rb.add_child(rmi)
@@ -753,18 +747,16 @@ func _build_world() -> void:
 		add_child(rb)
 		_ragdolls.append({ "body": rb, "mat": rmat, "active": false, "t": 0.0, "team": 0 })
 
+	var officer_mesh := _officer_mesh()   # blocky body + bicorne; coat colour set per instance
 	var omi := MultiMeshInstance3D.new()
 	officer_mm = MultiMesh.new()
 	officer_mm.transform_format = MultiMesh.TRANSFORM_3D
-	var ocap := CapsuleMesh.new()
-	ocap.radius = 0.3
-	ocap.height = 1.7
-	officer_mm.mesh = ocap
+	officer_mm.mesh = officer_mesh
+	officer_mm.use_colors = true
+	officer_mm.use_custom_data = true
 	officer_mm.instance_count = BATT_PER_TEAM * 2
 	omi.multimesh = officer_mm
-	var omat := StandardMaterial3D.new()
-	omat.albedo_color = Color(0.85, 0.7, 0.3)
-	omi.material_override = omat
+	omi.material_override = _officer_shader()
 	add_child(omi)
 	for i in range(BATT_PER_TEAM * 2):
 		officer_mm.set_instance_transform(i, _zero_xf())
@@ -825,20 +817,27 @@ func _build_world() -> void:
 	var nmi := MultiMeshInstance3D.new()
 	nco_mm = MultiMesh.new()
 	nco_mm.transform_format = MultiMesh.TRANSFORM_3D
-	var ncap := CapsuleMesh.new()
-	ncap.radius = 0.22
-	ncap.height = 1.72
-	ncap.radial_segments = 6
-	ncap.rings = 2
-	nco_mm.mesh = ncap
+	nco_mm.mesh = soldier_mesh          # sergeants & file-closers wear the shako, like the line
+	nco_mm.use_colors = true
+	nco_mm.use_custom_data = true
 	nco_mm.instance_count = BATT_PER_TEAM * 2 * MAX_NCO
 	nmi.multimesh = nco_mm
-	var nmat := StandardMaterial3D.new()
-	nmat.albedo_color = Color(0.42, 0.42, 0.46)
-	nmi.material_override = nmat
+	nmi.material_override = _officer_shader()
 	add_child(nmi)
 	for i in range(BATT_PER_TEAM * 2 * MAX_NCO):
 		nco_mm.set_instance_transform(i, _zero_xf())
+
+	# the spontoons (half-pikes) the NCOs carry — one per NCO slot
+	var spmi := MultiMeshInstance3D.new()
+	spontoon_mm = MultiMesh.new()
+	spontoon_mm.transform_format = MultiMesh.TRANSFORM_3D
+	spontoon_mm.mesh = _spontoon_mesh()
+	spontoon_mm.instance_count = BATT_PER_TEAM * 2 * MAX_NCO
+	spmi.multimesh = spontoon_mm
+	spmi.material_override = _spontoon_material()
+	add_child(spmi)
+	for i in range(BATT_PER_TEAM * 2 * MAX_NCO):
+		spontoon_mm.set_instance_transform(i, _zero_xf())
 
 	# drummers — one per battalion, at the colours (white coats)
 	var dmi := MultiMeshInstance3D.new()
@@ -1030,24 +1029,200 @@ func _build_bill_panel(cl: CanvasLayer) -> void:
 
 # ---------------------------------------------------------------- sky, light, weather
 
-# The uniform, painted in bands by height: shako, FACING-coloured collar, coat,
-# a facing cuff-line at the hands, campaign trousers. One draw call per army —
-# the facing colour rides per-instance in COLOR.rgb, the coat variant in COLOR.a.
+# A blocky soldier: a head/shako block, a coat block, two leg blocks. One combined
+# mesh (one draw call per army), instanced 70,000 times. Centred at the origin so it
+# drops into the same per-man transform as the old capsule.
+func _soldier_mesh() -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	_add_box(st, Vector3(0, 0.675, 0), Vector3(0.27, 0.35, 0.27))      # head + shako
+	_add_box(st, Vector3(0, 0.225, 0), Vector3(0.42, 0.55, 0.26))      # chest / coat
+	_add_box(st, Vector3(-0.265, 0.20, 0), Vector3(0.13, 0.52, 0.14))  # left arm  (|x|>0.215 in shader)
+	_add_box(st, Vector3(0.265, 0.20, 0), Vector3(0.13, 0.52, 0.14))   # right arm
+	_add_box(st, Vector3(-0.105, -0.45, 0), Vector3(0.17, 0.80, 0.20)) # left leg  (vy<-0.05 in shader)
+	_add_box(st, Vector3(0.105, -0.45, 0), Vector3(0.17, 0.80, 0.20))  # right leg
+	return st.commit()
+
+func _add_box(st: SurfaceTool, c: Vector3, s: Vector3) -> void:
+	var b := BoxMesh.new()
+	b.size = s
+	st.append_from(b, 0, Transform3D(Basis(), c))
+
+# A musket: walnut stock, iron barrel, a steel bayonet at the muzzle. One combined
+# mesh along local Z; a shader paints wood/iron/steel by position.
+func _musket_mesh() -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	_add_box(st, Vector3(0, 0, -0.40), Vector3(0.055, 0.105, 0.52))    # stock / butt
+	_add_box(st, Vector3(0, 0.01, 0.12), Vector3(0.032, 0.042, 0.96))  # barrel
+	_add_box(st, Vector3(0, 0.01, 0.74), Vector3(0.014, 0.014, 0.30))  # bayonet
+	return st.commit()
+
+func _musket_shader() -> ShaderMaterial:
+	var sh := Shader.new()
+	sh.code = """
+shader_type spatial;
+varying float vz;
+void vertex() { vz = VERTEX.z; }
+void fragment() {
+	vec3 col = vec3(0.12, 0.12, 0.14);                 // iron barrel
+	float metal = 0.6; float rough = 0.35;
+	if (vz < -0.15) { col = vec3(0.30, 0.18, 0.09); metal = 0.0; rough = 0.8; }   // walnut stock
+	else if (vz > 0.60) { col = vec3(0.56, 0.57, 0.62); metal = 0.7; rough = 0.3; } // steel bayonet
+	ALBEDO = col;
+	METALLIC = metal;
+	ROUGHNESS = rough;
+}
+"""
+	var m := ShaderMaterial.new()
+	m.shader = sh
+	return m
+
+# A spontoon (half-pike): an ash pole with a steel head and crossbar. Stands upright;
+# the mesh runs from the butt at y=0 up to the blade, so it plants at the man's feet.
+func _spontoon_mesh() -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	_add_box(st, Vector3(0, 1.05, 0), Vector3(0.035, 2.10, 0.035))   # pole
+	_add_box(st, Vector3(0, 1.92, 0), Vector3(0.17, 0.03, 0.03))     # crossbar
+	_add_box(st, Vector3(0, 2.20, 0), Vector3(0.085, 0.34, 0.022))   # blade
+	return st.commit()
+
+func _spontoon_material() -> ShaderMaterial:
+	var sh := Shader.new()
+	sh.code = """
+shader_type spatial;
+varying float vy;
+void vertex() { vy = VERTEX.y; }
+void fragment() {
+	vec3 col = vec3(0.32, 0.22, 0.12);                 // ash pole
+	float metal = 0.0; float rough = 0.85;
+	if (vy > 1.98) { col = vec3(0.55, 0.56, 0.61); metal = 0.7; rough = 0.3; }   // steel head
+	ALBEDO = col; METALLIC = metal; ROUGHNESS = rough;
+}
+"""
+	var m := ShaderMaterial.new()
+	m.shader = sh
+	return m
+
+# An officer/NCO: like the blocky man, but a wide fore-and-aft BICORNE instead of
+# the shako, and the coat colour comes per-instance (so one mesh serves both armies).
+func _officer_mesh() -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	_add_box(st, Vector3(0, 0.70, 0), Vector3(0.16, 0.11, 0.50))       # bicorne (wide fore-aft)
+	_add_box(st, Vector3(0, 0.55, 0), Vector3(0.21, 0.22, 0.21))       # head
+	_add_box(st, Vector3(0, 0.225, 0), Vector3(0.42, 0.55, 0.26))      # chest / coat
+	_add_box(st, Vector3(-0.265, 0.20, 0), Vector3(0.13, 0.52, 0.14))  # left arm
+	_add_box(st, Vector3(0.265, 0.20, 0), Vector3(0.13, 0.52, 0.14))   # right arm
+	_add_box(st, Vector3(-0.105, -0.45, 0), Vector3(0.17, 0.80, 0.20)) # left leg
+	_add_box(st, Vector3(0.105, -0.45, 0), Vector3(0.17, 0.80, 0.20))  # right leg
+	return st.commit()
+
+# The officer's coat colour rides per-instance in COLOR.rgb; the bicorne is black;
+# the legs swing as he paces (CUSTOM.b = march, CUSTOM.g = phase).
+func _officer_shader() -> ShaderMaterial:
+	var sh := Shader.new()
+	sh.code = """
+shader_type spatial;
+varying float vy;
+varying float vx;
+varying float vnz;
+void vertex() {
+	vy = VERTEX.y; vx = VERTEX.x; vnz = NORMAL.z;
+	float march = INSTANCE_CUSTOM.b;
+	float phase = INSTANCE_CUSTOM.g;
+	float hip = -0.05;
+	if (VERTEX.y < hip && march > 0.001) {
+		float legside = (VERTEX.x < 0.0) ? 1.0 : -1.0;
+		float ang = sin(TIME * 6.0 + phase * 6.28318) * march * 0.5 * legside;
+		float yy = VERTEX.y - hip;
+		float cs = cos(ang); float sn = sin(ang);
+		VERTEX.y = yy * cs - VERTEX.z * sn + hip;
+		VERTEX.z = yy * sn + VERTEX.z * cs;
+	}
+}
+void fragment() {
+	vec3 col = COLOR.rgb;                                 // the battalion coat
+	if (vy > 0.48) { col = vec3(0.05, 0.05, 0.06); }      // shako/bicorne & head shadow
+	else if (vy < -0.05) { col = vec3(0.58, 0.56, 0.52); } // trousers
+	// white CROSSBELTS for the rank-and-file/NCOs (COLOR.a flags it; officers wear none)
+	if (COLOR.a > 0.5 && abs(vx) < 0.215 && vy > -0.05 && vy < 0.45 && abs(vnz) > 0.5) {
+		float u = vx / 0.21; float v = (vy - 0.22) / 0.27;
+		if (min(abs(u - v), abs(u + v)) < 0.20) { col = vec3(0.90, 0.88, 0.82); }
+	}
+	ALBEDO = col;
+	ROUGHNESS = 0.8;
+}
+"""
+	var m := ShaderMaterial.new()
+	m.shader = sh
+	return m
+
+# The uniform, painted in bands by height (shako / facing collar / coat / trousers).
+# The vertex stage swings the LEG blocks fore-and-aft as the man marches — a per-man
+# gait, driven entirely on the GPU from per-instance data, so it costs no CPU at 140k.
+# Per-instance: COLOR.rgb = facings, COLOR.a = coat variant; CUSTOM.r = wear,
+# CUSTOM.g = gait phase (0..1), CUSTOM.b = march amount (0 standing .. 1 marching).
 func _soldier_shader(team: int) -> ShaderMaterial:
 	var sh := Shader.new()
 	sh.code = """
 shader_type spatial;
 uniform vec3 coats[3];
 varying float vy;
-void vertex() { vy = VERTEX.y; }
+varying float vx;
+varying float vnz;
+varying float wear;
+void vertex() {
+	vy = VERTEX.y;                       // band/belt by TRUE position (stable as limbs move)
+	vx = VERTEX.x;
+	vnz = NORMAL.z;
+	wear = INSTANCE_CUSTOM.r;
+	float phase = INSTANCE_CUSTOM.g;
+	float march = INSTANCE_CUSTOM.b;
+	float armp = INSTANCE_CUSTOM.a;      // 0 at rest .. ~0.6 reloading .. 1 presenting/firing
+	float t6 = TIME * 6.5 + phase * 6.28318;
+	// LEGS swing fore-and-aft as he marches
+	float hip = -0.05;
+	if (VERTEX.y < hip && march > 0.001) {
+		float legside = (VERTEX.x < 0.0) ? 1.0 : -1.0;          // left & right out of phase
+		float ang = sin(t6) * march * 0.55 * legside;
+		float yy = VERTEX.y - hip;
+		float cs = cos(ang); float sn = sin(ang);
+		VERTEX.y = yy * cs - VERTEX.z * sn + hip;
+		VERTEX.z = yy * sn + VERTEX.z * cs;
+	}
+	// ARMS: raise to present the musket, work the ramrod while reloading, swing on the march
+	if (abs(VERTEX.x) > 0.215) {
+		float armside = (VERTEX.x < 0.0) ? 1.0 : -1.0;
+		float raise = -clamp(armp, 0.0, 1.0) * 1.35;                                  // FORWARD, holding it up
+		// reloading: the working arm drives the ramrod down the barrel with a sharp stroke,
+		// the other steadies the piece
+		float ram = sin(TIME * 8.0 + phase * 6.28318);
+		ram = ram * abs(ram);                                                         // sharper push than draw
+		float ramrod = (armp > 0.4 && armp < 0.85) ? (ram * 0.6 * (armside < 0.0 ? 1.0 : 0.3)) : 0.0;
+		float swing = (march > 0.001 && armp < 0.15) ? (sin(t6) * march * 0.35 * -armside) : 0.0;
+		float ang = raise + ramrod + swing;
+		float sh = 0.45;                                                              // shoulder pivot
+		float yy = VERTEX.y - sh;
+		float cs = cos(ang); float sn = sin(ang);
+		VERTEX.y = yy * cs - VERTEX.z * sn + sh;
+		VERTEX.z = yy * sn + VERTEX.z * cs;
+	}
+}
 void fragment() {
 	int ci = clamp(int(round(COLOR.a * 3.0)), 0, 2);
-	vec3 col = coats[ci];
-	if (vy > 0.70) { col = vec3(0.07, 0.07, 0.08); }              // the shako
-	else if (vy > 0.45) { col = COLOR.rgb; }                      // collar: the facings
-	else if (vy > -0.22 && vy < -0.10) { col = COLOR.rgb; }       // the cuff line
-	else if (vy < -0.52) { col = vec3(0.60, 0.58, 0.53); }        // campaign trousers
-	ALBEDO = col;
+	vec3 col = coats[ci];                                       // coat & sleeves
+	if (vy > 0.50) { col = vec3(0.07, 0.07, 0.08); }            // shako (head block)
+	else if (vy > 0.42) { col = COLOR.rgb; }                    // collar: the facings
+	else if (vy < -0.05) { col = vec3(0.60, 0.58, 0.53); }      // trousers (legs)
+	// white CROSSBELTS — an X over the front and back of the chest
+	if (abs(vx) < 0.215 && vy > -0.05 && vy < 0.45 && abs(vnz) > 0.5) {
+		float u = vx / 0.21;
+		float v = (vy - 0.22) / 0.27;
+		if (min(abs(u - v), abs(u + v)) < 0.20) { col = vec3(0.90, 0.88, 0.82); }
+	}
+	ALBEDO = col * wear;
 	ROUGHNESS = 0.85;
 }
 """
@@ -1509,7 +1684,7 @@ func _build_help(cl: CanvasLayer) -> void:
 		"[color=#%s]MOVE[/color]   [color=#%s]WASD[/color] move · [color=#%s]Shift[/color] run · mouse look · [color=#%s]scroll[/color] zoom\n" % [c, k, k, k] + \
 		"[color=#%s]LOOK[/color]   [color=#%s]RMB[/color] spyglass · [color=#%s]E[/color] hail sergeant / general · [color=#%s]Esc[/color] free cursor\n" % [c, k, k, k] + \
 		"[color=#%s]ORDERS[/color] [color=#%s]Q[/color] courier order menu (a despatch rides to your battalion)\n" % [c, k] + \
-		"[color=#%s]SELF[/color]   [color=#%s]LMB[/color] sabre · [color=#%s]G[/color] pistol\n" % [c, k, k] + \
+		"[color=#%s]SELF[/color]   [color=#%s]LMB[/color] sabre · [color=#%s]G[/color] pistol · [color=#%s]F[/color] give fire · [color=#%s]T[/color] bring up the guns\n" % [c, k, k, k, k] + \
 		"[color=#%s]WORLD[/color]  [color=#%s]N[/color] time of day · [color=#%s]M[/color] weather\n" % [c, k, k] + \
 		"[right][color=#6f7888]Tab to hide[/color][/right]"
 	help_panel.add_child(rt)
@@ -1561,25 +1736,51 @@ func _build_officer() -> void:
 	hmat2.roughness = 0.9
 	horse.material_override = hmat2
 	officer.add_child(horse)
-	# the rider, in the saddle
-	var body := MeshInstance3D.new()
-	var bc := CapsuleMesh.new()
-	bc.radius = 0.28
-	bc.height = 1.45
-	body.mesh = bc
-	body.position = Vector3(0, 1.85, 0)
-	var omat := StandardMaterial3D.new()
-	omat.albedo_color = Color(1.0, 0.85, 0.3)
-	omat.roughness = 0.5
-	body.material_override = omat
-	officer.add_child(body)
+	# the rider: a BLOCKY officer in the saddle, in his battalion's navy (matching the line)
+	var coat := StandardMaterial3D.new()
+	coat.albedo_color = ARMY_BLUE.lightened(0.12)
+	coat.roughness = 0.6
+	var skin := StandardMaterial3D.new()
+	skin.albedo_color = Color(0.72, 0.56, 0.43)
+	var chest := MeshInstance3D.new()
+	var cb := BoxMesh.new()
+	cb.size = Vector3(0.42, 0.62, 0.26)
+	chest.mesh = cb
+	chest.position = Vector3(0, 1.95, 0)
+	chest.material_override = coat
+	officer.add_child(chest)
+	var head := MeshInstance3D.new()
+	var hb := BoxMesh.new()
+	hb.size = Vector3(0.22, 0.22, 0.22)
+	head.mesh = hb
+	head.position = Vector3(0, 2.38, 0)
+	head.material_override = skin
+	officer.add_child(head)
+	for sx in [-0.27, 0.27]:
+		var leg := MeshInstance3D.new()
+		var lb := BoxMesh.new()
+		lb.size = Vector3(0.16, 0.72, 0.18)
+		leg.mesh = lb
+		leg.position = Vector3(sx, 1.35, 0.08)
+		leg.rotation = Vector3(0.35, 0, sx * 1.2)   # thighs astride the horse
+		leg.material_override = coat
+		officer.add_child(leg)
+	for ax in [-0.30, 0.30]:
+		var arm := MeshInstance3D.new()
+		var ab := BoxMesh.new()
+		ab.size = Vector3(0.13, 0.5, 0.14)
+		arm.mesh = ab
+		arm.position = Vector3(ax, 1.92, 0.04)
+		arm.material_override = coat
+		officer.add_child(arm)
+	# a black bicorne, worn athwart
 	var hat := MeshInstance3D.new()
 	var hm := BoxMesh.new()
 	hm.size = Vector3(0.55, 0.12, 0.22)
 	hat.mesh = hm
-	hat.position = Vector3(0, 2.62, 0)
+	hat.position = Vector3(0, 2.55, 0)
 	var hmat := StandardMaterial3D.new()
-	hmat.albedo_color = Color(0.12, 0.12, 0.14)
+	hmat.albedo_color = Color(0.08, 0.08, 0.10)
 	hat.material_override = hmat
 	officer.add_child(hat)
 	var sab := MeshInstance3D.new()
@@ -1761,7 +1962,7 @@ func _make_flag(b: Batt, team: int) -> void:
 	cloth.position = Vector3(0.5, 2.55, 0)
 	var cmat := StandardMaterial3D.new()
 	# the cloth carries the REGIMENT's facing colour quartered with the national one
-	var nat := Color(0.22, 0.30, 0.72) if team == 0 else Color(0.72, 0.22, 0.22)
+	var nat := ARMY_BLUE if team == 0 else ARMY_RED
 	cmat.albedo_color = nat.lerp(Color(b.inst_col.r, b.inst_col.g, b.inst_col.b), 0.5)
 	cmat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	cloth.material_override = cmat
@@ -1776,9 +1977,14 @@ func _fill_figs(b: Batt) -> void:
 	for e in _layout(MEN, b.formation, b.companies):
 		var slot: Vector2 = e["p"]
 		var w := b.pos + right * slot.x + fwd * slot.y
+		# every man is an individual: his own build, the wear on his coat, his nerve
+		var br := randf_range(0.82, 1.07)              # how his uniform has weathered
 		b.figs.append({ "slot": slot, "wpos": Vector3(w.x, 0, w.z), "ph": randf() * TAU,
 			"spd": randf_range(0.85, 1.18), "reload": randf_range(0.0, RELOAD_TIME),
-			"company": int(e["c"]), "face": float(e.get("f", 0.0)) })
+			"company": int(e["c"]), "face": float(e.get("f", 0.0)),
+			"bw": randf_range(0.92, 1.07), "bh": randf_range(0.90, 1.10),   # width / height
+			"wear": br, "march": 0.0,
+			"flinch": 0.0, "nerve": randf_range(0.0, 1.0) })
 
 func _reslot(b: Batt) -> void:
 	var L := _layout(b.figs.size(), b.formation, b.companies)
@@ -1924,9 +2130,11 @@ func _build_guns() -> void:
 	for team in [0, 1]:
 		var zline := -262.0 if team == 0 else 262.0   # posted behind the line of battle
 		var face := 0.0 if team == 0 else PI
-		for bi in range(0 if _inflated else BATTERIES_PER_TEAM):   # v1 inflation: foot only
-			# batteries spread across the whole army front, behind the first line
-			var bx := (float(bi) - (BATTERIES_PER_TEAM - 1) * 0.5) * 640.0
+		var nbat: int = 2 if _inflated else BATTERIES_PER_TEAM   # a couple of batteries in a small action
+		var bspace: float = 300.0 if _inflated else 640.0
+		for bi in range(nbat):
+			# batteries spread across the front, behind the line
+			var bx := (float(bi) - (nbat - 1) * 0.5) * bspace
 			var span := (GUNS_PER_BATTERY - 1) * GUN_SPACING
 			for i in range(GUNS_PER_BATTERY):
 				var g := Gun.new()
@@ -2123,6 +2331,7 @@ func _update_guns(delta: float) -> void:
 	for g in guns:
 		if g.dead:
 			continue                                 # crew shot down — the gun stands silent
+		g.cmd_t = maxf(0.0, g.cmd_t - delta)         # the player's hold on the piece lapses
 		g.recoil = maxf(0.0, g.recoil - delta * 3.2)
 		if g.barrel:
 			g.barrel.position.z = 0.25 - g.recoil   # slide back on the carriage, ease forward
@@ -2133,8 +2342,12 @@ func _update_guns(delta: float) -> void:
 		var md := Vector2(g.move_to.x - g.pos.x, g.move_to.z - g.pos.z).length()
 		match g.limber_state:
 			"deployed":
-				if md > ARTY_MOVE_THRESHOLD:
-					g.limber_state = "limbering"   # the order has shifted far enough to move
+				# a gun in action STAYS in action: it only limbers up to relocate when it
+				# has NO target where it stands (the fight has moved out of its arc). This
+				# stops batteries endlessly chasing an advancing line and never firing.
+				var idle: bool = _gun_target(g) == null and _nearest_enemy_cav_dist(g.pos, g.team) > CANISTER_RANGE * 1.5
+				if md > ARTY_MOVE_THRESHOLD and idle:
+					g.limber_state = "limbering"   # nothing to shoot here — displace to the new ground
 					g.limber_t = LIMBER_TIME
 				else:
 					_gun_serve(g, delta)           # stand and fight
@@ -2559,6 +2772,9 @@ func _decay_cinematic(delta: float) -> void:
 func _update_firing(b: Batt, delta: float) -> void:
 	b.has_target = false
 	b.masked = false
+	# a line does not fire on the move — it must halt to load and to fire
+	var batt_moving := b.pos.distance_to(b.fire_pos) > 0.012
+	b.fire_pos = b.pos
 	if b.charging or b.melee_foe != null:
 		return                           # bayonet work, not musketry
 	if b.formation != "line":
@@ -2664,13 +2880,15 @@ func _update_firing(b: Batt, delta: float) -> void:
 	for f in b.figs:
 		if (f["slot"] as Vector2).y < fire_band:
 			continue                     # rear ranks don't fire
-		var r := float(f["reload"]) - delta
+		var r := float(f["reload"]) - (0.0 if batt_moving else delta)   # loading pauses on the march
 		if r > 0.0:
 			f["reload"] = r
 			continue                     # still loading
 		# loaded — does he fire this frame?
 		var fire := false
-		if b.rolling:
+		if batt_moving:
+			fire = false                 # halt to fire — no shooting on the march
+		elif b.rolling:
 			fire = int(f["company"]) == firing_company
 		elif atwill or commanded:
 			fire = true
@@ -2750,10 +2968,12 @@ func _update_firing(b: Batt, delta: float) -> void:
 			foe.morale -= (kills * MORALE_PER_CASUALTY * VOLLEY_CASUALTY_MULT + massed_men * VOLLEY_SHOCK) * shock_mult
 			foe.flinch = minf(foe.flinch + massed_men * 0.004 + float(kills) * 0.04 + (0.8 if held_close else 0.0), 2.0)
 			foe.calm_t = 0.0
+			_ripple_flinch(foe, clampf(float(massed_men) / 150.0 + float(kills) * 0.06 + (0.5 if held_close else 0.0), 0.3, 1.0))
 		elif kills > 0:
 			# independent fire: the men just trickle down — little moral impact
 			foe.morale -= kills * MORALE_PER_CASUALTY * INDEP_MULT
 			foe.calm_t = 0.0
+			_ripple_flinch(foe, clampf(float(kills) * 0.12, 0.15, 0.6))
 
 # No line fires through its friends. If a friendly battalion (or your own skirmish
 # screen) stands in the lane between the muzzles and the target, the fire is MASKED
@@ -2781,6 +3001,16 @@ func _fire_masked(b: Batt, tpos: Vector3) -> bool:
 
 # fraction of muskets that hit, falling off sharply with range: murderous at point
 # blank, almost nothing at maximum range. (battle conditions, not a proof butt)
+# A volley doesn't strike a unit as one body — individual men recoil, duck and shy
+# from the crash. Bump the flinch of a scattered subset so the LINE ripples, not the block.
+func _ripple_flinch(b: Batt, intensity: float) -> void:
+	if b.figs.is_empty():
+		return
+	var n := mini(b.figs.size(), int(float(b.figs.size()) * 0.35 * intensity) + 2)
+	for k in range(n):
+		var f: Dictionary = b.figs[randi() % b.figs.size()]
+		f["flinch"] = minf(1.5, float(f.get("flinch", 0.0)) + randf_range(0.4, 1.1) * intensity)
+
 func _hit_chance(d: float) -> float:
 	if d >= FIRE_RANGE:
 		return 0.0
@@ -3197,12 +3427,13 @@ func _spawn_cavalry() -> void:
 			hmm.set_instance_transform(i, _zero_xf())
 			rmm.set_instance_transform(i, _zero_xf())
 	# the regiments — massed in two wings on the army's flanks, behind the line
-	var wing := 2750.0
+	var wing: float = 520.0 if _inflated else 2750.0   # near flanks in a small action
 	for team in [0, 1]:
 		var z := -320.0 if team == 0 else 320.0
 		var face := 0.0 if team == 0 else PI
-		var half := maxi(1, CAV_PER_TEAM / 2)
-		for r in range(0 if _inflated else CAV_PER_TEAM):   # v1 inflation: foot only
+		var ncav: int = 2 if _inflated else CAV_PER_TEAM   # a regiment on each wing
+		var half := maxi(1, ncav / 2)
+		for r in range(ncav):
 			var c := Cav.new()
 			c.team = team
 			c.idx = team * CAV_PER_TEAM + r
@@ -3936,6 +4167,8 @@ func _brigade_position_guns(br) -> void:
 	for i in range(n):
 		var off: float = (float(i) - (n - 1) * 0.5) * GUN_SPACING
 		var g: Gun = br.guns[i]
+		if g.cmd_t > 0.0:
+			continue                          # the player has this piece — leave his order be
 		g.move_to = center + right * off
 
 # The brigade carries out the mission the army handed it, choosing the moment-to-moment
@@ -4530,6 +4763,7 @@ func _render(delta: float) -> void:
 				var w6 := b.pos + right * sl6.x + fwd * sl6.y
 				fmm.set_instance_transform(fi6, Transform3D(Basis(Vector3.UP, b.facing), Vector3(w6.x, CAP_HALF, w6.z)))
 				fmm.set_instance_color(fi6, b.inst_col)
+				fmm.set_instance_custom_data(fi6, Color(1.0, 0.0, 0.0, 0.0))   # far men: full wear, no gait
 				fgun.set_instance_transform(fi6, _zero_xf())
 				fi6 += 1
 			idx[b.team] = fi6
@@ -4555,8 +4789,21 @@ func _render(delta: float) -> void:
 		for fi in range(b.figs.size()):
 			var f: Dictionary = b.figs[fi]
 			var slot: Vector2 = f["slot"]
+			var mfl := maxf(0.0, float(f["flinch"]) - delta * 1.6)   # this man's recoil eases off
+			f["flinch"] = mfl
 			var target := Vector3(b.pos.x + right.x * slot.x + fwd.x * slot.y, 0, b.pos.z + right.z * slot.x + fwd.z * slot.y)
-			var w: Vector3 = target if snap else (f["wpos"] as Vector3).move_toward(target, MAN_SPEED * float(f["spd"]) * run * delta)
+			# the line FRAYS, not breaks as one block: a wavering man whose nerve fails
+			# edges back out of the ranks before the whole battalion gives way
+			if unsteady > 0.35 and float(f["nerve"]) < unsteady and b.state != "routing":
+				target -= fwd * (unsteady - float(f["nerve"])) * 3.0
+			# MELEE: the whole frontline surges to the seam — both units pile into each
+			# other at the contact rather than grinding apart in their dressed ranks
+			if b.melee_foe != null:
+				target += fwd * (minf(b.pos.distance_to(b.melee_foe.pos) * 0.5, 9.0) + sin(float(f["ph"]) * 3.0) * 0.6)
+			elif b.melee_vis:
+				target += fwd * 3.2
+			var prevw: Vector3 = f["wpos"]
+			var w: Vector3 = target if snap else prevw.move_toward(target, MAN_SPEED * float(f["spd"]) * run * delta)
 			f["wpos"] = w
 			if fi % stride != 0:
 				continue
@@ -4564,20 +4811,29 @@ func _render(delta: float) -> void:
 				break
 			var to := target - w
 			var moving := to.length() > 0.06
+			# ease this man's gait in/out — running men swing harder (drives the leg shader)
+			var march_tgt := (1.2 if run > 1.3 else 1.0) if (not snap and prevw.distance_to(w) > 0.004) else 0.0
+			f["march"] = move_toward(float(f["march"]), march_tgt, delta * 5.0)
 			var ph := float(f["ph"])
 			# in square, each man faces his own outward direction (carried in "face");
 			# in a fighting withdrawal he steps BACKWARD, musket still toward the enemy
 			var yaw := (atan2(to.x, to.z) if (moving and not b.fall_back) else b.facing + float(f.get("face", 0.0)))
 			var bob := (absf(sin(_t * 8.5 * float(f["spd"]) + ph)) * 0.05 if moving else 0.0)
 			var swx := sin(_t * 3.4 + ph) * sway_amp     # men fidget/waver as morale drops
-			var ox := w.x + recoil.x + right.x * swx
-			var oz := w.z + recoil.z + right.z * swx
-			mm.set_instance_transform(i, Transform3D(Basis(Vector3.UP, yaw), Vector3(ox, CAP_HALF + bob, oz)))
-			mm.set_instance_color(i, b.inst_col)
+			var bh := float(f["bh"])
+			var bw := float(f["bw"])
+			var rec := recoil - fwd * (mfl * 0.35)        # he flinches back from the crash of fire
+			var ox := w.x + rec.x + right.x * swx
+			var oz := w.z + rec.z + right.z * swx
+			var oy := CAP_HALF * bh + bob - mfl * 0.16    # his own height; a flincher ducks
 			var in_band := slot.y >= fire_band
 			var leveled := b.charging or b.melee_foe != null or b.melee_vis or (b.has_target and in_band and float(f["reload"]) <= AIM_LEAD)
 			# front ranks load while standing; rear ranks stand ready (musket upright)
-			var reloading := in_band and float(f["reload"]) > AIM_LEAD
+			var reloading := in_band and float(f["reload"]) > AIM_LEAD and not moving   # men load at the halt, not on the march
+			var armp := 1.0 if leveled else (0.6 if reloading else 0.0)   # arm pose -> the leg/arm shader
+			mm.set_instance_transform(i, Transform3D(Basis(Vector3.UP, yaw).scaled(Vector3(bw, bh, bw)), Vector3(ox, oy, oz)))
+			mm.set_instance_color(i, b.inst_col)
+			mm.set_instance_custom_data(i, Color(float(f["wear"]), ph / 6.28318, float(f["march"]), armp))
 			var work := _t * 9.0 * float(f["spd"]) + ph    # ramrod cadence, desynced per man
 			gun.set_instance_transform(i, _musket_xf(w, yaw, leveled, moving, reloading, work))
 			i += 1
@@ -4613,10 +4869,12 @@ func _render(delta: float) -> void:
 				oyaw = atan2(omv.x, omv.z)                         # face the way he walks
 			var obob := absf(sin(_t * 2.8 + idn)) * 0.06
 			officer_mm.set_instance_transform(off_i, Transform3D(Basis(Vector3.UP, oyaw), Vector3(ow.x, 0.85 + obob, ow.z)))
+			_cg_dress(officer_mm, off_i, b.team, ow.distance_to(op) > 0.1, false)
 			off_i += 1
-		# colour-bearer beside the officer, carrying the standard
+		# colour-bearer: in line, the colours stand at the REAR CENTRE; in column/square
+		# they ride at the head with the staff
 		if bearer_i < bearer_mm.instance_count:
-			var bp := b.pos + right * 0.9 + fwd * (maxy + 0.8)
+			var bp: Vector3 = (b.pos - fwd * (maxy + 0.6)) if b.formation == "line" else (b.pos + right * 0.9 + fwd * (maxy + 0.8))
 			var bw := _cg_step(b, "bearer", bp, delta, snap)
 			var byaw := fyaw
 			if bw.distance_to(bp) > 0.4:
@@ -4627,6 +4885,16 @@ func _render(delta: float) -> void:
 				bearer_mm.set_instance_transform(bearer_i, Transform3D(Basis(Vector3.UP, byaw), Vector3(bw.x, CAP_HALF + bbob, bw.z)))
 				bearer_i += 1
 			_place_flag(b, Vector3(bw.x, 0, bw.z), fyaw)   # lays low when the colours are down
+			# the COLOUR PARTY: a guard of two with half-pikes, posted at the colours
+			for esc in range(2):
+				if nco_i >= nco_mm.instance_count:
+					break
+				var ep: Vector3 = (b.pos + right * ((float(esc) * 2.0 - 1.0) * 0.75) - fwd * (maxy + 0.6)) if b.formation == "line" else (b.pos + right * (0.45 + float(esc) * 0.85) + fwd * (maxy + 0.6))
+				var ew := _cg_step(b, "esc%d" % esc, ep, delta, snap)
+				nco_mm.set_instance_transform(nco_i, Transform3D(Basis(Vector3.UP, fyaw), Vector3(ew.x, CAP_HALF, ew.z)))
+				_cg_dress(nco_mm, nco_i, b.team, ew.distance_to(ep) > 0.1, true)
+				spontoon_mm.set_instance_transform(nco_i, Transform3D(Basis(Vector3.UP, fyaw), Vector3(ew.x + right.x * 0.2, 0, ew.z + right.z * 0.2)))
+				nco_i += 1
 		# drummer on the other side of the colours, marking the cadence with a sway
 		if not b.drummer_down and drummer_i < drummer_mm.instance_count:
 			var dsway := sin(_t * 6.0 + float(b.team)) * 0.06
@@ -4653,6 +4921,8 @@ func _render(delta: float) -> void:
 					syaw = atan2(smv.x, smv.z)                      # walking to his post
 				var sbob := absf(sin(_t * 2.8 + float(c) * 1.3)) * 0.05
 				nco_mm.set_instance_transform(nco_i, Transform3D(Basis(Vector3.UP, syaw), Vector3(sw.x, CAP_HALF + sbob, sw.z)))
+				_cg_dress(nco_mm, nco_i, b.team, sw.distance_to(cp) > 0.1, true)
+				spontoon_mm.set_instance_transform(nco_i, Transform3D(Basis(Vector3.UP, syaw), Vector3(sw.x + right.x * 0.2, 0, sw.z + right.z * 0.2)))
 				nco_i += 1
 		# ...and file-closers walking the rear, herding stragglers back into their files
 		var rearY := -maxy - 0.9
@@ -4671,6 +4941,8 @@ func _render(delta: float) -> void:
 				ryaw = atan2(rmv.x, rmv.z)
 			var rbob := absf(sin(_t * 2.8 + float(fc))) * 0.05
 			nco_mm.set_instance_transform(nco_i, Transform3D(Basis(Vector3.UP, ryaw), Vector3(rw.x, CAP_HALF + rbob, rw.z)))
+			_cg_dress(nco_mm, nco_i, b.team, rw.distance_to(rp) > 0.1, true)
+			spontoon_mm.set_instance_transform(nco_i, Transform3D(Basis(Vector3.UP, ryaw), Vector3(rw.x + right.x * 0.2, 0, rw.z + right.z * 0.2)))
 			nco_i += 1
 	for team in [0, 1]:
 		var mm: MultiMesh = team_mm[team]
@@ -4685,6 +4957,7 @@ func _render(delta: float) -> void:
 		bearer_mm.set_instance_transform(j, _zero_xf())
 	for j in range(nco_i, nco_mm.instance_count):
 		nco_mm.set_instance_transform(j, _zero_xf())
+		spontoon_mm.set_instance_transform(j, _zero_xf())
 	for j in range(drummer_i, drummer_mm.instance_count):
 		drummer_mm.set_instance_transform(j, _zero_xf())
 	_render_commanders()
@@ -4741,7 +5014,14 @@ func _place_flag(b: Batt, footpos: Vector3, yaw: float) -> void:
 		b.flag_cloth.rotation.y = sin(_t * (3.0 + (1.0 - m) * 6.0) + float(b.team)) * wave
 
 func team_color(team: int) -> Color:
-	return Color(0.30, 0.38, 0.78) if team == 0 else Color(0.74, 0.30, 0.30)
+	return ARMY_BLUE if team == 0 else ARMY_RED
+
+# Paint an officer/NCO instance in his battalion's coat and set his gait (the bicorne
+# shader reads COLOR.rgb as the coat, CUSTOM.b as the march amount).
+func _cg_dress(mm: MultiMesh, i: int, team: int, walking: bool, belts: bool) -> void:
+	var c := team_color(team)
+	mm.set_instance_color(i, Color(c.r, c.g, c.b, 1.0 if belts else 0.0))   # a = crossbelts flag
+	mm.set_instance_custom_data(i, Color(0.95, float(i % 17) * 0.06, 1.0 if walking else 0.0, 0.0))
 
 # A man falls: ragdoll if he's on screen and the pool has room, else a static body.
 # A share of the fallen are wounded, not killed — they drag themselves rearward.
@@ -5027,7 +5307,7 @@ func _show_bill() -> void:
 	var pcol := "9fe0a0" if prestige >= 0 else "ff9a8a"
 	var txt := "[center][b]%s[/b]\n" % title
 	txt += "[color=#6f7888]——————————————[/color]\n"
-	var cav_start := (0 if _inflated else CAV_PER_TEAM * CAV_MEN)
+	var cav_start := (2 if _inflated else CAV_PER_TEAM) * CAV_MEN
 	txt += "[color=#cdd6e6]Our losses[/color]  [color=#ffe9a8]%d[/color] of %d men · %d horse · %d guns silenced\n" \
 		% [_start_strength[pt] - men_now[pt], _start_strength[pt], cav_start - horse_now[pt], guns_lost[pt]]
 	txt += "[color=#cdd6e6]Theirs[/color]  [color=#ffe9a8]%d[/color] of %d men · %d horse · %d guns silenced\n" \
@@ -5187,6 +5467,34 @@ func _give_fire() -> void:
 	player.fire_now = true                  # _update_firing fires every loaded man as one
 	_play_voice(snd_v_fire, player.off_pos)
 
+# Bring the nearest friendly battery up to support you: it displaces to the ground
+# just behind your line and opens fire on the enemy to your front. (Press T.)
+func _command_battery() -> void:
+	if player == null:
+		return
+	var best: Gun = null
+	var bd := 1400.0
+	for g in guns:
+		if g.team != player.team or g.dead:
+			continue
+		var d := off_pos.distance_to(g.pos)
+		if d < bd:
+			bd = d
+			best = g
+	if best == null:
+		return
+	var fwd := Vector3(sin(player.facing), 0, cos(player.facing))
+	var right := Vector3(fwd.z, 0, -fwd.x)
+	var dest := player.pos - fwd * 34.0      # behind your line, to fire over your heads
+	var k := 0
+	for g in guns:
+		if g.team != player.team or g.dead or g.pos.distance_to(best.pos) > 110.0:
+			continue                          # the cluster around the nearest piece = the battery
+		g.move_to = dest + right * (float(k) - 1.5) * GUN_SPACING
+		g.cmd_t = 45.0
+		k += 1
+	_send_player_despatch("[color=#ffd773]The guns come up![/color] Your battery displaces to the ground behind you — stand clear of the muzzles.", {})
+
 func _update_cam(delta: float) -> void:
 	# spyglass: raise the glass (RMB) -> narrow the FOV and mask to a circle
 	_scope_amt = move_toward(_scope_amt, 1.0 if _scoped else 0.0, delta * 6.0)
@@ -5299,6 +5607,8 @@ func _unhandled_input(event: InputEvent) -> void:
 				_cycle_weather()          # clear -> overcast -> rain -> fog
 			KEY_Q:
 				_cmd_on = true
+			KEY_T:
+				_command_battery()        # bring the nearest friendly guns up to support you
 			KEY_TAB:
 				_help_on = not _help_on
 			KEY_ESCAPE:

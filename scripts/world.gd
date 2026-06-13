@@ -22,7 +22,8 @@ const ROUT_SPEED := 2.6
 const ENGAGE_RANGE := 220.0       # opposing columns this close lock into a fight
 const CAPTURE_RANGE := 120.0
 const FACTION_NAMES := ["The Crown", "The Continentals"]
-const FACTION_COLS := [Color(0.74, 0.28, 0.26), Color(0.30, 0.40, 0.80)]
+# Blue vs Red, matching the battle (your side = blue, the enemy = red)
+const FACTION_COLS := [Color(0.24, 0.36, 0.74), Color(0.70, 0.20, 0.20)]
 # regimental facings, mirrored from the tactical sim so a token's dress carries
 # unchanged into its inflated battle
 const FACINGS_0 := [Color(0.95, 0.92, 0.85), Color(0.85, 0.15, 0.15), Color(0.92, 0.80, 0.15),
@@ -450,7 +451,7 @@ func _make_hq(f: int, level: int, idx: int, name: String) -> void:
 	# a flat command-post marker: a faction diamond with a lighter inner diamond,
 	# bigger for higher command — reads clearly from the top-down map
 	var node := Node3D.new()
-	var size := [230.0, 165.0, 120.0][level]
+	var size: float = [230.0, 165.0, 120.0][level]
 	var plate := MeshInstance3D.new()
 	var pm := PlaneMesh.new()
 	pm.size = Vector2(size, size)
@@ -1422,7 +1423,7 @@ func _update_hud() -> void:
 	for t in tokens:
 		men[t.faction] += int(t.men)
 	var spd := "real time" if tscale <= 1.0 else "preview ×%d" % int(tscale)
-	hud.text = "[b]Day %d[/b]   %02d:%02d   ·   [color=#d07068]%s[/color]  %d towns · %d men      [color=#7a93ea]%s[/color]  %d towns · %d men      [color=#8f98a8]· %s ·[/color]" % [
+	hud.text = "[b]Day %d[/b]   %02d:%02d   ·   [color=#7a93ea]%s[/color]  %d towns · %d men      [color=#d07068]%s[/color]  %d towns · %d men      [color=#8f98a8]· %s ·[/color]" % [
 		day, int(clock), int(fposmod(clock, 1.0) * 60.0),
 		FACTION_NAMES[0], hold[0], men[0], FACTION_NAMES[1], hold[1], men[1], spd]
 	# the orders banner — the player's direction
