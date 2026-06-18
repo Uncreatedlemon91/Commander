@@ -419,6 +419,10 @@ var _shots: Array = []                    # flying roundshot: {active,pos,vel,fr
 var shot_mm: MultiMesh
 var scar_mm: MultiMesh                     # furrows gouged in the ground by roundshot
 var scar_idx := 0
+var _gunner_mesh_cache: ArrayMesh          # shared detailed gun-crew figure (built once, lazily)
+var _gunner_mats: Array = [null, null]     # per-team gunner ShaderMaterial, built once each
+var _draft_horse_mesh_cache: ArrayMesh     # shared limber/caisson draft-horse mesh (built once)
+var _draft_horse_mats: Array = []          # a couple of coat-colour variants, built once
 
 # regimental dress: facing colours cycle per BRIGADE (a brigade was usually one
 # regiment's battalions); coat variants pick from each team's small uniform table
@@ -5829,6 +5833,133 @@ func _build_guns() -> void:
 				_make_gun(g)
 				guns.append(g)
 
+# A gun-crew figure: the same coat/collar/cuff/leg layout idiom as the soldiers and
+# officers, but a working gunner's rig — short-skirted coat, no shako, a round forage
+# cap, and a cartridge pouch at the hip instead of crossbelts. One shared mesh, painted
+# by a per-team ShaderMaterial (coat = the army's colour; trim is brass/buff on both
+# sides — the artillery's own branch colour, not the infantry's gold lace).
+func _gunner_mesh() -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	_add_box(st, Vector3(0, 0.175, 0.0), Vector3(0.38, 0.46, 0.22))         # coat body
+	_add_box(st, Vector3(0, -0.02, -0.08), Vector3(0.34, 0.18, 0.12))      # short coat skirt (back)
+	_add_box(st, Vector3(0, 0.40, 0.0), Vector3(0.32, 0.06, 0.225))        # collar
+	_add_box(st, Vector3(0, 0.18, 0.118), Vector3(0.20, 0.36, 0.03))       # lapel / plastron
+	_add_box(st, Vector3(0, 0.0, 0.10), Vector3(0.42, 0.07, 0.18))         # waist belt
+	_add_box(st, Vector3(0.22, -0.08, 0.16), Vector3(0.12, 0.13, 0.08))    # cartridge pouch (hip)
+	for sx in [-0.255, 0.255]:
+		_add_box(st, Vector3(sx, 0.17, 0.0), Vector3(0.11, 0.44, 0.125))      # sleeve
+		_add_box(st, Vector3(sx, -0.05, 0.0), Vector3(0.12, 0.07, 0.135))     # cuff
+		_add_box(st, Vector3(sx, -0.15, -0.01), Vector3(0.095, 0.10, 0.105)) # hand
+	for sx in [-0.10, 0.10]:
+		_add_box(st, Vector3(sx, -0.45, 0), Vector3(0.16, 0.78, 0.19))        # leg
+	_add_box(st, Vector3(0, 0.555, 0), Vector3(0.205, 0.21, 0.205))         # head
+	_add_cyl(st, Vector3(0, 0.70, 0), 0.165, 0.155, 0.10, 10)               # forage cap body
+	_add_box(st, Vector3(0, 0.655, 0.155), Vector3(0.14, 0.03, 0.07))      # cap peak
+	_add_box(st, Vector3(0, 0.765, 0), Vector3(0.05, 0.035, 0.05))         # cap top button
+	return st.commit()
+
+func _gunner_shader(coat: Color) -> ShaderMaterial:
+	var sh := Shader.new()
+	sh.code = """
+shader_type spatial;
+uniform vec3 coat_col;
+uniform vec3 trim = vec3(0.62, 0.50, 0.22);    // brass / buff — the artillery's own colour
+uniform vec3 skin = vec3(0.76, 0.58, 0.46);
+varying float vy;
+varying float vx;
+varying float vz;
+void vertex() { vy = VERTEX.y; vx = VERTEX.x; vz = VERTEX.z; }
+void fragment() {
+	vec3 col = coat_col;
+	if (vy < -0.05) col = vec3(0.16, 0.16, 0.18);                          // dark trousers
+	if (vy > 0.37 && vy < 0.43) col = trim;                                // collar
+	if (vz > 0.09 && abs(vx) < 0.13 && vy > 0.0 && vy < 0.36) col = trim;  // lapel
+	if (abs(vx) > 0.20 && vy > -0.09 && vy < -0.015) col = trim;           // cuffs
+	if (vy > -0.04 && vy < 0.07 && vz > 0.0) col = vec3(0.30, 0.27, 0.20); // waist belt (buff leather)
+	if (vx > 0.13 && vy < -0.01 && vy > -0.22) col = vec3(0.22, 0.16, 0.10); // cartridge pouch
+	if (abs(vx) > 0.20 && vy < -0.10) col = skin;                          // hands
+	if (vy > 0.44 && vy < 0.65) col = skin;                                // head
+	if (vy >= 0.65 && vy < 0.76) col = vec3(0.07, 0.07, 0.08);             // forage cap body
+	if (vz > 0.10 && vy > 0.60 && vy < 0.70) col = vec3(0.05, 0.05, 0.06); // cap peak
+	if (vy >= 0.75) col = trim;                                            // cap top button
+	ALBEDO = col;
+	ROUGHNESS = 0.85;
+}
+"""
+	var m := ShaderMaterial.new()
+	m.shader = sh
+	m.set_shader_parameter("coat_col", Vector3(coat.r, coat.g, coat.b))
+	return m
+
+# Lazily build (once) and return [mesh, material] for a gunner of the given team —
+# every gun on the field shares the same two materials, so building 30+ pieces costs
+# nothing extra beyond the first gunner of each side.
+func _gunner_assets(team: int) -> Array:
+	if _gunner_mesh_cache == null:
+		_gunner_mesh_cache = _gunner_mesh()
+	if _gunner_mats[team] == null:
+		_gunner_mats[team] = _gunner_shader(team_color(team).darkened(0.15))
+	return [_gunner_mesh_cache, _gunner_mats[team]]
+
+# A draft horse in harness — the same body plan as the cavalry's mount but stripped of
+# saddle/shabraque/stirrups and given a collar, back band and breeching strap instead,
+# since it tows the limber rather than carries a rider.
+func _draft_horse_mesh() -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	_add_box(st, Vector3(0, 0.95, 0), Vector3(0.46, 0.58, 1.30))            # barrel
+	_add_box(st, Vector3(0, 0.98, 0.60), Vector3(0.42, 0.48, 0.38))        # chest
+	_add_box(st, Vector3(0, 0.98, -0.70), Vector3(0.46, 0.55, 0.46))       # hindquarters
+	_add_box(st, Vector3(0, 1.48, 0.95), Vector3(0.24, 0.50, 0.40))        # neck
+	_add_box(st, Vector3(0, 1.72, 1.28), Vector3(0.20, 0.24, 0.38))        # head
+	_add_box(st, Vector3(0, 1.62, 1.46), Vector3(0.16, 0.14, 0.14))        # muzzle
+	for ex in [-0.06, 0.06]:
+		_add_box(st, Vector3(ex, 1.88, 1.06), Vector3(0.045, 0.12, 0.045))    # ears
+	_add_box(st, Vector3(0, 1.50, 0.95), Vector3(0.30, 0.10, 0.46))        # mane crest
+	_add_box(st, Vector3(0, 0.76, -1.00), Vector3(0.12, 0.58, 0.12))       # tail
+	for lp in [Vector2(0.17, 0.48), Vector2(-0.17, 0.48), Vector2(0.19, -0.52), Vector2(-0.19, -0.52)]:
+		_add_box(st, Vector3(lp.x, 0.34, lp.y), Vector3(0.14, 0.68, 0.16))        # leg
+		_add_box(st, Vector3(lp.x, 0.02, lp.y + 0.02), Vector3(0.16, 0.12, 0.19)) # hoof
+	_add_box(st, Vector3(0, 1.20, 0.58), Vector3(0.36, 0.22, 0.18))        # neck collar (harness)
+	_add_box(st, Vector3(0, 1.08, -0.05), Vector3(0.42, 0.10, 0.30))       # back band
+	_add_box(st, Vector3(0, 0.92, -0.62), Vector3(0.40, 0.06, 0.10))       # breeching strap (hip band)
+	return st.commit()
+
+func _draft_horse_shader(coat: Color) -> ShaderMaterial:
+	var sh := Shader.new()
+	sh.code = """
+shader_type spatial;
+uniform vec3 coat_col;
+varying float vy;
+varying float vz;
+void vertex() { vy = VERTEX.y; vz = VERTEX.z; }
+void fragment() {
+	vec3 col = coat_col;
+	if (vy < 0.10) col = vec3(0.07, 0.06, 0.05);                                     // hooves
+	if (vz < -0.85) col = vec3(0.05, 0.05, 0.05);                                    // tail
+	if (vy > 1.40 && vz > 0.75 && vz < 1.15) col = vec3(0.07, 0.06, 0.05);           // mane
+	if (vz > 1.35) col = vec3(0.10, 0.08, 0.07);                                     // muzzle
+	if (vy > 1.05 && vy < 1.32 && vz > 0.35 && vz < 0.85) col = vec3(0.32, 0.25, 0.14); // collar
+	if (vy > 0.98 && vy < 1.20 && vz > -0.35 && vz < 0.20) col = vec3(0.30, 0.24, 0.14); // back band
+	if (vy > 0.82 && vy < 1.00 && vz < -0.45) col = vec3(0.30, 0.24, 0.14);          // breeching
+	ALBEDO = col;
+	ROUGHNESS = 0.85;
+}
+"""
+	var m := ShaderMaterial.new()
+	m.shader = sh
+	m.set_shader_parameter("coat_col", Vector3(coat.r, coat.g, coat.b))
+	return m
+
+# Lazily build (once) the shared draft-horse mesh and a couple of coat-colour variants
+# (bay / black) so every limber and caisson team draws from the same two materials.
+func _draft_horse_assets() -> Array:
+	if _draft_horse_mesh_cache == null:
+		_draft_horse_mesh_cache = _draft_horse_mesh()
+		_draft_horse_mats = [_draft_horse_shader(Color(0.34, 0.22, 0.12)), _draft_horse_shader(Color(0.14, 0.13, 0.12))]
+	return [_draft_horse_mesh_cache, _draft_horse_mats]
+
 # Build one piece: a bronze barrel on a wooden carriage with two wheels and a crew.
 func _make_gun(g: Gun) -> void:
 	var n := Node3D.new()
@@ -5858,7 +5989,45 @@ func _make_gun(g: Gun) -> void:
 	trail.material_override = wood
 	n.add_child(trail)
 
-	# two wheels (cylinders laid on the axle)
+	# carriage cheeks — the wooden sidewalls that cradle the barrel's trunnions
+	for sx0 in [-0.30, 0.30]:
+		var cheek := MeshInstance3D.new()
+		var chb := BoxMesh.new()
+		chb.size = Vector3(0.08, 0.50, 1.55)
+		cheek.mesh = chb
+		cheek.position = Vector3(sx0, 0.58, 0.10)
+		cheek.material_override = wood
+		n.add_child(cheek)
+
+	# axle binding the two wheels under the trail
+	var axle := MeshInstance3D.new()
+	var axb := BoxMesh.new()
+	axb.size = Vector3(1.3, 0.10, 0.12)
+	axle.mesh = axb
+	axle.position = Vector3(0, 0.55, 0.15)
+	axle.material_override = iron
+	n.add_child(axle)
+
+	# trail spade — digs into the ground at the rear and takes the recoil
+	var spade := MeshInstance3D.new()
+	var spb := BoxMesh.new()
+	spb.size = Vector3(0.42, 0.30, 0.06)
+	spade.mesh = spb
+	spade.rotation.x = deg_to_rad(-25.0)
+	spade.position = Vector3(0, 0.18, -1.68)
+	spade.material_override = iron
+	n.add_child(spade)
+
+	# elevating-screw block, under the breech
+	var quoin := MeshInstance3D.new()
+	var qb := BoxMesh.new()
+	qb.size = Vector3(0.22, 0.20, 0.30)
+	quoin.mesh = qb
+	quoin.position = Vector3(0, 0.62, -0.30)
+	quoin.material_override = wood
+	n.add_child(quoin)
+
+	# two wheels (cylinders laid on the axle), each with a hub cap
 	for sx in [-0.62, 0.62]:
 		var wheel := MeshInstance3D.new()
 		var wc := CylinderMesh.new()
@@ -5870,6 +6039,14 @@ func _make_gun(g: Gun) -> void:
 		wheel.position = Vector3(sx, 0.55, 0.15)
 		wheel.material_override = wood
 		n.add_child(wheel)
+		var hub := MeshInstance3D.new()
+		var hc2 := CylinderMesh.new()
+		hc2.top_radius = 0.12
+		hc2.bottom_radius = 0.12
+		hc2.height = 0.16
+		hub.mesh = hc2
+		hub.material_override = iron
+		wheel.add_child(hub)
 
 	# the barrel — recoils backward when fired, so keep it on its own node
 	var barrel := Node3D.new()
@@ -5886,19 +6063,59 @@ func _make_gun(g: Gun) -> void:
 	tube.material_override = bronze
 	barrel.add_child(tube)
 
-	# the crew — capsules clustered at the breech (the last one is the rammer, who
-	# steps up to the muzzle to load). Kept as nodes so they can be animated.
+	# reinforcing rings, the muzzle swell, the cascabel knob and the trunnions —
+	# children of the tube itself, so they recoil with the barrel and need no extra
+	# rotation (the tube's local Y is already its own long axis)
+	for ry in [-0.35, 0.22]:
+		var ring := MeshInstance3D.new()
+		var rc := CylinderMesh.new()
+		rc.top_radius = 0.155
+		rc.bottom_radius = 0.155
+		rc.height = 0.05
+		ring.mesh = rc
+		ring.position = Vector3(0, ry, 0)
+		ring.material_override = bronze
+		tube.add_child(ring)
+	var muzzle_swell := MeshInstance3D.new()
+	var msc := CylinderMesh.new()
+	msc.top_radius = 0.155
+	msc.bottom_radius = 0.13
+	msc.height = 0.16
+	muzzle_swell.mesh = msc
+	muzzle_swell.position = Vector3(0, 0.79, 0)
+	muzzle_swell.material_override = bronze
+	tube.add_child(muzzle_swell)
+	var cascabel := MeshInstance3D.new()
+	var csph := SphereMesh.new()
+	csph.radius = 0.075
+	csph.height = 0.15
+	cascabel.mesh = csph
+	cascabel.position = Vector3(0, -0.90, 0)
+	cascabel.material_override = bronze
+	tube.add_child(cascabel)
+	for sxn in [-0.14, 0.14]:
+		var trunnion := MeshInstance3D.new()
+		var trc := CylinderMesh.new()
+		trc.top_radius = 0.045
+		trc.bottom_radius = 0.045
+		trc.height = 0.20
+		trunnion.mesh = trc
+		trunnion.rotation = Vector3(0, 0, PI * 0.5)
+		trunnion.position = Vector3(sxn, -0.05, 0)
+		trunnion.material_override = iron
+		tube.add_child(trunnion)
+
+	# the crew — detailed gunner figures clustered at the breech (the last one is the
+	# rammer, who steps up to the muzzle to load). Kept as nodes so they can be animated.
+	var gassets := _gunner_assets(g.team)
 	for off in [Vector3(0.8, 0, -0.4), Vector3(-0.8, 0, -0.4), Vector3(0, 0, -1.4)]:
-		var crew := MeshInstance3D.new()
-		var cc := CapsuleMesh.new()
-		cc.radius = 0.2
-		cc.height = 1.7
-		crew.mesh = cc
-		var base := Vector3(off.x, CAP_HALF, off.z)
+		var crew := Node3D.new()
+		var cmi := MeshInstance3D.new()
+		cmi.mesh = gassets[0]
+		cmi.material_override = gassets[1]
+		crew.add_child(cmi)
+		var base := Vector3(off.x, 0.85, off.z)
 		crew.position = base
-		var crewmat := StandardMaterial3D.new()
-		crewmat.albedo_color = team_color(g.team).darkened(0.25)
-		crew.material_override = crewmat
 		n.add_child(crew)
 		g.crew.append(crew)
 		g.crew_base.append(base)
@@ -5908,9 +6125,6 @@ func _make_gun(g: Gun) -> void:
 	g.limber_group = Node3D.new()
 	n.add_child(g.limber_group)
 	g.limber_group.visible = false
-	var horsemat := StandardMaterial3D.new()
-	horsemat.albedo_color = Color(0.20, 0.13, 0.08)
-	horsemat.roughness = 0.9
 	var chest := MeshInstance3D.new()
 	var cb := BoxMesh.new()
 	cb.size = Vector3(0.9, 0.55, 1.0)
@@ -5929,17 +6143,18 @@ func _make_gun(g: Gun) -> void:
 		lw.position = Vector3(sx2, 0.5, 1.5)
 		lw.material_override = wood
 		g.limber_group.add_child(lw)
+	var dassets := _draft_horse_assets()
+	var dmesh: ArrayMesh = dassets[0]
+	var dmats: Array = dassets[1]
+	var hi := 0
 	for hz in [3.0, 4.7]:
 		for sx3 in [-0.45, 0.45]:
 			var horse := MeshInstance3D.new()
-			var hc := CapsuleMesh.new()
-			hc.radius = 0.3
-			hc.height = 1.7
-			horse.mesh = hc
-			horse.rotation = Vector3(PI * 0.5, 0, 0)   # lay it along the travel direction
-			horse.position = Vector3(sx3, 0.9, hz)
-			horse.material_override = horsemat
+			horse.mesh = dmesh
+			horse.material_override = dmats[hi % dmats.size()]
+			horse.position = Vector3(sx3, 0, hz)       # the mesh already faces +Z, the direction of travel
 			g.limber_group.add_child(horse)
+			hi += 1
 
 # Pick a gun's target. It obeys its brigade's fire mission when one is set and in
 # range, otherwise prioritises by doctrine: the nearest FORMED body (skirmishers make
@@ -5999,7 +6214,7 @@ func _drop_crewman(g: Gun, from_pos: Vector3) -> void:
 	if g.crew.is_empty():
 		g.dead = true
 		return
-	var node: MeshInstance3D = g.crew.pop_back()
+	var node: Node3D = g.crew.pop_back()
 	g.crew_base.pop_back()
 	var wp: Vector3 = g.node.to_global(node.position)
 	var knock := wp - from_pos
@@ -7260,17 +7475,14 @@ func _make_caisson_node(team: int) -> Node3D:
 		wh.position = Vector3(sx, 0.5, 0.0)
 		wh.material_override = wood
 		n.add_child(wh)
-	var hmat := StandardMaterial3D.new()
-	hmat.albedo_color = Color(0.20, 0.13, 0.08)
+	var dassets := _draft_horse_assets()
+	var dmesh: ArrayMesh = dassets[0]
+	var dmats: Array = dassets[1]
 	for sx2 in [-0.4, 0.4]:
 		var horse := MeshInstance3D.new()
-		var hc := CapsuleMesh.new()
-		hc.radius = 0.3
-		hc.height = 1.7
-		horse.mesh = hc
-		horse.rotation = Vector3(PI * 0.5, 0, 0)
-		horse.position = Vector3(sx2, 0.9, 1.7)
-		horse.material_override = hmat
+		horse.mesh = dmesh
+		horse.material_override = dmats[(0 if sx2 < 0 else 1) % dmats.size()]
+		horse.position = Vector3(sx2, 0, 1.7)   # the mesh already faces +Z, the direction of travel
 		n.add_child(horse)
 	return n
 
