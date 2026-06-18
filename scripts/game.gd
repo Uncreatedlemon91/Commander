@@ -560,8 +560,10 @@ var _rts_cam := false
 var _rts_focus := Vector3.ZERO
 var _rts_dist := 320.0
 
-var smoke_p: GPUParticles3D                # cannon smoke: jets hard, then hangs
-var musket_smoke_p: GPUParticles3D         # musket smoke: rolls forward, thins downrange
+var smoke_p: GPUParticles3D                # cannon smoke: jets hard, blooms, then drifts downwind
+var musket_smoke_p: GPUParticles3D         # musket smoke: rolls forward, then drifts downwind, thinning
+var _smoke_proc: ParticleProcessMaterial    # cannon smoke's process material (wind pushes its gravity)
+var _musket_smoke_proc: ParticleProcessMaterial  # musket smoke's process material (same)
 var flash_p: GPUParticles3D
 var fire_p: GPUParticles3D
 var blood_p: GPUParticles3D                # red spray when a man is hit
@@ -1181,6 +1183,8 @@ func _build_world() -> void:
 
 	smoke_p = _make_emitter(24.0, 60000, _smoke_material(), Vector2(2.2, 2.2), 0)
 	musket_smoke_p = _make_emitter(20.0, 140000, _smoke_material(), Vector2(2.0, 2.0), 5)
+	_smoke_proc = smoke_p.process_material
+	_musket_smoke_proc = musket_smoke_p.process_material
 	flash_p = _make_emitter(0.16, 20000, _flash_material(), Vector2(1.0, 1.0), 1)
 	fire_p = _make_emitter(0.4, 20000, _flash_material(), Vector2(0.8, 0.8), 2)
 	blood_p = _make_emitter(0.85, 24000, _blood_material(), Vector2(0.5, 0.5), 4)
@@ -2082,6 +2086,13 @@ func _update_environment(delta: float) -> void:
 		ground_mat.albedo_color = Color(1, 1, 1).lerp(Color(0.66, 0.69, 0.72), _rainw)
 	# a slowly veering wind that drifts the smoke and stirs the colours
 	_wind = Vector3(cos(_t * 0.05), 0.0, sin(_t * 0.05)) * (0.4 + _rainw * 2.2 + _cloud * 0.7)
+	# the wind is a continuous force on every puff already aloft, not just a kick at the
+	# muzzle — banks of smoke keep drifting downwind for their whole life, same as the real
+	# thing, while still buoying gently upward as they thin
+	if _smoke_proc:
+		_smoke_proc.gravity = Vector3(_wind.x, 0.10, _wind.z)
+	if _musket_smoke_proc:
+		_musket_smoke_proc.gravity = Vector3(_wind.x, 0.012, _wind.z)
 	# the sea and the clouds answer to that same wind
 	var wdir := Vector2(_wind.x, _wind.z)
 	wdir = wdir.normalized() if wdir.length() > 0.01 else Vector2(1, 0)
@@ -10256,16 +10267,29 @@ func _make_emitter(life: float, amount: int, mat: Material, quad: Vector2, kind:
 		_: p.process_material = _flash_process()
 	return p
 
-# Musket smoke: barely damped, so the discharge ROLLS forward off the muzzles and
-# thins out over six to ten metres downrange instead of stagnating at the line.
+# Musket smoke: barely damped, so the discharge ROLLS forward off the muzzles and rides
+# the wind once aloft — a real firing line's haze drifts steadily downwind rather than
+# stagnating in place. gravity here is rewritten every frame in _update_environment() to
+# track the live wind vector (see _wind), so the y component is just the powder's own
+# slight buoyancy.
 func _musket_smoke_process() -> ParticleProcessMaterial:
 	var m := ParticleProcessMaterial.new()
-	m.gravity = Vector3(0, 0.012, 0)          # barely rises — powder smoke hangs at the line,
-	                                          # not lofting metres into the sky over its lifetime
+	m.gravity = Vector3(0, 0.012, 0)
 	m.damping_min = 0.22
 	m.damping_max = 0.45
 	m.scale_min = 0.9
 	m.scale_max = 1.8
+	m.angle_min = -180.0
+	m.angle_max = 180.0
+	m.angular_velocity_min = -8.0
+	m.angular_velocity_max = 8.0
+	# small-scale curling so the haze billows organically instead of scaling as a flat disc
+	m.turbulence_enabled = true
+	m.turbulence_noise_strength = 1.6
+	m.turbulence_noise_scale = 1.4
+	m.turbulence_noise_speed = Vector3(0.06, 0.05, 0.04)
+	m.turbulence_influence_min = 0.08
+	m.turbulence_influence_max = 0.22
 	var sc := Curve.new()
 	sc.add_point(Vector2(0.0, 0.4))
 	sc.add_point(Vector2(0.3, 2.2))
@@ -10329,11 +10353,25 @@ func _fire_process() -> ParticleProcessMaterial:
 
 func _smoke_process() -> ParticleProcessMaterial:
 	var m := ParticleProcessMaterial.new()
-	m.gravity = Vector3(0, 0.10, 0)            # barely drifts upward — the bank just hangs
+	# gravity is rewritten every frame in _update_environment() to carry the live wind
+	# vector, so a cannon's smoke bank jets out, blooms, then drifts downwind as one mass
+	# instead of just hanging in place; the y component below is its own slight buoyancy.
+	m.gravity = Vector3(0, 0.10, 0)
 	m.damping_min = 1.6                        # initial puff velocity bleeds off fast
 	m.damping_max = 3.2
 	m.scale_min = 1.0
 	m.scale_max = 2.2
+	m.angle_min = -180.0
+	m.angle_max = 180.0
+	m.angular_velocity_min = -5.0
+	m.angular_velocity_max = 5.0
+	# big, slow-rolling curls — a far heavier billow than the musket's haze
+	m.turbulence_enabled = true
+	m.turbulence_noise_strength = 2.4
+	m.turbulence_noise_scale = 1.0
+	m.turbulence_noise_speed = Vector3(0.05, 0.04, 0.03)
+	m.turbulence_influence_min = 0.10
+	m.turbulence_influence_max = 0.28
 	var sc := Curve.new()
 	sc.add_point(Vector2(0.0, 0.4))
 	sc.add_point(Vector2(0.35, 2.6))
