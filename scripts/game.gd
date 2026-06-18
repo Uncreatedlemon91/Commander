@@ -1012,108 +1012,82 @@ func _build_world() -> void:
 	for i in range(BATT_PER_TEAM * 2):
 		officer_mm.set_instance_transform(i, _zero_xf())
 
-	# brigade commanders — mounted generals riding behind the centre of their brigade.
-	# A dark horse (a capsule laid along the facing) under a bright gold rider.
+	# brigade commanders — mounted generals riding behind the centre of their brigade,
+	# on the shared detailed mount/rider meshes. A dark horse, shabraqued in the army's
+	# colour, under a rider in solid gold with dark trim — stands out as the brigadier.
+	var mount_mesh := _mount_horse_mesh()
+	var rider_mesh := _mount_rider_mesh()
 	var bn := BRIGADES_PER_TEAM * 2
 	var hmi := MultiMeshInstance3D.new()
 	cmd_horse_mm = MultiMesh.new()
 	cmd_horse_mm.transform_format = MultiMesh.TRANSFORM_3D
-	var hcap := CapsuleMesh.new()
-	hcap.radius = 0.34
-	hcap.height = 1.9
-	cmd_horse_mm.mesh = hcap
+	cmd_horse_mm.use_colors = true
+	cmd_horse_mm.mesh = mount_mesh
 	cmd_horse_mm.instance_count = bn
 	hmi.multimesh = cmd_horse_mm
-	var hmat := StandardMaterial3D.new()
-	hmat.albedo_color = Color(0.20, 0.13, 0.08)
-	hmat.roughness = 0.9
-	hmi.material_override = hmat
+	hmi.material_override = _mount_horse_shader()
 	add_child(hmi)
 	var rmi := MultiMeshInstance3D.new()
 	cmd_rider_mm = MultiMesh.new()
 	cmd_rider_mm.transform_format = MultiMesh.TRANSFORM_3D
-	var rcap := CapsuleMesh.new()
-	rcap.radius = 0.26
-	rcap.height = 1.5
-	cmd_rider_mm.mesh = rcap
+	cmd_rider_mm.use_colors = true
+	cmd_rider_mm.mesh = rider_mesh
 	cmd_rider_mm.instance_count = bn
 	rmi.multimesh = cmd_rider_mm
-	var rmat := StandardMaterial3D.new()
-	rmat.albedo_color = Color(1.0, 0.82, 0.30)   # gold — stands out as the brigadier
-	rmat.metallic = 0.2
-	rmi.material_override = rmat
+	rmi.material_override = _mount_rider_shader(Color(0.10, 0.10, 0.13))   # dark trim on gold
 	add_child(rmi)
 	for i in range(bn):
 		cmd_horse_mm.set_instance_transform(i, _zero_xf())
 		cmd_rider_mm.set_instance_transform(i, _zero_xf())
+		cmd_rider_mm.set_instance_color(i, Color(0.80, 0.65, 0.25))   # solid gold coat
 
-	# divisional generals — one rank up from the brigadiers: a larger charger, a rider
-	# in white-and-silver, riding well behind the whole division's line.
+	# divisional generals — one rank up from the brigadiers: a larger charger (scaled
+	# up in the transform), a rider in white-and-silver, riding behind the division.
 	var dn := CORPS_PER_TEAM * DIVISIONS_PER_CORPS * 2
 	var ghmi := MultiMeshInstance3D.new()
 	gen_horse_mm = MultiMesh.new()
 	gen_horse_mm.transform_format = MultiMesh.TRANSFORM_3D
-	var ghcap := CapsuleMesh.new()
-	ghcap.radius = 0.40
-	ghcap.height = 2.2
-	gen_horse_mm.mesh = ghcap
+	gen_horse_mm.use_colors = true
+	gen_horse_mm.mesh = mount_mesh
 	gen_horse_mm.instance_count = dn
 	ghmi.multimesh = gen_horse_mm
-	var ghmat := StandardMaterial3D.new()
-	ghmat.albedo_color = Color(0.10, 0.07, 0.05)
-	ghmat.roughness = 0.9
-	ghmi.material_override = ghmat
+	ghmi.material_override = _mount_horse_shader()
 	add_child(ghmi)
 	var grmi := MultiMeshInstance3D.new()
 	gen_rider_mm = MultiMesh.new()
 	gen_rider_mm.transform_format = MultiMesh.TRANSFORM_3D
-	var grcap := CapsuleMesh.new()
-	grcap.radius = 0.30
-	grcap.height = 1.7
-	gen_rider_mm.mesh = grcap
+	gen_rider_mm.use_colors = true
+	gen_rider_mm.mesh = rider_mesh
 	gen_rider_mm.instance_count = dn
 	grmi.multimesh = gen_rider_mm
-	var grmat := StandardMaterial3D.new()
-	grmat.albedo_color = Color(0.95, 0.95, 0.98)   # white — the general, seen from afar
-	grmat.metallic = 0.35
-	grmat.roughness = 0.4
-	grmi.material_override = grmat
+	grmi.material_override = _mount_rider_shader(Color(0.75, 0.75, 0.78))   # silver trim
 	add_child(grmi)
 	for i in range(dn):
 		gen_horse_mm.set_instance_transform(i, _zero_xf())
 		gen_rider_mm.set_instance_transform(i, _zero_xf())
+		gen_rider_mm.set_instance_color(i, Color(0.92, 0.92, 0.95))   # white-and-silver coat
 
 	# battalion colonels — one mounted field officer riding behind every battalion's
-	# colours, coated in his army's facing so blue and red are told apart from afar.
+	# colours, coated in his army's colour with gold lace, so blue and red are told
+	# apart from afar (the player rides his own, much more detailed, hero in his place).
 	var coln := BATT_PER_TEAM * 2
 	var colhmi := MultiMeshInstance3D.new()
 	colonel_horse_mm = MultiMesh.new()
 	colonel_horse_mm.transform_format = MultiMesh.TRANSFORM_3D
-	var colhcap := CapsuleMesh.new()
-	colhcap.radius = 0.30
-	colhcap.height = 1.7
-	colonel_horse_mm.mesh = colhcap
+	colonel_horse_mm.use_colors = true
+	colonel_horse_mm.mesh = mount_mesh
 	colonel_horse_mm.instance_count = coln
 	colhmi.multimesh = colonel_horse_mm
-	var colhmat := StandardMaterial3D.new()
-	colhmat.albedo_color = Color(0.18, 0.12, 0.07)
-	colhmat.roughness = 0.9
-	colhmi.material_override = colhmat
+	colhmi.material_override = _mount_horse_shader()
 	add_child(colhmi)
 	var colrmi := MultiMeshInstance3D.new()
 	colonel_rider_mm = MultiMesh.new()
 	colonel_rider_mm.transform_format = MultiMesh.TRANSFORM_3D
 	colonel_rider_mm.use_colors = true
-	var colrcap := CapsuleMesh.new()
-	colrcap.radius = 0.22
-	colrcap.height = 1.35
-	colonel_rider_mm.mesh = colrcap
+	colonel_rider_mm.mesh = rider_mesh
 	colonel_rider_mm.instance_count = coln
 	colrmi.multimesh = colonel_rider_mm
-	var colrmat := StandardMaterial3D.new()
-	colrmat.vertex_color_use_as_albedo = true
-	colrmat.roughness = 0.55
-	colrmi.material_override = colrmat
+	colrmi.material_override = _mount_rider_shader(Color(0.83, 0.68, 0.21))   # gold lace
 	add_child(colrmi)
 	for i in range(coln):
 		colonel_horse_mm.set_instance_transform(i, _zero_xf())
@@ -1608,6 +1582,152 @@ void fragment() {
 """
 	var m := ShaderMaterial.new()
 	m.shader = sh
+	return m
+
+# ===================================================== mounted commanders (AI)
+# Battalion colonels, brigade commanders and divisional generals share ONE detailed
+# horse mesh and ONE detailed rider mesh (each is a MultiMesh across many instances,
+# so — like the soldiers — it's one mesh + one shader, never per-instance nodes). Rank
+# reads by SIZE (a uniform scale per tier, applied in the instance transform) and by
+# the rider's coat/trim: the colonel rides in his army's colour with gold lace; the
+# brigadier in solid gold with dark trim; the general in white-and-silver — same
+# silhouette logic the bare capsules used, just with an actual horse and officer under
+# it now. The saddle cloth always carries the army's colour, tying every tier visually
+# to its side. Built ground-up (origin at the horse's feet) like `_build_horse()` /
+# `_build_officer_colonel()`, just flattened to axis-aligned boxes for the shader.
+func _mount_horse_mesh() -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	_add_box(st, Vector3(0, 0.98, -0.05), Vector3(0.5, 0.62, 1.42))      # barrel
+	_add_box(st, Vector3(0, 1.02, 0.62), Vector3(0.46, 0.52, 0.42))      # chest
+	_add_box(st, Vector3(0, 1.02, -0.78), Vector3(0.52, 0.6, 0.5))       # hindquarters
+	_add_box(st, Vector3(0, 1.55, 1.05), Vector3(0.26, 0.55, 0.45))      # neck, arched
+	_add_box(st, Vector3(0, 1.58, 0.90), Vector3(0.08, 0.58, 0.18))      # mane
+	_add_box(st, Vector3(0, 1.78, 1.42), Vector3(0.22, 0.26, 0.42))      # head
+	_add_box(st, Vector3(0, 1.86, 1.46), Vector3(0.06, 0.02, 0.30))      # blaze
+	_add_box(st, Vector3(0, 1.68, 1.62), Vector3(0.18, 0.16, 0.16))      # muzzle
+	for ex in [-0.07, 0.07]:
+		_add_box(st, Vector3(ex, 1.95, 1.18), Vector3(0.05, 0.13, 0.05))    # ears
+	_add_box(st, Vector3(0, 0.78, -1.10), Vector3(0.13, 0.62, 0.13))     # tail
+	for lp in [Vector2(0.18, 0.52), Vector2(-0.18, 0.52), Vector2(0.2, -0.58), Vector2(-0.2, -0.58)]:
+		_add_box(st, Vector3(lp.x, 0.36, lp.y), Vector3(0.15, 0.72, 0.17))       # leg
+		_add_box(st, Vector3(lp.x, 0.02, lp.y + 0.02), Vector3(0.17, 0.12, 0.2)) # hoof
+	_add_box(st, Vector3(0, 1.32, -0.02), Vector3(0.30, 0.14, 0.46))     # saddle
+	_add_box(st, Vector3(0, 1.17, -0.46), Vector3(0.42, 0.05, 0.56))     # shabraque (army colour)
+	_add_box(st, Vector3(0, 1.14, -0.46), Vector3(0.46, 0.02, 0.60))     # shabraque trim
+	_add_box(st, Vector3(0, 1.70, 1.34), Vector3(0.24, 0.025, 0.025))    # bit
+	_add_box(st, Vector3(0, 1.62, 1.50), Vector3(0.19, 0.022, 0.022))    # noseband
+	_add_box(st, Vector3(0, 1.16, 0.56), Vector3(0.30, 0.02, 0.02))      # breast strap
+	for sx2 in [-0.26, 0.26]:
+		_add_box(st, Vector3(sx2, 0.96, 0.06), Vector3(0.07, 0.05, 0.10))   # stirrup
+	return st.commit()
+
+func _mount_horse_shader() -> ShaderMaterial:
+	var sh := Shader.new()
+	sh.code = """
+shader_type spatial;
+varying float vx;
+varying float vy;
+varying float vz;
+void vertex() { vx = VERTEX.x; vy = VERTEX.y; vz = VERTEX.z; }
+void fragment() {
+	vec3 hide = vec3(0.17, 0.11, 0.07);
+	vec3 dark = vec3(0.06, 0.04, 0.03);
+	vec3 leather = vec3(0.22, 0.13, 0.07);
+	vec3 brass = vec3(0.80, 0.64, 0.22);
+	vec3 col = hide;
+	if (vy < 0.10) col = dark;                                              // hooves
+	if (vz < -0.75 && vy > 0.40 && vy < 1.15) col = dark;                   // tail
+	if (vz > 0.78 && vz < 1.0 && vy > 1.25 && abs(vx) < 0.08) col = dark;   // mane
+	if (vz > 1.50 && vy < 1.85) col = dark;                                 // muzzle
+	if (vz > 1.30 && vy > 1.83 && abs(vx) < 0.05) col = vec3(0.86, 0.84, 0.80); // blaze
+	if (vy > 0.85 && vy < 1.05 && abs(vx) > 0.20 && vz > -0.05 && vz < 0.20) col = brass; // stirrups
+	if (vy > 1.10 && vy < 1.22 && vz < -0.10) col = COLOR.rgb;              // shabraque: the army's colour
+	if (vy > 1.10 && vy < 1.15 && vz < -0.10) col = brass;                  // its piped edge
+	if (vy > 1.22 && vy < 1.42 && vz > -0.30 && vz < 0.25) col = leather;   // saddle
+	if (vy > 1.55 && vy < 1.75 && vz > 1.20 && vz < 1.55) col = leather;    // bit / noseband
+	if (vy > 1.10 && vy < 1.22 && vz > 0.40 && vz < 0.70) col = leather;    // breast strap
+	ALBEDO = col;
+	ROUGHNESS = 0.85;
+}
+"""
+	var m := ShaderMaterial.new()
+	m.shader = sh
+	return m
+
+func _mount_rider_mesh() -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for sx in [-0.27, 0.27]:
+		_add_box(st, Vector3(sx, 1.35, 0.08), Vector3(0.16, 0.72, 0.18))    # thigh (buff breeches)
+		_add_box(st, Vector3(sx, 1.02, 0.20), Vector3(0.17, 0.40, 0.19))    # riding boot
+	_add_box(st, Vector3(0, 1.95, 0), Vector3(0.42, 0.62, 0.26))            # coat body
+	_add_box(st, Vector3(0, 1.66, -0.16), Vector3(0.36, 0.30, 0.14))        # coat tails
+	_add_box(st, Vector3(0, 2.20, 0.10), Vector3(0.30, 0.10, 0.10))         # collar (trim)
+	_add_box(st, Vector3(0, 1.92, 0.14), Vector3(0.20, 0.50, 0.04))         # lapel (trim)
+	_add_box(st, Vector3(0, 1.72, 0), Vector3(0.46, 0.10, 0.30))            # waist sash
+	_add_box(st, Vector3(-0.20, 1.55, 0.06), Vector3(0.07, 0.22, 0.07))     # sash knot
+	_add_box(st, Vector3(0, 2.27, 0.13), Vector3(0.14, 0.06, 0.02))         # gorget (trim)
+	_add_box(st, Vector3(0.18, 1.96, 0.15), Vector3(0.03, 0.34, 0.03))      # aiguillette cord
+	_add_box(st, Vector3(0.20, 1.74, 0.16), Vector3(0.04, 0.08, 0.04))      # aiguillette tip
+	_add_box(st, Vector3(0, 2.38, 0), Vector3(0.22, 0.22, 0.22))            # head
+	for sx in [-0.30, 0.30]:
+		_add_box(st, Vector3(sx, 1.92, 0.04), Vector3(0.13, 0.5, 0.14))        # sleeve
+		_add_box(st, Vector3(sx, 1.70, 0.05), Vector3(0.15, 0.10, 0.16))       # cuff (trim)
+		_add_box(st, Vector3(sx * 0.85, 1.66, 0.16), Vector3(0.08, 0.08, 0.09)) # hand (skin)
+		_add_box(st, Vector3(sx, 2.18, 0.0), Vector3(0.17, 0.05, 0.17))         # epaulette (trim)
+	_add_box(st, Vector3(0, 2.55, 0), Vector3(0.55, 0.12, 0.22))            # bicorne
+	_add_box(st, Vector3(0, 2.49, 0), Vector3(0.58, 0.025, 0.25))           # hat trim (piping)
+	_add_box(st, Vector3(0, 2.58, 0.11), Vector3(0.06, 0.06, 0.03))         # cockade
+	_add_cyl(st, Vector3(0, 2.65, -0.04), 0.045, 0.04, 0.08, 8)             # plume base
+	_add_cyl(st, Vector3(0, 2.86, -0.05), 0.035, 0.015, 0.34, 8)            # plume
+	_add_box(st, Vector3(0.34, 1.9, 0.25), Vector3(0.05, 0.05, 0.85))       # sabre
+	_add_box(st, Vector3(0.34, 1.9, -0.17), Vector3(0.07, 0.07, 0.14))      # hilt (trim)
+	_add_box(st, Vector3(-0.32, 1.9, 0.2), Vector3(0.05, 0.10, 0.26))       # holstered pistol
+	return st.commit()
+
+# Shared by all three mounted-leadership tiers — only the `trim` uniform differs
+# (gold / dark / silver), painted on by a separate ShaderMaterial per tier. The coat
+# itself reads COLOR.rgb (the colonel's team colour, or a fixed gold/white set per
+# instance for the brigadiers/generals — see `_render_commanders()`).
+func _mount_rider_shader(trim: Color) -> ShaderMaterial:
+	var sh := Shader.new()
+	sh.code = """
+shader_type spatial;
+uniform vec3 trim;
+varying float vx;
+varying float vy;
+varying float vz;
+void vertex() { vx = VERTEX.x; vy = VERTEX.y; vz = VERTEX.z; }
+void fragment() {
+	vec3 buff = vec3(0.82, 0.78, 0.65);
+	vec3 boot = vec3(0.07, 0.06, 0.07);
+	vec3 skin = vec3(0.72, 0.56, 0.43);
+	vec3 sash_col = vec3(0.55, 0.05, 0.08);
+	vec3 col = COLOR.rgb;                                                // coat: the army's colour
+	if (vy < 1.92) col = buff;                                           // buff breeches
+	if (vy < 1.22) col = boot;                                           // riding boots
+	if (vy > 1.67 && vy < 1.77) col = sash_col;                          // waist sash
+	if (vy > 2.15 && vy < 2.25) col = trim;                             // collar
+	if (vz > 0.10 && abs(vx) < 0.12 && vy > 1.65 && vy < 2.15) col = trim;  // lapel
+	if (abs(vx) > 0.22 && vy > 1.63 && vy < 1.78) col = trim;            // cuffs
+	if (abs(vx) > 0.22 && vy > 2.13 && vy < 2.24) col = trim;            // epaulettes
+	if (vy > 2.24 && vy < 2.30 && vz > 0.10) col = trim;                 // gorget
+	if (abs(vx) > 0.22 && vy > 1.60 && vy < 1.71) col = skin;            // bare hands
+	if (vy > 2.27 && vy < 2.49) col = skin;                              // head
+	if (vy > 2.40 && vy < 2.62) col = vec3(0.05, 0.05, 0.06);            // bicorne body
+	if (vy > 2.475 && vy < 2.505) col = trim;                           // hat piping
+	if (vy > 2.55 && vy < 2.61 && vz > 0.08) col = trim;                 // cockade
+	if (vy > 2.62 && vy < 2.70) col = trim;                             // plume base
+	if (vy >= 2.70) col = vec3(0.92, 0.90, 0.86);                        // plume
+	if (abs(vx) > 0.28 && vy > 1.83 && vy < 1.97) col = trim;            // sabre / pistol
+	ALBEDO = col;
+	ROUGHNESS = 0.7;
+}
+"""
+	var m := ShaderMaterial.new()
+	m.shader = sh
+	m.set_shader_parameter("trim", Vector3(trim.r, trim.g, trim.b))
 	return m
 
 # The uniform, painted in bands by height (shako / facing collar / coat / trousers).
@@ -9039,6 +9159,9 @@ func _render(delta: float) -> void:
 	_render_commanders()
 	_render_cavalry(delta)
 
+const MOUNT_SCALE_COMMANDER := 1.12   # brigadier's horse & rider, a notch bigger than a colonel's
+const MOUNT_SCALE_GENERAL := 1.28     # the general's charger, the biggest mount on the field
+
 # The brigade commanders: mounted generals posted behind the centre of their brigade.
 func _render_commanders() -> void:
 	for i in range(brigades.size()):
@@ -9050,11 +9173,12 @@ func _render_commanders() -> void:
 		var yaw: float = br.facing
 		var bf := Vector3(sin(yaw), 0, cos(yaw))
 		var pos := _brigade_center(br) - bf * 18.0    # rides behind the line centre
-		# horse: a capsule laid horizontal, pointing along the brigade's facing
-		var hbasis := Basis(Vector3.UP, yaw) * Basis(Vector3.RIGHT, PI * 0.5)
-		cmd_horse_mm.set_instance_transform(i, Transform3D(hbasis, Vector3(pos.x, 0.95 + _gh(pos.x, pos.z), pos.z)))
-		# rider sits astride, head and shoulders above the infantry
-		cmd_rider_mm.set_instance_transform(i, Transform3D(Basis(Vector3.UP, yaw), Vector3(pos.x, 1.75 + _gh(pos.x, pos.z), pos.z)))
+		var s := MOUNT_SCALE_COMMANDER
+		var basis := Basis(Vector3.UP, yaw).scaled(Vector3(s, s, s))
+		var seat := Vector3(pos.x, _gh(pos.x, pos.z), pos.z)
+		cmd_horse_mm.set_instance_transform(i, Transform3D(basis, seat))
+		cmd_rider_mm.set_instance_transform(i, Transform3D(basis, seat))
+		cmd_horse_mm.set_instance_color(i, team_color(br.team))   # shabraque: the army's colour
 	# the divisional generals, one rank back behind their whole division
 	var dpt := CORPS_PER_TEAM * DIVISIONS_PER_CORPS
 	for dv in divisions:
@@ -9067,9 +9191,12 @@ func _render_commanders() -> void:
 			continue
 		var gp: Vector3 = dv.general_pos
 		var gyaw: float = 0.0 if dv.team == 0 else PI
-		var gh := Basis(Vector3.UP, gyaw) * Basis(Vector3.RIGHT, PI * 0.5)
-		gen_horse_mm.set_instance_transform(gi, Transform3D(gh, Vector3(gp.x, 1.05 + _gh(gp.x, gp.z), gp.z)))
-		gen_rider_mm.set_instance_transform(gi, Transform3D(Basis(Vector3.UP, gyaw), Vector3(gp.x, 1.95 + _gh(gp.x, gp.z), gp.z)))
+		var gs := MOUNT_SCALE_GENERAL
+		var gbasis := Basis(Vector3.UP, gyaw).scaled(Vector3(gs, gs, gs))
+		var gseat := Vector3(gp.x, _gh(gp.x, gp.z), gp.z)
+		gen_horse_mm.set_instance_transform(gi, Transform3D(gbasis, gseat))
+		gen_rider_mm.set_instance_transform(gi, Transform3D(gbasis, gseat))
+		gen_horse_mm.set_instance_color(gi, team_color(dv.team))   # shabraque: the army's colour
 	# the mounted colonels, one behind every battalion (the player rides his own)
 	var cmax: int = colonel_horse_mm.instance_count
 	for b in battalions:
@@ -9083,9 +9210,11 @@ func _render_commanders() -> void:
 		var cyaw: float = b.facing
 		var cfwd := Vector3(sin(cyaw), 0, cos(cyaw))
 		var cpos: Vector3 = b.pos - cfwd * 13.0   # rides behind his battalion's colours
-		var chb := Basis(Vector3.UP, cyaw) * Basis(Vector3.RIGHT, PI * 0.5)
-		colonel_horse_mm.set_instance_transform(ci, Transform3D(chb, Vector3(cpos.x, 0.85 + _gh(cpos.x, cpos.z), cpos.z)))
-		colonel_rider_mm.set_instance_transform(ci, Transform3D(Basis(Vector3.UP, cyaw), Vector3(cpos.x, 1.58 + _gh(cpos.x, cpos.z), cpos.z)))
+		var cbasis := Basis(Vector3.UP, cyaw)
+		var cseat := Vector3(cpos.x, _gh(cpos.x, cpos.z), cpos.z)
+		colonel_horse_mm.set_instance_transform(ci, Transform3D(cbasis, cseat))
+		colonel_rider_mm.set_instance_transform(ci, Transform3D(cbasis, cseat))
+		colonel_horse_mm.set_instance_color(ci, team_color(b.team))   # shabraque: the army's colour
 		colonel_rider_mm.set_instance_color(ci, ARMY_BLUE.lightened(0.22) if b.team == 0 else ARMY_RED.lightened(0.14))
 
 # A command-group man WALKS to his post (officer, colours, drummer, sergeants,

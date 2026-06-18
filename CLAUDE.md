@@ -65,6 +65,27 @@ The AI's mounted battalion colonels/brigade commanders/divisional generals are s
 capsules (`colonel_horse_mm`/`colonel_rider_mm`, `cmd_horse_mm`/`cmd_rider_mm`,
 `gen_horse_mm`/`gen_rider_mm`) — a much bigger gap against the player's hero, not yet tackled.
 
+## AI mounted commanders — also brought off the bare capsules
+The three tiers of AI leadership (`colonel_*_mm` per battalion, `cmd_*_mm` per brigade,
+`gen_*_mm` per division) now ride one shared detailed horse mesh (`_mount_horse_mesh()` /
+`_mount_horse_shader()`) and one shared detailed rider mesh (`_mount_rider_mesh()` /
+`_mount_rider_shader(trim)`) instead of bare `CapsuleMesh` primitives — built the same way as
+the soldiers/officers (`SurfaceTool` boxes + cylinders, painted by a position-banded shader),
+just with no rotated parts so the bands stay axis-aligned. Because each tier is itself a
+MultiMesh (one per battalion/brigade/division, not one instance), it's still one mesh + one
+shader per tier, never per-instance nodes like the player's hero. Rank reads two ways:
+**size** (`MOUNT_SCALE_COMMANDER` / `MOUNT_SCALE_GENERAL` scale the shared transform up from
+the colonel's 1.0) and **coat/trim** — the colonel rides in his army's colour with gold lace
+(`_render_commanders()` sets `colonel_rider_mm`'s instance colour to team blue/red each frame,
+same as before); the brigadier in a fixed solid gold coat with dark trim; the general in fixed
+white-and-silver. The horse's **shabraque always carries the army's colour** (`team_color()`)
+on all three tiers, via `use_colors` on the horse MultiMeshes — ties every rank visually to its
+side even when the rider's coat doesn't. Both horse and rider meshes are built **origin-at-the-
+horse's-feet** (ground level), matching `_build_horse()`/`_build_officer_colonel()`'s frame, so
+`_render_commanders()` now places both transforms at `(x, _gh(x,z), z)` directly — no more
+manual capsule-center y-offsets. Colour-bearers (`bearer_mm`) were left as a plain capsule —
+out of scope for this pass.
+
 ## Player controls
 `WASD` move · `Shift` run · `R` autorun · mouse look · `RMB` spyglass · `E` hail · `Q` courier orders ·
 `M` map · `C` camp. Self: `LMB` sabre/fire · `G` pistol · **`V` present** (muskets up) ·
