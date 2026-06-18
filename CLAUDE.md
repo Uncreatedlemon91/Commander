@@ -86,6 +86,22 @@ horse's-feet** (ground level), matching `_build_horse()`/`_build_officer_colonel
 manual capsule-center y-offsets. Colour-bearers (`bearer_mm`) were left as a plain capsule —
 out of scope for this pass.
 
+## The colour party — flag and bearer brought up to standard
+`bearer_mm` was the last bare capsule among the command group; it now reuses the existing
+`officer_mm` assets (`_officer_mesh()` + `_officer_shader()`, shared — no new mesh/shader
+needed) with `use_colors`/`use_custom_data` on and `_cg_dress()` painting his coat each frame,
+placed with the same `0.85`-style ground-origin offset as `officer_mm` (not `CAP_HALF`, which
+is only for capsule-center origins). The two colour-party escorts (`nco_mm` + `spontoon_mm`)
+were already at this standard from the officer/NCO pass and needed no change.
+`_make_flag()` was a bare pole + one flat solid-colour box; since the flag is **one node per
+battalion, not a MultiMesh**, it's free of the affordability keystone and can carry real detail
+like the hero. It now builds a small stand-of-colours assembly: a gold spearhead finial atop
+the staff, a hoist canton in the regiment's facing colour, a gold roundel badge at the centre,
+and a gold fringe along the top/bottom/fly edges — all individual `MeshInstance3D` parts. The
+cloth is now a `Node3D` wrapper (still assigned to `b.flag_cloth`) holding all these parts, so
+`_place_flag()`'s existing sway/lean/drag-when-down animation (which rotates `b.flag_cloth` as
+a whole) keeps working on the whole assembly unchanged.
+
 ## Player controls
 `WASD` move · `Shift` run · `R` autorun · mouse look · `RMB` spyglass · `E` hail · `Q` courier orders ·
 `M` map · `C` camp. Self: `LMB` sabre/fire · `G` pistol · **`V` present** (muskets up) ·

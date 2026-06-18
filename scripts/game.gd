@@ -1093,19 +1093,17 @@ func _build_world() -> void:
 		colonel_horse_mm.set_instance_transform(i, _zero_xf())
 		colonel_rider_mm.set_instance_transform(i, _zero_xf())
 
-	# colour-bearers (one per battalion, dark coat — the cloth carries the colour)
+	# colour-bearers (one per battalion) — the same detailed officer figure as
+	# officer_mm/nco_mm, shouldering the colours instead of a musket
 	var bmi := MultiMeshInstance3D.new()
 	bearer_mm = MultiMesh.new()
 	bearer_mm.transform_format = MultiMesh.TRANSFORM_3D
-	var bcap := CapsuleMesh.new()
-	bcap.radius = 0.22
-	bcap.height = 1.7
-	bearer_mm.mesh = bcap
+	bearer_mm.mesh = officer_mesh
+	bearer_mm.use_colors = true
+	bearer_mm.use_custom_data = true
 	bearer_mm.instance_count = BATT_PER_TEAM * 2
 	bmi.multimesh = bearer_mm
-	var bmat := StandardMaterial3D.new()
-	bmat.albedo_color = Color(0.16, 0.16, 0.20)
-	bmi.material_override = bmat
+	bmi.material_override = _officer_shader()
 	add_child(bmi)
 	for i in range(BATT_PER_TEAM * 2):
 		bearer_mm.set_instance_transform(i, _zero_xf())
@@ -5384,19 +5382,87 @@ func _make_flag(b: Batt, team: int) -> void:
 	pmat.albedo_color = Color(0.25, 0.16, 0.08)
 	pole.material_override = pmat
 	b.flag.add_child(pole)
-	var cloth := MeshInstance3D.new()
-	var cbox := BoxMesh.new()
-	cbox.size = Vector3(0.95, 0.62, 0.02)
-	cloth.mesh = cbox
-	cloth.position = Vector3(0.5, 1.85, 0)      # the colours fly just above the men's heads
-	var cmat := StandardMaterial3D.new()
-	# the cloth carries the REGIMENT's facing colour quartered with the national one
+
+	# a gold spearhead finial atop the staff, the mark of a proper stand of colours
+	var gold := Color(0.83, 0.68, 0.21)
+	var finial := MeshInstance3D.new()
+	var fcone := CylinderMesh.new()
+	fcone.top_radius = 0.0
+	fcone.bottom_radius = 0.04
+	fcone.height = 0.16
+	finial.mesh = fcone
+	finial.position = Vector3(0, 2.23, 0)
+	var finmat := StandardMaterial3D.new()
+	finmat.albedo_color = gold
+	finmat.metallic = 0.6
+	finmat.roughness = 0.3
+	finial.material_override = finmat
+	b.flag.add_child(finial)
+
 	var nat := ARMY_BLUE if team == 0 else ARMY_RED
-	cmat.albedo_color = nat.lerp(Color(b.inst_col.r, b.inst_col.g, b.inst_col.b), 0.5)
-	cmat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	cloth.material_override = cmat
+	var fac := Color(b.inst_col.r, b.inst_col.g, b.inst_col.b)
+
+	# the cloth assembly: one wrapper node so the existing sway/flap animation
+	# (which rotates b.flag_cloth as a whole) still drives every part together
+	var cloth := Node3D.new()
+	cloth.position = Vector3(0.5, 1.85, 0)      # the colours fly just above the men's heads
 	b.flag.add_child(cloth)
 	b.flag_cloth = cloth
+
+	# the field — the regiment's facing colour quartered with the national one
+	var field := MeshInstance3D.new()
+	var cbox := BoxMesh.new()
+	cbox.size = Vector3(0.95, 0.62, 0.018)
+	field.mesh = cbox
+	var cmat := StandardMaterial3D.new()
+	cmat.albedo_color = nat.lerp(fac, 0.5)
+	cmat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	field.material_override = cmat
+	cloth.add_child(field)
+
+	# a hoist canton in the facing colour, by the staff edge
+	var canton := MeshInstance3D.new()
+	var canbox := BoxMesh.new()
+	canbox.size = Vector3(0.34, 0.29, 0.02)
+	canton.mesh = canbox
+	canton.position = Vector3(-0.30, 0.16, 0.0015)
+	var canmat := StandardMaterial3D.new()
+	canmat.albedo_color = fac
+	canmat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	canton.material_override = canmat
+	cloth.add_child(canton)
+
+	# a gold roundel at the centre, standing for the regimental badge
+	var roundel := MeshInstance3D.new()
+	var rcyl := CylinderMesh.new()
+	rcyl.top_radius = 0.13
+	rcyl.bottom_radius = 0.13
+	rcyl.height = 0.012
+	roundel.mesh = rcyl
+	roundel.rotation_degrees = Vector3(90, 0, 0)
+	roundel.position = Vector3(0.05, 0, 0.013)
+	var rolmat := StandardMaterial3D.new()
+	rolmat.albedo_color = gold
+	rolmat.metallic = 0.4
+	roundel.material_override = rolmat
+	cloth.add_child(roundel)
+
+	# a gold fringe along the top, bottom and fly edge
+	var fringe_mat := StandardMaterial3D.new()
+	fringe_mat.albedo_color = gold
+	for fr in [
+		[Vector3(0, 0.325, 0), Vector3(0.99, 0.03, 0.02)],   # top edge
+		[Vector3(0, -0.325, 0), Vector3(0.99, 0.03, 0.02)],  # bottom edge
+		[Vector3(0.49, 0, 0), Vector3(0.03, 0.65, 0.02)],    # fly edge
+	]:
+		var fr_mi := MeshInstance3D.new()
+		var fr_box := BoxMesh.new()
+		fr_box.size = fr[1]
+		fr_mi.mesh = fr_box
+		fr_mi.position = fr[0]
+		fr_mi.material_override = fringe_mat
+		cloth.add_child(fr_mi)
+
 	b.flag.visible = false
 
 func _fill_figs(b: Batt) -> void:
@@ -9073,7 +9139,8 @@ func _render(delta: float) -> void:
 				byaw = atan2(bmv.x, bmv.z)
 			if not b.colours_down:
 				var bbob := absf(sin(_t * 2.4 + idn + 1.0)) * 0.04
-				bearer_mm.set_instance_transform(bearer_i, Transform3D(Basis(Vector3.UP, byaw), Vector3(bw.x, CAP_HALF + bbob + _gh(bw.x, bw.z), bw.z)))
+				bearer_mm.set_instance_transform(bearer_i, Transform3D(Basis(Vector3.UP, byaw), Vector3(bw.x, 0.85 + bbob + _gh(bw.x, bw.z), bw.z)))
+				_cg_dress(bearer_mm, bearer_i, b.team, bw.distance_to(bp) > 0.1, false)
 				bearer_i += 1
 			_place_flag(b, Vector3(bw.x, 0, bw.z), fyaw)   # lays low when the colours are down
 			# the COLOUR PARTY: a guard of two with half-pikes, posted at the colours
