@@ -663,7 +663,7 @@ var ground_mat: StandardMaterial3D
 # --- time of day & weather ---
 var _time_of_day := 8.5                   # hours, 0..24
 var _weather := "clear"                   # clear | overcast | rain | fog
-var _weather_timer := 75.0                # seconds until the weather shifts on its own
+var _weather_timer := 200.0               # seconds until the weather shifts on its own
 var _night := 0.0                         # 0 broad day .. 1 deep night (muzzle flashes glow)
 var _cloud := 0.0                         # smoothed cloud cover 0..1
 var _fogw := 0.0                          # smoothed extra fog 0..1
@@ -671,12 +671,24 @@ var _rainw := 0.0                         # smoothed rain intensity 0..1
 var _wind := Vector3.ZERO                 # gentle wind (drifts smoke, stirs the colours)
 var _wet := 0.0                           # how damp the powder is (misfires in rain)
 var rain_p: GPUParticles3D
+var _rain_proc: ParticleProcessMaterial   # rain's process material (wind lays the streaks over)
 var _grad_skytop: Gradient
 var _grad_skyhorizon: Gradient
 var _grad_sun: Gradient
 var _grad_fog: Gradient
 const DAY_RATE := 24.0 / 3600.0           # a full day cycles in ~60 minutes (N to skip ahead)
 const WEATHERS := ["clear", "overcast", "rain", "fog"]
+# which way the weather plausibly turns next — a clear sky builds to overcast before it can
+# rain, and rain clears back through overcast rather than snapping straight to blue sky
+const WEATHER_NEXT := {
+	"clear": ["overcast"],
+	"overcast": ["clear", "clear", "rain", "rain", "fog"],
+	"rain": ["overcast"],
+	"fog": ["overcast", "clear"],
+}
+const WEATHER_CLOUD_RATE := 0.018         # clouds build/break over roughly a minute, not seconds
+const WEATHER_FOG_RATE := 0.02
+const WEATHER_RAIN_RATE := 0.06           # once the sky's heavy enough, rain can pick up quicker
 var _t := 0.0
 
 # multiplayer
@@ -1999,14 +2011,16 @@ func _build_rain() -> GPUParticles3D:
 	var pm := ParticleProcessMaterial.new()
 	pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
 	pm.emission_box_extents = Vector3(55, 0.5, 55)
-	pm.direction = Vector3(0.12, -1.0, 0.0)
+	pm.direction = Vector3(0, -1.0, 0)
 	pm.spread = 2.0
 	pm.initial_velocity_min = 26.0
 	pm.initial_velocity_max = 32.0
-	pm.gravity = Vector3(0, -12.0, 0)
+	pm.gravity = Vector3(0, -12.0, 0)         # wind adds a sideways pull on top of this, live
 	pm.scale_min = 1.0
 	pm.scale_max = 1.0
+	pm.particle_flag_align_y_to_velocity = true   # streaks rake over to match how they're actually falling
 	p.process_material = pm
+	_rain_proc = pm
 	var mesh := QuadMesh.new()
 	mesh.size = Vector2(0.018, 0.55)         # a thin streak
 	var mat := StandardMaterial3D.new()
@@ -2053,9 +2067,12 @@ func _update_environment(delta: float) -> void:
 	var h := sin((t - 6.0) / 12.0 * PI)          # sun height: -1..1 (0 at 6 & 18)
 	var day := clampf(h, 0.0, 1.0)
 	_night = clampf(-h * 2.2 + 0.25, 0.0, 1.0)   # deep dark after dusk -> muzzle flashes blaze
-	# weather is DISABLED for now — the field stays clear (M is the map, not the weather)
-	_weather = "clear"
-	# ease the weather toward the chosen state
+	# the weather turns over on its own, slowly, only to a state the current one plausibly leads to
+	_weather_timer -= delta
+	if _weather_timer <= 0.0:
+		_cycle_weather()
+	# ease the weather toward the chosen state — clouds and fog build over roughly a minute,
+	# never snap, so nothing changes from clear to foul in the space of a few seconds
 	var tc := 0.0
 	var tf := 0.0
 	var tr := 0.0
@@ -2063,10 +2080,13 @@ func _update_environment(delta: float) -> void:
 		"overcast": tc = 0.85; tf = 0.22
 		"rain": tc = 1.0; tf = 0.45; tr = 1.0
 		"fog": tc = 0.55; tf = 1.0
-	var k := clampf(delta * 0.5, 0.0, 1.0)
-	_cloud = lerpf(_cloud, tc, k)
-	_fogw = lerpf(_fogw, tf, k)
-	_rainw = lerpf(_rainw, tr, k)
+	_cloud = lerpf(_cloud, tc, clampf(delta * WEATHER_CLOUD_RATE, 0.0, 1.0))
+	_fogw = lerpf(_fogw, tf, clampf(delta * WEATHER_FOG_RATE, 0.0, 1.0))
+	# rain can't break until the sky is actually heavy enough to carry it — a storm announces
+	# itself in the clouds well before the first drop falls, and tails off the same way as
+	# they thin, so "clear" never tips straight into "raining"
+	var rain_target := tr * smoothstep(0.55, 0.85, _cloud)
+	_rainw = lerpf(_rainw, rain_target, clampf(delta * WEATHER_RAIN_RATE, 0.0, 1.0))
 	_wet = _rainw
 	# the sun arcs across the sky; stays just above the horizon so shadows always cast
 	var pitch := -clampf(h * 70.0, 4.0, 76.0)
@@ -2110,6 +2130,10 @@ func _update_environment(delta: float) -> void:
 		_musket_smoke_proc.gravity = Vector3(_wind.x, 0.012, _wind.z)
 	if _dust_proc:
 		_dust_proc.gravity = Vector3(_wind.x, 0.02, _wind.z)
+	if _rain_proc:
+		# the same wind that drifts the smoke lays the rain over — the harder it blows,
+		# the harder the streaks rake as they fall, instead of always dropping dead straight
+		_rain_proc.gravity = Vector3(_wind.x * 2.6, -12.0, _wind.z * 2.6)
 	# the sea and the clouds answer to that same wind
 	var wdir := Vector2(_wind.x, _wind.z)
 	wdir = wdir.normalized() if wdir.length() > 0.01 else Vector2(1, 0)
@@ -2133,10 +2157,13 @@ func _update_environment(delta: float) -> void:
 		cloud_mat.set_shader_parameter("shade", horizon.lerp(Color(0.60, 0.64, 0.72), 0.5) * dcl)
 
 func _cycle_weather() -> void:
-	var i := WEATHERS.find(_weather)
-	_weather = WEATHERS[(i + 1) % WEATHERS.size()]
-	_weather_timer = randf_range(90.0, 220.0)        # hold the chosen weather a while
-	_send_player_despatch("[color=#bcd] Weather: %s.[/color]" % _weather, {})
+	# only turn toward a state the current weather plausibly leads to — clear builds to
+	# overcast before anything else, rain settles back to overcast rather than blue sky
+	var options: Array = WEATHER_NEXT.get(_weather, WEATHERS)
+	_weather = options[randi() % options.size()]
+	_weather_timer = randf_range(180.0, 360.0)       # hold the chosen weather a good while —
+	                                                   # the change itself already takes a minute or so
+	_send_player_despatch("[color=#bcd] Weather turning %s.[/color]" % _weather, {})
 
 # ============================================================= THE FIELD MAP (M)
 # A top-down read of the whole action: every battalion plotted as a small counter,
