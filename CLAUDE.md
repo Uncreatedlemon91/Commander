@@ -37,11 +37,19 @@ The infantry are a **fully procedural** detailed line-infantryman built in code:
   cubes (a joined-mesh issue never fully explained; the position-based procedural path is the one that
   reliably renders). Do **not** reintroduce Blender meshes for the masses without a new idea.
 
-## The player's mounted officer
-`_build_officer()` loads **`models/officer_hero.glb`** (a Blender-built mounted officer) and tints its
-facings/coat to the player's militia. This is a **single instance** (a scene, not a MultiMesh), so a
-detailed Blender model is fine here — only the 70k masses can't use one. (Blender pipeline notes live
-in the assistant's memory under `blender-model-pipeline`.)
+## The player's mounted officer — PROCEDURAL (settled decision)
+`_build_officer()` builds the hero **procedurally in code** (`_build_officer_colonel()` for the rider,
+`_build_horse()` for the charger + tack) — low-poly box/cylinder primitives, like the soldiers, not a
+Blender import. (`models/officer_hero.glb` is the old Blender-built hero asset; it's no longer loaded
+and is kept on disk only in case it's useful later.) The hero reads as a **Colonel**: gorget, crimson
+waist sash, gold fringed epaulettes on both shoulders, an aiguillette, and a gold-piped, tall-plumed
+bicorne, over a coat in the player's militia colour with facing-coloured collar/lapels/cuffs/cockade.
+The charger carries a leather saddle and a gold-piped shabraque in the militia's facing colour. This is
+a **single instance** (not a MultiMesh) so it can carry far more primitives/detail than a soldier —
+only the 70k masses are constrained to the cheap shader path. (Blender pipeline notes for a possible
+future Blender hero live in the assistant's memory under `blender-model-pipeline`; building/exporting a
+new `.glb` requires the user's local live Blender MCP link, which is not available in every session
+this game is built in — e.g. cloud/remote sessions — hence the move to procedural.)
 
 ## Player controls
 `WASD` move · `Shift` run · `R` autorun · mouse look · `RMB` spyglass · `E` hail · `Q` courier orders ·

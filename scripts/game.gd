@@ -4642,88 +4642,127 @@ func _zero_xf() -> Transform3D:
 	return Transform3D(Basis().scaled(Vector3.ZERO), Vector3.ZERO)
 
 # You are MOUNTED: a battalion commander rides — head and shoulders above the ranks,
-# able to see over your own line (and be seen by it).
-const OFFICER_HERO := "res://models/officer_hero.glb"
-
+# able to see over your own line (and be seen by it). Built procedurally (low-poly
+# box/cylinder primitives, like the rank-and-file) rather than imported from Blender —
+# there's no live Blender link in every environment this game gets built in, so the
+# hero has to be buildable headless, same as everyone else on the field.
 func _build_officer() -> void:
 	officer = Node3D.new()
 	add_child(officer)
-	# the player's mounted officer — a detailed Blender-built hero (horse + rider).
-	# His coat takes the militia's uniform colour and his lapels/cuffs/collar and
-	# saddlecloth the facing colour the player chose when raising the force.
 	var coat_col: Color = GameConfig.UNIFORM_COLS[clampi(GameConfig.militia_uniform, 0, GameConfig.UNIFORM_COLS.size() - 1)]
 	var facing_col: Color = GameConfig.militia_facing
-	if ResourceLoader.exists(OFFICER_HERO):
-		var ps: PackedScene = load(OFFICER_HERO)
-		if ps != null:
-			var vis: Node3D = ps.instantiate()
-			vis.position = Vector3(0, -0.07, 0)        # seat the hooves on the ground
-			_tint_officer(vis, facing_col, coat_col)
-			officer.add_child(vis)
-			_horse_legs.clear()                        # one modelled mesh; no leg pivots
-			sabre = null                               # the hero carries his own sabre & pistol
-			pistol_mesh = null
-			return
-	_build_officer_blocky()    # fall back to the blocky rider if the model is missing
+	_build_horse(officer, facing_col)
+	_build_officer_colonel(officer, coat_col, facing_col)
 
-# Recolour the hero's facing-coloured parts (lapels, cuffs, collar, saddlecloth) and
-# his coat to the player's militia, by glTF material name. Everything else (gold lace,
-# crimson sash, leather, steel, the horse's hide) keeps the colours baked in Blender.
-func _tint_officer(node: Node, facing: Color, coat: Color) -> void:
-	if node is MeshInstance3D:
-		var mi := node as MeshInstance3D
-		if mi.mesh != null:
-			for s in range(mi.mesh.get_surface_count()):
-				var m := mi.mesh.surface_get_material(s)
-				if m != null:
-					var nm := m.resource_name
-					var col := Color.BLACK
-					var hit := false
-					if nm.begins_with("OFac") or nm.begins_with("Shabraque"):
-						col = facing; hit = true
-					elif nm.begins_with("OCoat"):
-						col = coat; hit = true
-					if hit:
-						var dup := m.duplicate()
-						if dup is BaseMaterial3D:
-							(dup as BaseMaterial3D).albedo_color = col
-						mi.set_surface_override_material(s, dup)
-	for ch in node.get_children():
-		_tint_officer(ch, facing, coat)
-
-func _build_officer_blocky() -> void:
-	# the charger — a blocky dark bay built to match the soldiers (body, neck, head,
-	# four legs that swing at the gait), facing forward (+Z) under the rider
-	_build_horse(officer)
-	# the rider: a BLOCKY officer in the saddle, in his battalion's navy (matching the line)
+# The rider: a low-poly stylized COLONEL in the saddle. His coat takes the militia's
+# uniform colour, his collar/lapels/cuffs/cockade the facing colour the player chose
+# when raising the force. Marked out from a plain line officer by a gorget, a crimson
+# waist sash, gold fringed epaulettes on BOTH shoulders (one was a subaltern's mark;
+# both a field officer's), an aiguillette, and a gold-piped, taller-plumed bicorne.
+func _build_officer_colonel(parent: Node3D, coat_col: Color, facing: Color) -> void:
 	var coat := StandardMaterial3D.new()
-	coat.albedo_color = ARMY_BLUE.lightened(0.12)
+	coat.albedo_color = coat_col.lightened(0.12)
 	coat.roughness = 0.6
+	var face_mat := StandardMaterial3D.new()
+	face_mat.albedo_color = facing
+	face_mat.roughness = 0.6
 	var skin := StandardMaterial3D.new()
 	skin.albedo_color = Color(0.72, 0.56, 0.43)
+	var gold := StandardMaterial3D.new()
+	gold.albedo_color = Color(0.83, 0.68, 0.21)
+	gold.metallic = 0.7
+	gold.roughness = 0.25
+	var crimson := StandardMaterial3D.new()
+	crimson.albedo_color = Color(0.55, 0.05, 0.08)
+	crimson.roughness = 0.55
+	var buff := StandardMaterial3D.new()
+	buff.albedo_color = Color(0.82, 0.78, 0.65)
+	buff.roughness = 0.75
+	var boot := StandardMaterial3D.new()
+	boot.albedo_color = Color(0.07, 0.06, 0.07)
+	boot.roughness = 0.4
+
+	# --- torso: coat body, short tails behind, a stand collar and lapels (facing) ---
 	var chest := MeshInstance3D.new()
 	var cb := BoxMesh.new()
 	cb.size = Vector3(0.42, 0.62, 0.26)
 	chest.mesh = cb
 	chest.position = Vector3(0, 1.95, 0)
 	chest.material_override = coat
-	officer.add_child(chest)
+	parent.add_child(chest)
+	var tails := MeshInstance3D.new()
+	var tlb := BoxMesh.new()
+	tlb.size = Vector3(0.36, 0.30, 0.14)
+	tails.mesh = tlb
+	tails.position = Vector3(0, 1.66, -0.16)
+	tails.material_override = coat
+	parent.add_child(tails)
+	var collar := MeshInstance3D.new()
+	var clb := BoxMesh.new()
+	clb.size = Vector3(0.30, 0.10, 0.10)
+	collar.mesh = clb
+	collar.position = Vector3(0, 2.20, 0.10)
+	collar.material_override = face_mat
+	parent.add_child(collar)
+	var lapel := MeshInstance3D.new()
+	var lpb := BoxMesh.new()
+	lpb.size = Vector3(0.20, 0.50, 0.04)
+	lapel.mesh = lpb
+	lapel.position = Vector3(0, 1.92, 0.14)
+	lapel.material_override = face_mat
+	parent.add_child(lapel)
+
+	# --- the waist sash and its hanging knot, a field officer's badge ---
+	var sash := MeshInstance3D.new()
+	var ssb := BoxMesh.new()
+	ssb.size = Vector3(0.46, 0.10, 0.30)
+	sash.mesh = ssb
+	sash.position = Vector3(0, 1.72, 0)
+	sash.material_override = crimson
+	parent.add_child(sash)
+	var knot := MeshInstance3D.new()
+	var knb := BoxMesh.new()
+	knb.size = Vector3(0.07, 0.22, 0.07)
+	knot.mesh = knb
+	knot.position = Vector3(-0.20, 1.55, 0.06)
+	knot.material_override = crimson
+	parent.add_child(knot)
+
+	# --- the gorget, gold, at the throat ---
+	var gorget := MeshInstance3D.new()
+	var gtb := BoxMesh.new()
+	gtb.size = Vector3(0.14, 0.06, 0.02)
+	gorget.mesh = gtb
+	gorget.position = Vector3(0, 2.27, 0.13)
+	gorget.material_override = gold
+	parent.add_child(gorget)
+
+	# --- the aiguillette, a gold cord looped on the right breast ---
+	var aig := MeshInstance3D.new()
+	var agb := BoxMesh.new()
+	agb.size = Vector3(0.03, 0.34, 0.03)
+	aig.mesh = agb
+	aig.position = Vector3(0.18, 1.96, 0.15)
+	aig.rotation = Vector3(0, 0, 0.15)
+	aig.material_override = gold
+	parent.add_child(aig)
+	var aigtip := MeshInstance3D.new()
+	var atb := BoxMesh.new()
+	atb.size = Vector3(0.04, 0.08, 0.04)
+	aigtip.mesh = atb
+	aigtip.position = Vector3(0.20, 1.74, 0.16)
+	aigtip.material_override = gold
+	parent.add_child(aigtip)
+
 	var head := MeshInstance3D.new()
 	var hb := BoxMesh.new()
 	hb.size = Vector3(0.22, 0.22, 0.22)
 	head.mesh = hb
 	head.position = Vector3(0, 2.38, 0)
 	head.material_override = skin
-	officer.add_child(head)
-	for sx in [-0.27, 0.27]:
-		var leg := MeshInstance3D.new()
-		var lb := BoxMesh.new()
-		lb.size = Vector3(0.16, 0.72, 0.18)
-		leg.mesh = lb
-		leg.position = Vector3(sx, 1.35, 0.08)
-		leg.rotation = Vector3(0.35, 0, sx * 1.2)   # thighs astride the horse
-		leg.material_override = coat
-		officer.add_child(leg)
+	parent.add_child(head)
+
+	# --- arms, faced cuffs, hands, and gold fringed epaulettes on both shoulders ---
 	for ax in [-0.30, 0.30]:
 		var arm := MeshInstance3D.new()
 		var ab := BoxMesh.new()
@@ -4731,8 +4770,49 @@ func _build_officer_blocky() -> void:
 		arm.mesh = ab
 		arm.position = Vector3(ax, 1.92, 0.04)
 		arm.material_override = coat
-		officer.add_child(arm)
-	# a black bicorne, worn athwart
+		parent.add_child(arm)
+		var cuff := MeshInstance3D.new()
+		var cfb := BoxMesh.new()
+		cfb.size = Vector3(0.15, 0.10, 0.16)
+		cuff.mesh = cfb
+		cuff.position = Vector3(ax, 1.70, 0.05)
+		cuff.material_override = face_mat
+		parent.add_child(cuff)
+		var hand := MeshInstance3D.new()
+		var hdb := BoxMesh.new()
+		hdb.size = Vector3(0.08, 0.08, 0.09)
+		hand.mesh = hdb
+		hand.position = Vector3(ax * 0.85, 1.66, 0.16)
+		hand.material_override = skin
+		parent.add_child(hand)
+		var epau := MeshInstance3D.new()
+		var epb := BoxMesh.new()
+		epb.size = Vector3(0.17, 0.05, 0.17)
+		epau.mesh = epb
+		epau.position = Vector3(ax, 2.18, 0.0)
+		epau.material_override = gold
+		parent.add_child(epau)
+
+	# --- legs: buff breeches over the thigh, black riding boots below ---
+	for sx in [-0.27, 0.27]:
+		var leg := MeshInstance3D.new()
+		var lb := BoxMesh.new()
+		lb.size = Vector3(0.16, 0.72, 0.18)
+		leg.mesh = lb
+		leg.position = Vector3(sx, 1.35, 0.08)
+		leg.rotation = Vector3(0.35, 0, sx * 1.2)   # thighs astride the horse
+		leg.material_override = buff
+		parent.add_child(leg)
+		var bootm := MeshInstance3D.new()
+		var btb := BoxMesh.new()
+		btb.size = Vector3(0.17, 0.40, 0.19)
+		bootm.mesh = btb
+		bootm.position = Vector3(sx, 1.02, 0.20)
+		bootm.rotation = Vector3(0.35, 0, sx * 1.2)
+		bootm.material_override = boot
+		parent.add_child(bootm)
+
+	# --- the bicorne: gold piping, a facing-coloured cockade, a taller plume ---
 	var hat := MeshInstance3D.new()
 	var hm := BoxMesh.new()
 	hm.size = Vector3(0.55, 0.12, 0.22)
@@ -4741,7 +4821,43 @@ func _build_officer_blocky() -> void:
 	var hmat := StandardMaterial3D.new()
 	hmat.albedo_color = Color(0.08, 0.08, 0.10)
 	hat.material_override = hmat
-	officer.add_child(hat)
+	parent.add_child(hat)
+	var hat_trim := MeshInstance3D.new()
+	var htb := BoxMesh.new()
+	htb.size = Vector3(0.58, 0.025, 0.25)
+	hat_trim.mesh = htb
+	hat_trim.position = Vector3(0, 2.49, 0)
+	hat_trim.material_override = gold
+	parent.add_child(hat_trim)
+	var cockade := MeshInstance3D.new()
+	var ckb := BoxMesh.new()
+	ckb.size = Vector3(0.06, 0.06, 0.03)
+	cockade.mesh = ckb
+	cockade.position = Vector3(0, 2.58, 0.11)
+	cockade.material_override = face_mat
+	parent.add_child(cockade)
+	var plumebase := MeshInstance3D.new()
+	var pbb := CylinderMesh.new()
+	pbb.bottom_radius = 0.045
+	pbb.top_radius = 0.04
+	pbb.height = 0.08
+	plumebase.mesh = pbb
+	plumebase.position = Vector3(0, 2.65, -0.04)
+	plumebase.material_override = face_mat
+	parent.add_child(plumebase)
+	var plume := MeshInstance3D.new()
+	var plm := CylinderMesh.new()
+	plm.bottom_radius = 0.035
+	plm.top_radius = 0.015
+	plm.height = 0.34
+	plume.mesh = plm
+	plume.position = Vector3(0, 2.86, -0.05)
+	var pmat2 := StandardMaterial3D.new()
+	pmat2.albedo_color = Color(0.93, 0.92, 0.88)
+	plume.material_override = pmat2
+	parent.add_child(plume)
+
+	# --- the sabre, with a gilt hilt, and a horse-pistol holstered in the off hand ---
 	var sab := MeshInstance3D.new()
 	var sm := BoxMesh.new()
 	sm.size = Vector3(0.05, 0.05, 0.85)
@@ -4751,9 +4867,15 @@ func _build_officer_blocky() -> void:
 	smat.albedo_color = Color(0.85, 0.85, 0.9)
 	smat.metallic = 0.8
 	sab.material_override = smat
-	officer.add_child(sab)
+	parent.add_child(sab)
 	sabre = sab
-	# a horse-pistol in the off hand
+	var hilt := MeshInstance3D.new()
+	var hib := BoxMesh.new()
+	hib.size = Vector3(0.07, 0.07, 0.14)
+	hilt.mesh = hib
+	hilt.position = Vector3(0, 0, -0.42)
+	hilt.material_override = gold
+	sab.add_child(hilt)
 	pistol_mesh = MeshInstance3D.new()
 	var pm := BoxMesh.new()
 	pm.size = Vector3(0.05, 0.10, 0.26)
@@ -4763,11 +4885,14 @@ func _build_officer_blocky() -> void:
 	pmat.albedo_color = Color(0.20, 0.14, 0.08)
 	pmat.metallic = 0.3
 	pistol_mesh.material_override = pmat
-	officer.add_child(pistol_mesh)
+	parent.add_child(pistol_mesh)
 
 # Build a blocky charger under the rider: barrel, chest, hindquarters, an arched neck
-# and head, a tail, and four legs on pivots so they can swing at the gait. Faces +Z.
-func _build_horse(parent: Node3D) -> void:
+# and head, a tail, and four legs on pivots so they can swing at the gait — plus the
+# tack that marks a senior officer's mount: a leather saddle, a gold-piped shabraque
+# (saddle cloth) in the militia's facing colour, a bridle, a breast strap and brass
+# stirrups. Faces +Z.
+func _build_horse(parent: Node3D, facing: Color) -> void:
 	var hide := StandardMaterial3D.new()
 	hide.albedo_color = Color(0.17, 0.11, 0.07)   # a dark bay
 	hide.roughness = 0.95
@@ -4878,6 +5003,67 @@ func _build_horse(parent: Node3D) -> void:
 		hoof.material_override = dark
 		hip.add_child(hoof)
 		_horse_legs.append(hip)
+	# --- tack: saddle, gold-piped shabraque, bridle, breast strap, brass stirrups ---
+	var leather := StandardMaterial3D.new()
+	leather.albedo_color = Color(0.22, 0.13, 0.07)
+	leather.roughness = 0.85
+	var brass := StandardMaterial3D.new()
+	brass.albedo_color = Color(0.80, 0.64, 0.22)
+	brass.metallic = 0.75
+	brass.roughness = 0.25
+	var cloth := StandardMaterial3D.new()
+	cloth.albedo_color = facing
+	cloth.roughness = 0.7
+	var saddle := MeshInstance3D.new()
+	var sbb := BoxMesh.new()
+	sbb.size = Vector3(0.30, 0.14, 0.46)
+	saddle.mesh = sbb
+	saddle.position = Vector3(0, 1.32, -0.02)
+	saddle.material_override = leather
+	parent.add_child(saddle)
+	var shabraque := MeshInstance3D.new()
+	var shb := BoxMesh.new()
+	shb.size = Vector3(0.42, 0.05, 0.56)
+	shabraque.mesh = shb
+	shabraque.position = Vector3(0, 1.17, -0.46)
+	shabraque.material_override = cloth
+	parent.add_child(shabraque)
+	var shab_trim := MeshInstance3D.new()
+	var stmb := BoxMesh.new()
+	stmb.size = Vector3(0.46, 0.02, 0.60)
+	shab_trim.mesh = stmb
+	shab_trim.position = Vector3(0, 1.14, -0.46)
+	shab_trim.material_override = brass
+	parent.add_child(shab_trim)
+	var bit := MeshInstance3D.new()
+	var bmb := BoxMesh.new()
+	bmb.size = Vector3(0.24, 0.025, 0.025)
+	bit.mesh = bmb
+	bit.position = Vector3(0, 1.70, 1.18)
+	bit.material_override = leather
+	parent.add_child(bit)
+	var noseband := MeshInstance3D.new()
+	var nmb := BoxMesh.new()
+	nmb.size = Vector3(0.19, 0.022, 0.022)
+	noseband.mesh = nmb
+	noseband.position = Vector3(0, 1.60, 1.30)
+	noseband.material_override = leather
+	parent.add_child(noseband)
+	var breaststrap := MeshInstance3D.new()
+	var brb := BoxMesh.new()
+	brb.size = Vector3(0.30, 0.02, 0.02)
+	breaststrap.mesh = brb
+	breaststrap.position = Vector3(0, 1.16, 0.56)
+	breaststrap.material_override = leather
+	parent.add_child(breaststrap)
+	for sx2 in [-0.26, 0.26]:
+		var stirrup := MeshInstance3D.new()
+		var stb := BoxMesh.new()
+		stb.size = Vector3(0.07, 0.05, 0.10)
+		stirrup.mesh = stb
+		stirrup.position = Vector3(sx2, 0.96, 0.06)
+		stirrup.material_override = brass
+		parent.add_child(stirrup)
 
 # ------------------------------------------------------------------ armies
 
