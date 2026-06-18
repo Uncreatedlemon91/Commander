@@ -4058,6 +4058,10 @@ var cloud_mat: ShaderMaterial
 const COAST_X := 1650.0            # the shoreline — land to the west, open sea to the east
 const SHIP_SPEED := 2.4            # a ship under sail makes way slowly (an accurate pace)
 const SHIP_TURN := 0.09            # max turn rate (rad/s) — a big, ponderous turning circle
+const SHIP_HP_MAX := 60.0          # round shot needed to take a frigate out of the fight
+const SHIP_HULL_HALFLEN := 21.0    # hull oriented-box half-length, bow to stern (local +Z is the bow)
+const SHIP_HULL_HALFWIDTH := 6.5   # hull oriented-box half-width at the wale
+const SHIP_SINK_TIME := 7.0        # how long a struck ship takes to founder and go under
 # the sea's wave model — MUST mirror the ocean shader so ships ride the visible swell.
 # each wave: [angle offset from wind, steepness, wavelength, amplitude factor, speed]
 const SEA_BASE_Y := -1.0
@@ -4365,23 +4369,63 @@ func _spawn_ships() -> void:
 			var z := randf_range(-1300.0, 1300.0) + (-700.0 if team == 0 else 700.0)
 			var ph := 0.0 if team == 0 else PI
 			ships.append({ "node": node, "pos": Vector3(x, 0, z), "heading": ph, "patrol_h": ph,
-				"speed": SHIP_SPEED * randf_range(0.9, 1.1), "team": team, "fire_cd": randf_range(2.0, 6.0) })
+				"speed": SHIP_SPEED * randf_range(0.9, 1.1), "team": team, "fire_cd": randf_range(2.0, 6.0),
+				"hp": SHIP_HP_MAX, "sinking": false })
 
 func _nearest_enemy_ship(s: Dictionary):
 	var best = null
 	var bd := 1.0e18
 	for o in ships:
-		if o["team"] == s["team"]:
+		if o["team"] == s["team"] or o.get("sinking", false):
 			continue
 		var d: float = (o["pos"] as Vector3).distance_to(s["pos"])
 		if d < bd:
 			bd = d; best = o
 	return best
 
+# is this point inside the ship's hull — an oriented box, local +Z toward the bow
+func _ship_hit_test(ship: Dictionary, point: Vector3) -> bool:
+	var hd := Vector3(sin(ship["heading"]), 0, cos(ship["heading"]))
+	var right := Vector3(hd.z, 0, -hd.x)
+	var rel: Vector3 = point - (ship["pos"] as Vector3)
+	rel.y = 0.0
+	return absf(rel.dot(hd)) <= SHIP_HULL_HALFLEN and absf(rel.dot(right)) <= SHIP_HULL_HALFWIDTH
+
+func _sink_ship(s: Dictionary) -> void:
+	if s.get("sinking", false):
+		return
+	s["sinking"] = true
+	s["sink_t"] = 0.0
+
+func _update_sinking_ship(s: Dictionary, delta: float) -> void:
+	s["sink_t"] = float(s.get("sink_t", 0.0)) + delta
+	var t: float = s["sink_t"]
+	var node: Node3D = s["node"]
+	var sx: float = s["pos"].x
+	var sz: float = s["pos"].z
+	var wy := _sea_y(sx, sz)
+	var hd := Vector3(sin(s["heading"]), 0, cos(s["heading"]))
+	var up := _sea_normal(sx, sz)
+	var fwd := (hd - up * hd.dot(up)).normalized()
+	var right := up.cross(fwd).normalized()
+	var settle := clampf(t / SHIP_SINK_TIME, 0.0, 1.0)
+	var basis := Basis(right, up, fwd).rotated(fwd, settle * 0.55)   # she rolls onto her beam-ends
+	node.transform = Transform3D(basis, Vector3(sx, wy + 0.2 - settle * 6.0, sz))
+	if randf() < delta * 6.0:
+		_emit_wake(Vector3(sx, wy + 0.3, sz) + fwd * randf_range(-20.0, 20.0), fwd)
+	if randf() < delta * 3.0:
+		_emit_splash(Vector3(sx, wy + 0.3, sz))
+
 func _update_ships(delta: float) -> void:
 	if ships.is_empty():
 		return
+	var sunk: Array = []
 	for s in ships:
+		if s.get("sinking", false):
+			_update_sinking_ship(s, delta)
+			if float(s["sink_t"]) > SHIP_SINK_TIME:
+				sunk.append(s)
+			continue
 		# --- decide where to steer ---
 		var foe = _nearest_enemy_ship(s)
 		var fdist := 1.0e9
@@ -4441,6 +4485,10 @@ func _update_ships(delta: float) -> void:
 				_ship_broadside(s, foe)
 			else:
 				s["fire_cd"] = 1.0                       # not yet bearing — check again shortly
+	for s in sunk:
+		var node: Node3D = s["node"]
+		node.queue_free()
+		ships.erase(s)
 
 func _ship_broadside(s: Dictionary, foe) -> void:
 	var hd := Vector3(sin(s["heading"]), 0, cos(s["heading"]))
@@ -4456,14 +4504,9 @@ func _ship_broadside(s: Dictionary, foe) -> void:
 		_emit_muzzle_bloom(muzzle, side)
 		_emit_gun_smoke(muzzle + side * randf_range(0.0, 4.0), side)
 		_emit_gun_smoke(muzzle + side * randf_range(2.0, 6.0), side)
-	# the broadside falls around the target — waterspouts where the shot pitches short, long
-	# or wide, same scatter a gun-deck firing at speed across a rolling sea would throw up
-	var to_foe_n := to_foe.normalized() if to_foe.length() > 0.01 else hd
-	var perp := Vector3(to_foe_n.z, 0, -to_foe_n.x)
-	for k in range(5):
-		var sp: Vector3 = (foe["pos"] as Vector3) + perp * randf_range(-14.0, 14.0) + to_foe_n * randf_range(-18.0, 10.0)
-		sp.y = _sea_y(sp.x, sp.z)
-		_emit_splash(sp)
+		# every other gun actually sends iron downrange — a tracked ball, not a cosmetic guess
+		if k % 2 == 0:
+			_spawn_naval_shot(muzzle + side * 3.0, foe, int(s["team"]))
 	if cam != null:
 		_play_cannon(base + hd * 12.0 + side * 7.0)
 		_play_cannon(base - hd * 12.0 + side * 7.0)   # the report rolls down the ship's length
@@ -5873,6 +5916,42 @@ func _spawn_shot(from: Vector3, to: Vector3, team: int) -> void:
 	_shots[slot] = { "active": true, "pos": from, "vel": vel, "from": from,
 		"dir": dir, "dist": L, "team": team }
 
+# A naval gun aims at the target ship's current position with range-scaled scatter, then
+# the ball flies the real arc — whether it strikes home is resolved against the ship's hull
+# where she actually lies when the ball arrives (she may have sailed clear of where she was).
+func _spawn_naval_shot(from: Vector3, target_ship: Dictionary, team: int) -> void:
+	var aim: Vector3 = target_ship["pos"]
+	var flat := aim - from
+	flat.y = 0.0
+	var L := flat.length()
+	if L < 1.0:
+		return
+	var dir := flat / L
+	var perp := Vector3(dir.z, 0, -dir.x)
+	var spread := L * 0.05      # a long shot across a rolling sea is as likely to miss as hit
+	var to: Vector3 = aim + perp * randf_range(-spread, spread) + dir * randf_range(-spread, spread)
+	flat = to - from
+	flat.y = 0.0
+	L = flat.length()
+	if L < 1.0:
+		return
+	dir = flat / L
+	var slot := -1
+	for i in range(_shots.size()):
+		if not _shots[i]["active"]:
+			slot = i
+			break
+	if slot == -1:
+		if _shots.size() >= SHOT_POOL:
+			return                                  # the gun-deck's iron is all in the air already
+		_shots.append({ "active": false })
+		slot = _shots.size() - 1
+	var tof := L / SHOT_SPEED
+	var vy := (to.y - from.y) / tof + 0.5 * GUN_GRAVITY * tof
+	var vel := dir * SHOT_SPEED + Vector3(0, vy, 0)
+	_shots[slot] = { "active": true, "pos": from, "vel": vel, "from": from,
+		"dir": dir, "dist": L, "team": team, "naval": true, "target_ship": target_ship }
+
 func _update_shots(delta: float) -> void:
 	for i in range(_shots.size()):
 		var s: Dictionary = _shots[i]
@@ -5891,13 +5970,28 @@ func _update_shots(delta: float) -> void:
 				s["whooshed"] = true
 		var flat_trav := Vector2(p.x - from.x, p.z - from.z).length()
 		if flat_trav >= float(s["dist"]):
-			# arrival — plough a lane through whatever stands here
 			var dir: Vector3 = s["dir"]
 			var impact := Vector3(p.x, 0, p.z)
-			_add_scar(impact - dir * 2.0, dir)        # the furrow starts just short of impact
-			_plough(impact, dir, int(s["team"]))
-			_emit_dirt(Vector3(p.x, 0.1, p.z), dir)   # earth thrown up along the ball's line
-			_play_ball_land(impact)                   # the roundshot strikes the ground
+			if s.get("naval", false):
+				# resolve against the target ship's hull where she lies NOW — she may have
+				# sailed clear of the spot the gun was aimed at when the ball left the muzzle
+				var ship_t: Dictionary = s["target_ship"]
+				if not ship_t.is_empty() and not ship_t.get("sinking", false) and _ship_hit_test(ship_t, impact):
+					ship_t["hp"] = float(ship_t.get("hp", SHIP_HP_MAX)) - 1.0
+					_emit_dirt(Vector3(p.x, _sea_y(p.x, p.z) + 1.0, p.z), dir)   # splinters where she's struck
+					_play_ball_land(impact)
+					if ship_t["hp"] <= 0.0:
+						_sink_ship(ship_t)
+				else:
+					var sp := Vector3(p.x, 0, p.z)
+					sp.y = _sea_y(sp.x, sp.z)
+					_emit_splash(sp)
+			else:
+				# arrival — plough a lane through whatever stands here
+				_add_scar(impact - dir * 2.0, dir)        # the furrow starts just short of impact
+				_plough(impact, dir, int(s["team"]))
+				_emit_dirt(Vector3(p.x, 0.1, p.z), dir)   # earth thrown up along the ball's line
+				_play_ball_land(impact)                   # the roundshot strikes the ground
 			s["active"] = false
 	# render the balls in flight
 	for i in range(SHOT_POOL):
