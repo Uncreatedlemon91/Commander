@@ -37,11 +37,54 @@ The infantry are a **fully procedural** detailed line-infantryman built in code:
   cubes (a joined-mesh issue never fully explained; the position-based procedural path is the one that
   reliably renders). Do **not** reintroduce Blender meshes for the masses without a new idea.
 
-## The player's mounted officer
-`_build_officer()` loads **`models/officer_hero.glb`** (a Blender-built mounted officer) and tints its
-facings/coat to the player's militia. This is a **single instance** (a scene, not a MultiMesh), so a
-detailed Blender model is fine here — only the 70k masses can't use one. (Blender pipeline notes live
-in the assistant's memory under `blender-model-pipeline`.)
+## The player's mounted officer — PROCEDURAL (settled decision)
+`_build_officer()` builds the hero **procedurally in code** (`_build_officer_colonel()` for the rider,
+`_build_horse()` for the charger + tack) — low-poly box/cylinder primitives, like the soldiers, not a
+Blender import. (`models/officer_hero.glb` is the old Blender-built hero asset; it's no longer loaded
+and is kept on disk only in case it's useful later.) The hero reads as a **Colonel**: gorget, crimson
+waist sash, gold fringed epaulettes on both shoulders, an aiguillette, and a gold-piped, tall-plumed
+bicorne, over a coat in the player's militia colour with facing-coloured collar/lapels/cuffs/cockade.
+The charger carries a leather saddle and a gold-piped shabraque in the militia's facing colour. This is
+a **single instance** (not a MultiMesh) so it can carry far more primitives/detail than a soldier —
+only the 70k masses are constrained to the cheap shader path. (Blender pipeline notes for a possible
+future Blender hero live in the assistant's memory under `blender-model-pipeline`; building/exporting a
+new `.glb` requires the user's local live Blender MCP link, which is not available in every session
+this game is built in — e.g. cloud/remote sessions — hence the move to procedural.)
+
+## Company officers & NCOs — brought up to the soldiers' standard
+`_officer_mesh()` (the company officers marching in the ranks, `officer_mm`) used to be a
+crude 7-box figure with no collar/lapels/cuffs and a flat-black hat blob — less detailed
+than the privates they lead. It's now built to the same position bands as `_soldier_mesh()`
+(collar, lapels, faced cuffs, coat tails, hands) plus the marks of authority: a crimson
+waist sash and gold lace at the collar/lapels/cuffs/shoulder boards. The single shared
+`_officer_shader()` paints both this mesh AND the NCOs/file-closers (`nco_mm`, which already
+used the full `soldier_mesh` but was rendering it with the same crude old shader — flat-black
+hat, no facing colours) — so NCOs now show a properly banded hat (brass band/body/peak/plume)
+and the same gold/crimson rank marks as the officers, no geometry changes needed for them.
+The AI's mounted battalion colonels/brigade commanders/divisional generals are still plain
+capsules (`colonel_horse_mm`/`colonel_rider_mm`, `cmd_horse_mm`/`cmd_rider_mm`,
+`gen_horse_mm`/`gen_rider_mm`) — a much bigger gap against the player's hero, not yet tackled.
+
+## AI mounted commanders — also brought off the bare capsules
+The three tiers of AI leadership (`colonel_*_mm` per battalion, `cmd_*_mm` per brigade,
+`gen_*_mm` per division) now ride one shared detailed horse mesh (`_mount_horse_mesh()` /
+`_mount_horse_shader()`) and one shared detailed rider mesh (`_mount_rider_mesh()` /
+`_mount_rider_shader(trim)`) instead of bare `CapsuleMesh` primitives — built the same way as
+the soldiers/officers (`SurfaceTool` boxes + cylinders, painted by a position-banded shader),
+just with no rotated parts so the bands stay axis-aligned. Because each tier is itself a
+MultiMesh (one per battalion/brigade/division, not one instance), it's still one mesh + one
+shader per tier, never per-instance nodes like the player's hero. Rank reads two ways:
+**size** (`MOUNT_SCALE_COMMANDER` / `MOUNT_SCALE_GENERAL` scale the shared transform up from
+the colonel's 1.0) and **coat/trim** — the colonel rides in his army's colour with gold lace
+(`_render_commanders()` sets `colonel_rider_mm`'s instance colour to team blue/red each frame,
+same as before); the brigadier in a fixed solid gold coat with dark trim; the general in fixed
+white-and-silver. The horse's **shabraque always carries the army's colour** (`team_color()`)
+on all three tiers, via `use_colors` on the horse MultiMeshes — ties every rank visually to its
+side even when the rider's coat doesn't. Both horse and rider meshes are built **origin-at-the-
+horse's-feet** (ground level), matching `_build_horse()`/`_build_officer_colonel()`'s frame, so
+`_render_commanders()` now places both transforms at `(x, _gh(x,z), z)` directly — no more
+manual capsule-center y-offsets. Colour-bearers (`bearer_mm`) were left as a plain capsule —
+out of scope for this pass.
 
 ## Player controls
 `WASD` move · `Shift` run · `R` autorun · mouse look · `RMB` spyglass · `E` hail · `Q` courier orders ·
