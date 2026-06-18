@@ -178,6 +178,7 @@ const LOD_NEAR := 70.0
 const LOD_MID := 160.0
 const LOD_FAR := 340.0            # full per-man simulation out to here...
 const LOD_VFAR := 1400.0          # ...then a static formation IMPRESSION to here
+const DUST_RANGE := 260.0         # beyond this, marching/galloping dust isn't worth spawning
 
 enum Order { IDLE, FOLLOW }
 
@@ -567,6 +568,11 @@ var _musket_smoke_proc: ParticleProcessMaterial  # musket smoke's process materi
 var flash_p: GPUParticles3D
 var fire_p: GPUParticles3D
 var blood_p: GPUParticles3D                # red spray when a man is hit
+var dirt_p: GPUParticles3D                 # earth thrown up by a roundshot striking the ground
+var dust_p: GPUParticles3D                 # the haze kicked up by marching feet and hooves
+var _dust_proc: ParticleProcessMaterial     # dust's process material (wind pushes its gravity)
+var wake_p: GPUParticles3D                 # the foam a ship's bow turns over under way
+var splash_p: GPUParticles3D               # waterspouts where roundshot pitches into the sea
 var blood_mm: MultiMesh                    # ground blood pools under the fallen
 var blood_idx := 0
 const BLOOD_MAX := 16000
@@ -1188,11 +1194,20 @@ func _build_world() -> void:
 	flash_p = _make_emitter(0.16, 20000, _flash_material(), Vector2(1.0, 1.0), 1)
 	fire_p = _make_emitter(0.4, 20000, _flash_material(), Vector2(0.8, 0.8), 2)
 	blood_p = _make_emitter(0.85, 24000, _blood_material(), Vector2(0.5, 0.5), 4)
+	dirt_p = _make_emitter(1.4, 24000, _smoke_material(), Vector2(1.3, 1.3), 6)
+	dust_p = _make_emitter(7.0, 50000, _smoke_material(), Vector2(2.0, 2.0), 7)
+	_dust_proc = dust_p.process_material
+	wake_p = _make_emitter(2.6, 20000, _smoke_material(), Vector2(1.1, 1.1), 8)
+	splash_p = _make_emitter(1.8, 12000, _smoke_material(), Vector2(1.4, 1.4), 9)
 	add_child(smoke_p)
 	add_child(musket_smoke_p)
 	add_child(flash_p)
 	add_child(fire_p)
 	add_child(blood_p)
+	add_child(dirt_p)
+	add_child(dust_p)
+	add_child(wake_p)
+	add_child(splash_p)
 
 	# ground blood pools, baked under the fallen (paired with the corpse layer)
 	var blmi := MultiMeshInstance3D.new()
@@ -2093,6 +2108,8 @@ func _update_environment(delta: float) -> void:
 		_smoke_proc.gravity = Vector3(_wind.x, 0.10, _wind.z)
 	if _musket_smoke_proc:
 		_musket_smoke_proc.gravity = Vector3(_wind.x, 0.012, _wind.z)
+	if _dust_proc:
+		_dust_proc.gravity = Vector3(_wind.x, 0.02, _wind.z)
 	# the sea and the clouds answer to that same wind
 	var wdir := Vector2(_wind.x, _wind.z)
 	wdir = wdir.normalized() if wdir.length() > 0.01 else Vector2(1, 0)
@@ -4408,6 +4425,11 @@ func _update_ships(delta: float) -> void:
 		var fwd := (hd - up * hd.dot(up)).normalized()   # keep the bow level with the surface
 		var right := up.cross(fwd).normalized()
 		node.transform = Transform3D(Basis(right, up, fwd), Vector3(sx, wy + 0.2, sz))
+		# the bow turns the sea over white as the ship makes way — more foam the faster she sails
+		if way > 0.3 and cam != null and cam.position.distance_to(s["pos"]) < 700.0:
+			var bow := Vector3(sx, wy + 0.3, sz) + fwd * 29.0
+			if randf() < delta * 5.0 * (way / SHIP_SPEED):
+				_emit_wake(bow, fwd)
 		# --- gunnery: a ship can ONLY fire broadsides — the enemy must lie abeam and in range ---
 		s["fire_cd"] -= delta
 		if s["fire_cd"] <= 0.0:
@@ -4434,6 +4456,14 @@ func _ship_broadside(s: Dictionary, foe) -> void:
 		_emit_muzzle_bloom(muzzle, side)
 		_emit_gun_smoke(muzzle + side * randf_range(0.0, 4.0), side)
 		_emit_gun_smoke(muzzle + side * randf_range(2.0, 6.0), side)
+	# the broadside falls around the target — waterspouts where the shot pitches short, long
+	# or wide, same scatter a gun-deck firing at speed across a rolling sea would throw up
+	var to_foe_n := to_foe.normalized() if to_foe.length() > 0.01 else hd
+	var perp := Vector3(to_foe_n.z, 0, -to_foe_n.x)
+	for k in range(5):
+		var sp: Vector3 = (foe["pos"] as Vector3) + perp * randf_range(-14.0, 14.0) + to_foe_n * randf_range(-18.0, 10.0)
+		sp.y = _sea_y(sp.x, sp.z)
+		_emit_splash(sp)
 	if cam != null:
 		_play_cannon(base + hd * 12.0 + side * 7.0)
 		_play_cannon(base - hd * 12.0 + side * 7.0)   # the report rolls down the ship's length
@@ -5866,8 +5896,7 @@ func _update_shots(delta: float) -> void:
 			var impact := Vector3(p.x, 0, p.z)
 			_add_scar(impact - dir * 2.0, dir)        # the furrow starts just short of impact
 			_plough(impact, dir, int(s["team"]))
-			for k in range(3):
-				_emit_smoke(Vector3(p.x, 0.3, p.z), Vector3.UP)   # dirt kicked up
+			_emit_dirt(Vector3(p.x, 0.1, p.z), dir)   # earth thrown up along the ball's line
 			_play_ball_land(impact)                   # the roundshot strikes the ground
 			s["active"] = false
 	# render the balls in flight
@@ -6033,30 +6062,48 @@ func _process(delta: float) -> void:
 	_update_hud()
 
 # Each battalion's drummer beats the march while the unit is on the move: a random
-# cadence is struck up when it starts moving and falls silent the moment it halts.
-func _update_marching_drums(_delta: float) -> void:
-	if snd_marchdrum.is_empty() or cam == null:
+# cadence is struck up when it starts moving and falls silent the moment it halts. Also
+# the place a battalion's own movement is already tracked frame to frame, so the dust
+# its feet throw up underfoot piggybacks on the same moved/last_pos bookkeeping.
+func _update_marching_drums(delta: float) -> void:
+	if cam == null:
 		return
+	var have_drums := not snd_marchdrum.is_empty()
 	for b in battalions:
-		var mp: AudioStreamPlayer3D = b.march_player
-		if mp == null:
-			continue
 		var moved := b.pos.distance_to(b.last_pos)
 		b.last_pos = b.pos
-		var moving := moved > 0.004 and not b.spent and b.state != "routing" and not b.drummer_down
-		var near := cam.position.distance_to(b.pos) < 950.0   # drums carry down the line
-		if moving and near:
-			if not b.marching:
-				b.marching = true                                  # struck up on the move
-				mp.stream = snd_marchdrum[randi() % snd_marchdrum.size()]
-				mp.pitch_scale = randf_range(0.97, 1.03)
-				mp.play()
-			elif not mp.playing:
-				mp.play()                                          # keep it going while marching
-			mp.global_position = to_global(b.pos + Vector3(0, 1.0, 0))
-		elif b.marching or mp.playing:
-			b.marching = false
-			mp.stop()                                              # halted — the drum stops
+		var mp: AudioStreamPlayer3D = b.march_player
+		if have_drums and mp != null:
+			var moving := moved > 0.004 and not b.spent and b.state != "routing" and not b.drummer_down
+			var near := cam.position.distance_to(b.pos) < 950.0   # drums carry down the line
+			if moving and near:
+				if not b.marching:
+					b.marching = true                                  # struck up on the move
+					mp.stream = snd_marchdrum[randi() % snd_marchdrum.size()]
+					mp.pitch_scale = randf_range(0.97, 1.03)
+					mp.play()
+				elif not mp.playing:
+					mp.play()                                          # keep it going while marching
+				mp.global_position = to_global(b.pos + Vector3(0, 1.0, 0))
+			elif b.marching or mp.playing:
+				b.marching = false
+				mp.stop()                                              # halted — the drum stops
+		# the haze a body of marching (or routing) men kicks up underfoot
+		if moved > 0.01 and not b.figs.is_empty() and cam.position.distance_to(b.pos) < DUST_RANGE \
+				and randf() < delta * 5.0:
+			_emit_march_dust(b)
+
+# A few low puffs spread along a battalion's front, scaled to its strength — bigger
+# units throw up more dust, small remnants barely any.
+func _emit_march_dust(b: Batt) -> void:
+	var fwd := Vector3(sin(b.facing), 0, cos(b.facing))
+	var right := Vector3(fwd.z, 0, -fwd.x)
+	var width := minf(float(b.figs.size()) * 0.9, 90.0)
+	var n := clampi(b.figs.size() / 50, 1, 3)
+	for _i in range(n):
+		var p := b.pos - fwd * 1.5 + right * randf_range(-width * 0.5, width * 0.5)
+		p.y = _gh(p.x, p.z) + 0.05
+		_emit_dust(p, fwd)
 
 # The drum carries the unit's nerve: a steady confident cadence, faltering and
 # quiet when shaken, silent when broken. (Needs a Drum.mp3 in sounds/.)
@@ -7113,6 +7160,16 @@ func _cav_move(c: Cav, goal: Vector3, speed: float, delta: float) -> void:
 		return
 	c.facing = atan2(to.x, to.z)
 	c.pos = c.pos.move_toward(Vector3(goal.x, 0, goal.z), speed * delta)
+	# a galloping squadron tears up far more dust than one trotting to its post
+	if cam != null and not c.troopers.is_empty() and cam.position.distance_to(c.pos) < DUST_RANGE \
+			and randf() < delta * 4.0 * (speed / CAV_GALLOP):
+		var fwd := Vector3(sin(c.facing), 0, cos(c.facing))
+		var right := Vector3(fwd.z, 0, -fwd.x)
+		var width := minf(float(c.troopers.size()) * 1.2, 70.0)
+		for _i in range(clampi(c.troopers.size() / 40, 1, 3)):
+			var p := c.pos - fwd * 1.0 + right * randf_range(-width * 0.5, width * 0.5)
+			p.y = _gh(p.x, p.z) + 0.05
+			_emit_dust(p, fwd)
 
 func _cav_target_pos(c: Cav) -> Vector3:
 	match c.target_kind:
@@ -10264,6 +10321,10 @@ func _make_emitter(life: float, amount: int, mat: Material, quad: Vector2, kind:
 		2: p.process_material = _fire_process()
 		4: p.process_material = _blood_process()
 		5: p.process_material = _musket_smoke_process()
+		6: p.process_material = _dirt_process()
+		7: p.process_material = _dust_process()
+		8: p.process_material = _wake_process()
+		9: p.process_material = _splash_process()
 		_: p.process_material = _flash_process()
 	return p
 
@@ -10385,6 +10446,101 @@ func _smoke_process() -> ParticleProcessMaterial:
 		Color(0.80, 0.80, 0.82, 0.40), Color(0.78, 0.78, 0.80, 0.0)])
 	return m
 
+# A roundshot pitching into the ground: a hard, fast gout of earth and stones thrown
+# along its line of travel, falling back almost as quickly as it went up.
+func _dirt_process() -> ParticleProcessMaterial:
+	var m := ParticleProcessMaterial.new()
+	m.gravity = Vector3(0, -9.0, 0)            # the clods fall back hard — this isn't smoke
+	m.damping_min = 1.0
+	m.damping_max = 2.2
+	m.scale_min = 0.6
+	m.scale_max = 1.4
+	m.angle_min = -180.0
+	m.angle_max = 180.0
+	m.angular_velocity_min = -25.0
+	m.angular_velocity_max = 25.0              # tumbling clods, not drifting puffs
+	var sc := Curve.new()
+	sc.add_point(Vector2(0.0, 0.5))
+	sc.add_point(Vector2(0.25, 1.6))
+	sc.add_point(Vector2(1.0, 1.0))            # the burst settles rather than keeps ballooning
+	var sct := CurveTexture.new()
+	sct.curve = sc
+	m.scale_curve = sct
+	# a hard brown burst of earth, hazing to a thin dust before it's gone
+	m.color_ramp = _ramp([0.0, 0.1, 0.5, 1.0], [
+		Color(0.30, 0.22, 0.14, 0.0), Color(0.34, 0.25, 0.16, 0.85),
+		Color(0.40, 0.32, 0.22, 0.5), Color(0.45, 0.40, 0.32, 0.0)])
+	return m
+
+# The pale haze kicked up by marching boots and galloping hooves. gravity is rewritten
+# every frame in _update_environment() to carry the live wind, same as the smoke, so a
+# column's dust trails away downwind instead of just hanging over the road.
+func _dust_process() -> ParticleProcessMaterial:
+	var m := ParticleProcessMaterial.new()
+	m.gravity = Vector3(0, 0.02, 0)
+	m.damping_min = 0.5
+	m.damping_max = 1.1
+	m.scale_min = 0.8
+	m.scale_max = 1.6
+	m.turbulence_enabled = true
+	m.turbulence_noise_strength = 1.2
+	m.turbulence_noise_scale = 1.6
+	m.turbulence_noise_speed = Vector3(0.05, 0.04, 0.03)
+	m.turbulence_influence_min = 0.10
+	m.turbulence_influence_max = 0.25
+	var sc := Curve.new()
+	sc.add_point(Vector2(0.0, 0.5))
+	sc.add_point(Vector2(0.4, 1.8))
+	sc.add_point(Vector2(1.0, 2.6))
+	var sct := CurveTexture.new()
+	sct.curve = sc
+	m.scale_curve = sct
+	# thin and pale — a haze over the ranks' feet, not a smoke bank
+	m.color_ramp = _ramp([0.0, 0.15, 0.6, 1.0], [
+		Color(0.62, 0.56, 0.44, 0.0), Color(0.66, 0.60, 0.48, 0.30),
+		Color(0.68, 0.62, 0.50, 0.16), Color(0.70, 0.64, 0.52, 0.0)])
+	return m
+
+# Foam turned over at a ship's bow as it makes way — flattens out and dissolves fast.
+func _wake_process() -> ParticleProcessMaterial:
+	var m := ParticleProcessMaterial.new()
+	m.gravity = Vector3.ZERO                   # rides the surface, doesn't fall or rise
+	m.damping_min = 0.8
+	m.damping_max = 1.6
+	m.scale_min = 0.7
+	m.scale_max = 1.3
+	var sc := Curve.new()
+	sc.add_point(Vector2(0.0, 0.5))
+	sc.add_point(Vector2(0.3, 1.6))
+	sc.add_point(Vector2(1.0, 2.4))            # spreads into the wake astern
+	var sct := CurveTexture.new()
+	sct.curve = sc
+	m.scale_curve = sct
+	m.color_ramp = _ramp([0.0, 0.15, 1.0], [
+		Color(0.92, 0.95, 0.96, 0.0), Color(0.95, 0.97, 0.98, 0.55), Color(0.90, 0.93, 0.95, 0.0)])
+	return m
+
+# A roundshot pitching short or long in the sea — a hard white spout thrown up, then
+# falling back under its own gravity (much harder than the bow's gentle wake).
+func _splash_process() -> ParticleProcessMaterial:
+	var m := ParticleProcessMaterial.new()
+	m.gravity = Vector3(0, -14.0, 0)
+	m.damping_min = 0.6
+	m.damping_max = 1.4
+	m.scale_min = 0.7
+	m.scale_max = 1.5
+	var sc := Curve.new()
+	sc.add_point(Vector2(0.0, 0.6))
+	sc.add_point(Vector2(0.3, 1.8))
+	sc.add_point(Vector2(1.0, 1.0))
+	var sct := CurveTexture.new()
+	sct.curve = sc
+	m.scale_curve = sct
+	m.color_ramp = _ramp([0.0, 0.12, 0.6, 1.0], [
+		Color(0.85, 0.90, 0.93, 0.0), Color(0.93, 0.96, 0.97, 0.9),
+		Color(0.80, 0.86, 0.90, 0.4), Color(0.75, 0.82, 0.87, 0.0)])
+	return m
+
 func _flash_process() -> ParticleProcessMaterial:
 	var m := ParticleProcessMaterial.new()
 	m.gravity = Vector3.ZERO
@@ -10490,6 +10646,34 @@ func _emit_gun_smoke(pos: Vector3, fwd: Vector3) -> void:
 	var vel := fwd * randf_range(4.0, 9.0) + lateral + Vector3(0, randf_range(0.2, 0.9), 0) + _wind
 	smoke_p.emit_particle(Transform3D(Basis(), pos), vel,
 		Color(0.9, 0.9, 0.9), Color.WHITE, EMIT_FLAGS)
+
+# A roundshot striking the ground: a hard gout of earth thrown forward along its line
+# of travel, with a thinner trail of dust hanging a moment after the clods fall back.
+func _emit_dirt(pos: Vector3, dir: Vector3) -> void:
+	for _i in range(10):
+		var jitter := Vector3(randf_range(-0.6, 0.6), 0.0, randf_range(-0.6, 0.6))
+		var vel := dir * randf_range(2.0, 7.0) + Vector3(0, randf_range(2.0, 6.0), 0)
+		dirt_p.emit_particle(Transform3D(Basis(), pos + jitter), vel,
+			Color(0.85, 0.8, 0.7), Color.WHITE, EMIT_FLAGS)
+
+# The haze a body of men or horses kicks up underfoot — thrown up gently behind the
+# line of march, then left to drift downwind by the wind-driven process material.
+func _emit_dust(pos: Vector3, fwd: Vector3) -> void:
+	var vel := -fwd * randf_range(0.2, 0.6) + Vector3(0, randf_range(0.1, 0.4), 0) + _wind * 0.3
+	dust_p.emit_particle(Transform3D(Basis(), pos), vel, Color(0.7, 0.64, 0.52), Color.WHITE, EMIT_FLAGS)
+
+# The foam turned over at a ship's bow as it cuts through the water under way.
+func _emit_wake(pos: Vector3, fwd: Vector3) -> void:
+	var vel := -fwd * randf_range(0.3, 0.8) + Vector3(randf_range(-0.3, 0.3), 0, randf_range(-0.3, 0.3))
+	wake_p.emit_particle(Transform3D(Basis(), pos), vel, Color(0.95, 0.97, 0.98), Color.WHITE, EMIT_FLAGS)
+
+# A roundshot pitching into the sea: a hard white spout thrown up where it strikes.
+func _emit_splash(pos: Vector3) -> void:
+	for _i in range(8):
+		var jitter := Vector3(randf_range(-0.4, 0.4), 0.0, randf_range(-0.4, 0.4))
+		var vel := Vector3(randf_range(-1.0, 1.0), randf_range(5.0, 10.0), randf_range(-1.0, 1.0))
+		splash_p.emit_particle(Transform3D(Basis(), pos + jitter), vel,
+			Color(0.92, 0.95, 0.97), Color.WHITE, EMIT_FLAGS)
 
 # A burst of fine blood mist the instant a man is struck — it puffs out away from the
 # shot, hangs for a moment, then sinks and leaves a splatter on the ground.
