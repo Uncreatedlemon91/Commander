@@ -1524,30 +1524,51 @@ void fragment() {
 
 # An officer/NCO: like the blocky man, but a wide fore-and-aft BICORNE instead of
 # the shako, and the coat colour comes per-instance (so one mesh serves both armies).
+# Brought up to the line soldier's level of detail (collar, lapels, faced cuffs, coat
+# tails, hands) PLUS the marks that read as authority at a glance: a waist sash and
+# gold lace at the collar/lapels/cuffs/shoulders. Position bands match `_soldier_mesh()`
+# exactly wherever it matters, so the one shader below paints this mesh AND the NCOs'
+# full soldier_mesh (see `nco_mm`) correctly from the same coordinates.
 func _officer_mesh() -> ArrayMesh:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	_add_box(st, Vector3(0, 0.70, 0), Vector3(0.16, 0.11, 0.50))       # bicorne (wide fore-aft)
-	_add_box(st, Vector3(0, 0.55, 0), Vector3(0.21, 0.22, 0.21))       # head
-	_add_box(st, Vector3(0, 0.225, 0), Vector3(0.42, 0.55, 0.26))      # chest / coat
-	_add_box(st, Vector3(-0.265, 0.20, 0), Vector3(0.13, 0.52, 0.14))  # left arm
-	_add_box(st, Vector3(0.265, 0.20, 0), Vector3(0.13, 0.52, 0.14))   # right arm
-	_add_box(st, Vector3(-0.105, -0.45, 0), Vector3(0.17, 0.80, 0.20)) # left leg
-	_add_box(st, Vector3(0.105, -0.45, 0), Vector3(0.17, 0.80, 0.20))  # right leg
+	_add_box(st, Vector3(0, 0.70, 0), Vector3(0.16, 0.11, 0.50))         # bicorne (wide fore-aft)
+	_add_box(st, Vector3(0, 0.55, 0), Vector3(0.21, 0.22, 0.21))         # head
+	_add_box(st, Vector3(0, 0.175, 0.0), Vector3(0.40, 0.49, 0.24))      # coat body
+	_add_box(st, Vector3(0, -0.04, -0.085), Vector3(0.36, 0.22, 0.13))   # coat tails (back)
+	_add_box(st, Vector3(0, 0.435, 0.0), Vector3(0.34, 0.075, 0.245))    # collar (gold lace)
+	_add_box(st, Vector3(0, 0.20, 0.125), Vector3(0.22, 0.40, 0.035))    # plastron / lapels (gold lace)
+	_add_box(st, Vector3(0, 0.06, 0.0), Vector3(0.40, 0.09, 0.27))       # waist sash (crimson)
+	for sx in [-0.265, 0.265]:
+		_add_box(st, Vector3(sx, 0.18, 0.0), Vector3(0.115, 0.46, 0.13))    # sleeve
+		_add_box(st, Vector3(sx, -0.03, 0.0), Vector3(0.125, 0.075, 0.145)) # cuff (gold lace)
+		_add_box(st, Vector3(sx, -0.13, -0.01), Vector3(0.10, 0.10, 0.11))  # hand (skin)
+		_add_box(st, Vector3(sx, 0.44, 0.0), Vector3(0.15, 0.05, 0.15))     # epaulette (gold)
+	for sx in [-0.105, 0.105]:
+		_add_box(st, Vector3(sx, -0.45, 0), Vector3(0.17, 0.80, 0.20))      # leg
 	return st.commit()
 
-# The officer's coat colour rides per-instance in COLOR.rgb; the bicorne is black;
-# the legs swing as he paces (CUSTOM.b = march, CUSTOM.g = phase).
+# Shared by the company officers (`officer_mm`, mesh = `_officer_mesh()`) AND the
+# NCOs/file-closers (`nco_mm`, mesh = the full `soldier_mesh`) — the coat colour rides
+# per-instance in COLOR.rgb (the army's colour); gold lace marks the collar, lapels,
+# cuffs and (officers only — no such geometry on the soldier mesh) shoulder boards; a
+# crimson sash marks the waist. The hat is properly banded (brass band / body / dark
+# peak / plume) instead of one flat block, and the back gets the soldier's knapsack
+# tint where that geometry exists. The legs swing as he paces (CUSTOM.b = march,
+# CUSTOM.g = phase), same as before.
 func _officer_shader() -> ShaderMaterial:
 	var sh := Shader.new()
 	sh.code = """
 shader_type spatial;
 uniform vec3 skin = vec3(0.76, 0.58, 0.46);
+uniform vec3 gold = vec3(0.83, 0.68, 0.21);
+uniform vec3 sash_col = vec3(0.55, 0.05, 0.08);
 varying float vy;
 varying float vx;
+varying float vz;
 varying float vnz;
 void vertex() {
-	vy = VERTEX.y; vx = VERTEX.x; vnz = NORMAL.z;
+	vy = VERTEX.y; vx = VERTEX.x; vz = VERTEX.z; vnz = NORMAL.z;
 	float march = INSTANCE_CUSTOM.b;
 	float phase = INSTANCE_CUSTOM.g;
 	float hip = -0.05;
@@ -1561,11 +1582,22 @@ void vertex() {
 	}
 }
 void fragment() {
-	vec3 col = COLOR.rgb;                                 // the battalion coat
-	if (vy > 0.655) { col = vec3(0.05, 0.05, 0.06); }     // shako / bicorne
-	else if (vy > 0.46) { col = skin; }                   // the head / neck
-	else if (vy < -0.05) { col = vec3(0.58, 0.56, 0.52); } // trousers
-	// white CROSSBELTS for the rank-and-file/NCOs (COLOR.a flags it; officers wear none)
+	vec3 col = COLOR.rgb;                                               // coat: the army's colour
+	if (vy < -0.05) col = vec3(0.58, 0.56, 0.52);                       // trousers
+	if (vz < -0.11 && vy > -0.02 && vy < 0.36)                          // knapsack/blanket (NCOs) / tails corner
+		col = (vy > 0.27) ? vec3(0.55, 0.52, 0.47) : vec3(0.31, 0.21, 0.12);
+	if (vy > 0.015 && vy < 0.105) col = sash_col;                       // the waist sash
+	if (vy > 0.40 && vy < 0.47) col = gold;                             // collar (gold lace)
+	if (vz > 0.10 && abs(vx) < 0.12 && vy > 0.0 && vy < 0.40) col = gold;   // plastron / lapels (gold lace)
+	if (abs(vx) > 0.21 && vy > -0.07 && vy < 0.02) col = gold;          // cuffs (gold lace)
+	if (abs(vx) > 0.21 && vy > 0.415 && vy < 0.47) col = gold;          // shoulder boards (officers only)
+	if (abs(vx) > 0.21 && vy < -0.07) col = skin;                       // bare hands
+	if (vy > 0.44 && vy < 0.655) col = skin;                            // head / neck
+	if (vy > 0.655 && vy < 0.695) col = vec3(0.72, 0.55, 0.20);         // brass hat band
+	if (vy >= 0.695 && vy < 0.90) col = vec3(0.05, 0.05, 0.06);         // shako / bicorne body
+	if (vz > 0.10 && vy > 0.655 && vy < 0.715) col = vec3(0.06, 0.06, 0.07); // peak (dark visor)
+	if (vy >= 0.90) col = vec3(0.92, 0.90, 0.86);                       // plume
+	// white CROSSBELTS for the NCOs/file-closers (COLOR.a flags it; company officers wear none)
 	if (COLOR.a > 0.5 && abs(vx) < 0.215 && vy > -0.05 && vy < 0.45 && abs(vnz) > 0.5) {
 		float u = vx / 0.21; float v = (vy - 0.22) / 0.27;
 		if (min(abs(u - v), abs(u + v)) < 0.20) { col = vec3(0.90, 0.88, 0.82); }

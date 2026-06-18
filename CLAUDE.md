@@ -51,6 +51,20 @@ future Blender hero live in the assistant's memory under `blender-model-pipeline
 new `.glb` requires the user's local live Blender MCP link, which is not available in every session
 this game is built in — e.g. cloud/remote sessions — hence the move to procedural.)
 
+## Company officers & NCOs — brought up to the soldiers' standard
+`_officer_mesh()` (the company officers marching in the ranks, `officer_mm`) used to be a
+crude 7-box figure with no collar/lapels/cuffs and a flat-black hat blob — less detailed
+than the privates they lead. It's now built to the same position bands as `_soldier_mesh()`
+(collar, lapels, faced cuffs, coat tails, hands) plus the marks of authority: a crimson
+waist sash and gold lace at the collar/lapels/cuffs/shoulder boards. The single shared
+`_officer_shader()` paints both this mesh AND the NCOs/file-closers (`nco_mm`, which already
+used the full `soldier_mesh` but was rendering it with the same crude old shader — flat-black
+hat, no facing colours) — so NCOs now show a properly banded hat (brass band/body/peak/plume)
+and the same gold/crimson rank marks as the officers, no geometry changes needed for them.
+The AI's mounted battalion colonels/brigade commanders/divisional generals are still plain
+capsules (`colonel_horse_mm`/`colonel_rider_mm`, `cmd_horse_mm`/`cmd_rider_mm`,
+`gen_horse_mm`/`gen_rider_mm`) — a much bigger gap against the player's hero, not yet tackled.
+
 ## Player controls
 `WASD` move · `Shift` run · `R` autorun · mouse look · `RMB` spyglass · `E` hail · `Q` courier orders ·
 `M` map · `C` camp. Self: `LMB` sabre/fire · `G` pistol · **`V` present** (muskets up) ·
