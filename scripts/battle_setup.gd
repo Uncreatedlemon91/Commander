@@ -17,6 +17,8 @@ class BattUnit:
 	var ammo: float = 50.0
 	var morale: float = 100.0
 	var experience: float = 1.0     # drill quality: recruits < 1.0 < veterans
+	var skills: Dictionary = {}     # per-regiment profile {reload,aim,melee,discipline,stamina} 0..100
+	var fatigue: float = 0.0        # carried weariness — rested down in camp between battles
 	var coat_idx: int = 0
 	var facing_col: Color = Color.WHITE
 	var brigade: int = 0            # place in the order of battle
@@ -28,7 +30,8 @@ class BattUnit:
 
 	func to_dict() -> Dictionary:
 		return { "n": name, "t": team, "m": men, "a": ammo, "mo": morale,
-			"e": experience, "c": coat_idx, "f": [facing_col.r, facing_col.g, facing_col.b],
+			"e": experience, "sk": skills, "ft": fatigue, "c": coat_idx,
+			"f": [facing_col.r, facing_col.g, facing_col.b],
 			"b": brigade, "d": division, "k": corps,
 			"p": [pos.x, pos.z], "fa": facing, "h": human_slot }
 
@@ -40,6 +43,8 @@ class BattUnit:
 		u.ammo = float(d.get("a", 50.0))
 		u.morale = float(d.get("mo", 100.0))
 		u.experience = float(d.get("e", 1.0))
+		u.skills = d.get("sk", {})
+		u.fatigue = float(d.get("ft", 0.0))
 		u.coat_idx = int(d.get("c", 0))
 		var f: Array = d.get("f", [1.0, 1.0, 1.0])
 		u.facing_col = Color(f[0], f[1], f[2])

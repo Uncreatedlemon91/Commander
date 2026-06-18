@@ -10,34 +10,74 @@ var lobby_box: VBoxContainer
 var slots_grid: GridContainer
 var start_btn: Button
 var in_lobby := false
+# character creation (raise your militia)
+var _ci_uniform := 2
+var _ci_facing := 0
+var _ci_flag := 0
+var _ci_hat := 0
+var _ci_belt := 0
+var _ci_pants := 0
+var _ci_name: LineEdit
+var _ci_officers: Array = []
+var _ci_uni_btns: Array = []
+var _ci_fac_btns: Array = []
+var _ci_flag_btns: Array = []
+var _ci_hat_btns: Array = []
+var _ci_belt_btns: Array = []
+var _ci_pants_btns: Array = []
+var _ci_off_label: RichTextLabel
 
 func _ready() -> void:
-	var bg := ColorRect.new()
+	# the painted backdrop, cropped to fill the screen at any aspect
+	var bg := TextureRect.new()
+	var bgtex = load("res://images/Background.png")
+	if bgtex != null:
+		bg.texture = bgtex
 	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
-	bg.color = Color(0.08, 0.09, 0.12)
+	bg.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	bg.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(bg)
+	# a soft vertical scrim so the menu reads cleanly over the art
+	var scrim := ColorRect.new()
+	scrim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	scrim.color = Color(0.03, 0.04, 0.06, 0.42)
+	scrim.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(scrim)
 
 	root = VBoxContainer.new()
 	root.set_anchors_preset(Control.PRESET_CENTER)
 	root.grow_horizontal = Control.GROW_DIRECTION_BOTH
 	root.grow_vertical = Control.GROW_DIRECTION_BOTH
-	root.custom_minimum_size = Vector2(420, 0)
-	root.add_theme_constant_override("separation", 10)
+	root.custom_minimum_size = Vector2(440, 0)
+	root.add_theme_constant_override("separation", 12)
 	add_child(root)
 
 	var title := Label.new()
 	title.text = "COMMANDER"
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.add_theme_font_size_override("font_size", 40)
-	title.add_theme_color_override("font_color", Color(1, 0.86, 0.45))
+	title.add_theme_font_size_override("font_size", 64)
+	title.add_theme_color_override("font_color", Color(1, 0.88, 0.5))
+	title.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.7))
+	title.add_theme_constant_override("shadow_offset_x", 2)
+	title.add_theme_constant_override("shadow_offset_y", 3)
 	root.add_child(title)
+	var tag := Label.new()
+	tag.text = "— a war of the colonies —"
+	tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	tag.add_theme_font_size_override("font_size", 16)
+	tag.add_theme_color_override("font_color", Color(0.82, 0.86, 0.94))
+	root.add_child(tag)
+	var spacer := Control.new()
+	spacer.custom_minimum_size = Vector2(0, 18)
+	root.add_child(spacer)
 
 	_build_main()
 
 	status = Label.new()
 	status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	status.add_theme_color_override("font_color", Color(0.75, 0.85, 1.0))
+	status.add_theme_color_override("font_color", Color(0.80, 0.88, 1.0))
 	root.add_child(status)
 
 	Net.lobby_updated.connect(_refresh_lobby)
@@ -54,24 +94,37 @@ func _ready() -> void:
 func _build_main() -> void:
 	var main := VBoxContainer.new()
 	main.name = "Main"
-	main.add_theme_constant_override("separation", 8)
+	main.add_theme_constant_override("separation", 10)
 	root.add_child(main)
-	root.move_child(main, 1)
+	root.move_child(main, 3)
 
-	_btn(main, "Single Player", _on_single)
-	_btn(main, "Campaign Province  (preview — watch the war)", _on_world)
+	_btn(main, "New Game", _on_world)             # raise your militia and take the field
+
+	var mp_lbl := Label.new()
+	mp_lbl.text = "MULTIPLAYER"
+	mp_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	mp_lbl.add_theme_font_size_override("font_size", 13)
+	mp_lbl.add_theme_color_override("font_color", Color(0.66, 0.72, 0.82))
+	var mp_top := Control.new(); mp_top.custom_minimum_size = Vector2(0, 8); main.add_child(mp_top)
+	main.add_child(mp_lbl)
+
 	_btn(main, "Host Game", _on_host)
 	var iprow := HBoxContainer.new()
 	iprow.add_theme_constant_override("separation", 6)
 	ip_edit = LineEdit.new()
 	ip_edit.text = "127.0.0.1"
+	ip_edit.placeholder_text = "host address"
 	ip_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	iprow.add_child(ip_edit)
 	var jb := Button.new()
 	jb.text = "Join"
+	jb.custom_minimum_size = Vector2(90, 0)
 	jb.pressed.connect(_on_join)
 	iprow.add_child(jb)
 	main.add_child(iprow)
+
+	var q_top := Control.new(); q_top.custom_minimum_size = Vector2(0, 8); main.add_child(q_top)
+	_btn(main, "Quit", func(): get_tree().quit())
 
 # ------------------------------------------------------------------ lobby
 
@@ -144,12 +197,169 @@ func _on_single() -> void:
 	_enter_select()
 
 func _on_world() -> void:
-	# a fresh province — discard any stowed campaign and battle handoff state
+	# a fresh province — discard any stowed campaign and battle handoff state, then raise
+	# your militia before you ride to the war
 	GameConfig.world_state = {}
 	GameConfig.return_to_world = false
 	GameConfig.setup = null
 	GameConfig.battle_tokens = []
-	get_tree().change_scene_to_file("res://world.tscn")
+	GameConfig.has_militia = false
+	_enter_campaign_intro()
+
+func _take_the_field() -> void:
+	GameConfig.has_militia = true
+	var nm := _ci_name.text.strip_edges()
+	GameConfig.militia_name = nm if nm != "" else "1st Volunteers"
+	GameConfig.militia_uniform = _ci_uniform
+	GameConfig.militia_facing = GameConfig.FACING_SWATCHES[_ci_facing]
+	GameConfig.militia_flag = _ci_flag
+	GameConfig.militia_hat = _ci_hat
+	GameConfig.militia_belt = _ci_belt
+	GameConfig.militia_pants = _ci_pants
+	GameConfig.militia_officers = _ci_officers.duplicate(true)
+	# ONE SCENE: the campaign rides straight into the tactical province (no world.tscn
+	# scene-swap). You command a central battalion of the Crown's line.
+	GameConfig.mode = "single"
+	GameConfig.match_seed = randi() | 1
+	GameConfig.local_slot = 52
+	GameConfig.setup = null
+	get_tree().change_scene_to_file("res://game.tscn")
+
+# ---------------------------------------------- campaign intro: raise your militia
+
+func _enter_campaign_intro() -> void:
+	var main := root.get_node_or_null("Main")
+	if main:
+		main.queue_free()
+	var box := VBoxContainer.new()
+	box.name = "Intro"
+	box.add_theme_constant_override("separation", 8)
+	root.add_child(box)
+	root.move_child(box, 1)
+	var hdr := Label.new()
+	hdr.text = "RAISE YOUR MILITIA"
+	hdr.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	hdr.add_theme_font_size_override("font_size", 24)
+	hdr.add_theme_color_override("font_color", Color(1.0, 0.86, 0.45))
+	box.add_child(hdr)
+	var sc := ScrollContainer.new()
+	sc.custom_minimum_size = Vector2(500, 460)
+	box.add_child(sc)
+	var col := VBoxContainer.new()
+	col.custom_minimum_size = Vector2(480, 0)
+	col.add_theme_constant_override("separation", 9)
+	sc.add_child(col)
+	var story := RichTextLabel.new()
+	story.bbcode_enabled = true
+	story.fit_content = true
+	story.custom_minimum_size = Vector2(470, 0)
+	story.text = "[color=#cdd6e6]The Crown and the Continentals are at war.\n\nAs the son of a wealthy family you have spurned the quiet life — taking your inheritance into the country to [color=#ffe9a8]raise a militia[/color] of local men and march them to the war. Choose their dress, their colours, the standard they will follow, and the officers who will lead them.[/color]"
+	col.add_child(story)
+	_ci_section(col, "NAME OF THE REGIMENT")
+	_ci_name = LineEdit.new()
+	_ci_name.text = "1st Volunteers"
+	_ci_name.custom_minimum_size = Vector2(320, 0)
+	col.add_child(_ci_name)
+	_ci_section(col, "UNIFORM")
+	_ci_uni_btns.clear()
+	var ug := HBoxContainer.new()
+	ug.add_theme_constant_override("separation", 4)
+	for i in range(GameConfig.UNIFORM_NAMES.size()):
+		var bi := i
+		var b := Button.new()
+		b.text = GameConfig.UNIFORM_NAMES[i]
+		b.pressed.connect(func(): _ci_uniform = bi; _ci_hl(_ci_uni_btns, _ci_uniform))
+		ug.add_child(b)
+		_ci_uni_btns.append(b)
+	col.add_child(ug)
+	_ci_hl(_ci_uni_btns, _ci_uniform)
+	_ci_section(col, "HEADGEAR")
+	_ci_choice(col, GameConfig.HAT_NAMES, _ci_hat_btns, func(i): _ci_hat = i)
+	_ci_hl(_ci_hat_btns, _ci_hat)
+	_ci_section(col, "CROSSBELTS")
+	_ci_choice(col, GameConfig.BELT_NAMES, _ci_belt_btns, func(i): _ci_belt = i)
+	_ci_hl(_ci_belt_btns, _ci_belt)
+	_ci_section(col, "TROUSERS")
+	_ci_choice(col, GameConfig.PANTS_NAMES, _ci_pants_btns, func(i): _ci_pants = i)
+	_ci_hl(_ci_pants_btns, _ci_pants)
+	# FACING COLOUR customization removed for now — facings use the regimental default.
+	_ci_section(col, "REGIMENTAL STANDARD")
+	_ci_flag_btns.clear()
+	var lg := HBoxContainer.new()
+	lg.add_theme_constant_override("separation", 4)
+	for i in range(GameConfig.FLAG_NAMES.size()):
+		var bi := i
+		var b := Button.new()
+		b.text = GameConfig.FLAG_NAMES[i]
+		b.pressed.connect(func(): _ci_flag = bi; _ci_hl(_ci_flag_btns, _ci_flag))
+		lg.add_child(b)
+		_ci_flag_btns.append(b)
+	col.add_child(lg)
+	_ci_hl(_ci_flag_btns, _ci_flag)
+	_ci_section(col, "COMMISSION OFFICERS")
+	var reroll := Button.new()
+	reroll.text = "↻  Call a fresh slate of applicants"
+	reroll.pressed.connect(_commission_officers)
+	col.add_child(reroll)
+	_ci_off_label = RichTextLabel.new()
+	_ci_off_label.bbcode_enabled = true
+	_ci_off_label.fit_content = true
+	_ci_off_label.custom_minimum_size = Vector2(460, 0)
+	col.add_child(_ci_off_label)
+	_commission_officers()
+	var go := Button.new()
+	go.text = "▶  TAKE THE FIELD"
+	go.custom_minimum_size = Vector2(0, 42)
+	go.pressed.connect(_take_the_field)
+	box.add_child(go)
+	status.text = "Raise and dress your regiment, then march to the war."
+
+func _ci_section(col: VBoxContainer, text: String) -> void:
+	var l := Label.new()
+	l.text = text
+	l.add_theme_color_override("font_color", Color(1.0, 0.84, 0.42))
+	l.add_theme_font_size_override("font_size", 13)
+	col.add_child(l)
+
+func _ci_hl(btns: Array, sel: int) -> void:
+	for i in range(btns.size()):
+		(btns[i] as Button).modulate = Color(1, 1, 1, 1) if i == sel else Color(0.46, 0.48, 0.54, 1)
+
+# A row of labelled choice buttons; `setter` receives the chosen index, `btns` is filled.
+func _ci_choice(col: VBoxContainer, names: Array, btns: Array, setter: Callable) -> void:
+	btns.clear()
+	var g := HBoxContainer.new()
+	g.add_theme_constant_override("separation", 4)
+	for i in range(names.size()):
+		var bi := i
+		var b := Button.new()
+		b.text = String(names[i])
+		b.pressed.connect(func() -> void:
+			setter.call(bi)
+			_ci_hl(btns, bi))
+		g.add_child(b)
+		btns.append(b)
+	col.add_child(g)
+
+func _commission_officers() -> void:
+	_ci_officers.clear()
+	var fn := ["Richard", "James", "William", "Henry", "George", "Thomas", "Charles", "Edward",
+		"Francis", "Samuel", "Daniel", "John", "Hugh", "Robert"]
+	var ln := ["Sharpe", "Harper", "Cooper", "Vane", "Frost", "Mercer", "Slade", "Burke", "Hale",
+		"Croft", "Brand", "Doyle", "Reed", "Ward", "Pike", "Tanner", "Rourke", "Gale"]
+	for i in range(8):
+		_ci_officers.append({ "name": "%s %s" % [fn[randi() % fn.size()], ln[randi() % ln.size()]],
+			"skill": randf_range(42.0, 82.0) })
+	_refresh_officers()
+
+func _refresh_officers() -> void:
+	if _ci_off_label == null:
+		return
+	var t := ""
+	for i in range(_ci_officers.size()):
+		var o: Dictionary = _ci_officers[i]
+		t += "[color=#9fb0c8]%d Coy[/color]  Capt. [color=#e8ecf5]%s[/color]  [color=#8f98a8](leadership %d)[/color]\n" % [i + 1, o["name"], int(o["skill"])]
+	_ci_off_label.text = t
 
 # ------------------------------------------------- battalion select (the OOB)
 
@@ -251,6 +461,23 @@ func _on_start() -> void:
 func _btn(box: VBoxContainer, text: String, cb: Callable) -> void:
 	var b := Button.new()
 	b.text = text
-	b.custom_minimum_size = Vector2(0, 40)
+	b.custom_minimum_size = Vector2(440, 46)
+	b.add_theme_font_size_override("font_size", 19)
+	b.add_theme_color_override("font_color", Color(0.95, 0.93, 0.86))
+	b.add_theme_color_override("font_hover_color", Color(1.0, 0.92, 0.62))
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.10, 0.12, 0.16, 0.82)
+	sb.border_color = Color(1.0, 0.84, 0.42, 0.45)
+	sb.set_border_width_all(1)
+	sb.set_corner_radius_all(6)
+	sb.set_content_margin_all(9)
+	b.add_theme_stylebox_override("normal", sb)
+	var sbh: StyleBoxFlat = sb.duplicate()
+	sbh.bg_color = Color(0.17, 0.19, 0.25, 0.92)
+	sbh.border_color = Color(1.0, 0.88, 0.5, 0.9)
+	b.add_theme_stylebox_override("hover", sbh)
+	var sbp: StyleBoxFlat = sb.duplicate()
+	sbp.bg_color = Color(0.22, 0.17, 0.10, 0.95)
+	b.add_theme_stylebox_override("pressed", sbp)
 	b.pressed.connect(cb)
 	box.add_child(b)

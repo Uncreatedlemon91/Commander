@@ -25,6 +25,10 @@ GameConfig="*res://scripts/game_config.gd"
 Net="*res://scripts/net.gd"
 Voip="*res://scripts/voip.gd"
 
+[display]
+
+window/size/mode=3
+
 [input]
 
 left={
