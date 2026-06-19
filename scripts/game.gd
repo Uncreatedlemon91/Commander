@@ -2325,7 +2325,7 @@ func _cycle_weather() -> void:
 	var options: Array = WEATHER_NEXT.get(_weather, WEATHERS)
 	_weather = options[randi() % options.size()]
 	_weather_timer = randf_range(180.0, 360.0)       # hold the chosen weather a good while —
-	                                                   # the change itself already takes a minute or so
+													   # the change itself already takes a minute or so
 	_send_player_despatch("[color=#bcd] Weather turning %s.[/color]" % _weather, {})
 
 # ============================================================= THE FIELD MAP (M)
