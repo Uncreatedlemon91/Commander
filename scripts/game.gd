@@ -5197,18 +5197,28 @@ func _build_officer_colonel(parent: Node3D, coat_col: Color, facing: Color) -> v
 	boot.roughness = 0.4
 
 	# --- torso: coat body, short tails behind, a stand collar and lapels (facing) ---
+	# the body is built from CAPSULES and SPHERES, not flat boxes — this rider is a single
+	# instance (not a MultiMesh), so unlike the masses he's free of the affordability
+	# keystone and can afford genuinely rounded geometry instead of the box-man silhouette
 	var chest := MeshInstance3D.new()
-	var cb := BoxMesh.new()
-	cb.size = Vector3(0.42, 0.62, 0.26)
+	var cb := CapsuleMesh.new()
+	cb.radius = 0.21
+	cb.height = 0.62
+	cb.radial_segments = 16
+	cb.rings = 4
 	chest.mesh = cb
 	chest.position = Vector3(0, 1.95, 0)
+	chest.scale = Vector3(1.0, 1.0, 0.26 / 0.42)
 	chest.material_override = coat
 	parent.add_child(chest)
 	var tails := MeshInstance3D.new()
-	var tlb := BoxMesh.new()
-	tlb.size = Vector3(0.36, 0.30, 0.14)
+	var tlb := CapsuleMesh.new()
+	tlb.radius = 0.18
+	tlb.height = 0.30
+	tlb.radial_segments = 12
 	tails.mesh = tlb
 	tails.position = Vector3(0, 1.66, -0.16)
+	tails.scale = Vector3(1.0, 1.0, 0.14 / 0.36)
 	tails.material_override = coat
 	parent.add_child(tails)
 	var collar := MeshInstance3D.new()
@@ -5253,8 +5263,11 @@ func _build_officer_colonel(parent: Node3D, coat_col: Color, facing: Color) -> v
 
 	# --- the aiguillette, a gold cord looped on the right breast ---
 	var aig := MeshInstance3D.new()
-	var agb := BoxMesh.new()
-	agb.size = Vector3(0.03, 0.34, 0.03)
+	var agb := CylinderMesh.new()
+	agb.top_radius = 0.015
+	agb.bottom_radius = 0.015
+	agb.height = 0.34
+	agb.radial_segments = 8
 	aig.mesh = agb
 	aig.position = Vector3(0.18, 1.96, 0.15)
 	aig.rotation = Vector3(0, 0, 0.15)
@@ -5269,8 +5282,11 @@ func _build_officer_colonel(parent: Node3D, coat_col: Color, facing: Color) -> v
 	parent.add_child(aigtip)
 
 	var head := MeshInstance3D.new()
-	var hb := BoxMesh.new()
-	hb.size = Vector3(0.22, 0.22, 0.22)
+	var hb := SphereMesh.new()
+	hb.radius = 0.118
+	hb.height = 0.236
+	hb.radial_segments = 16
+	hb.rings = 10
 	head.mesh = hb
 	head.position = Vector3(0, 2.38, 0)
 	head.material_override = skin
@@ -5279,22 +5295,29 @@ func _build_officer_colonel(parent: Node3D, coat_col: Color, facing: Color) -> v
 	# --- arms, faced cuffs, hands, and gold fringed epaulettes on both shoulders ---
 	for ax in [-0.30, 0.30]:
 		var arm := MeshInstance3D.new()
-		var ab := BoxMesh.new()
-		ab.size = Vector3(0.13, 0.5, 0.14)
+		var ab := CapsuleMesh.new()
+		ab.radius = 0.068
+		ab.height = 0.5
+		ab.radial_segments = 10
 		arm.mesh = ab
 		arm.position = Vector3(ax, 1.92, 0.04)
 		arm.material_override = coat
 		parent.add_child(arm)
 		var cuff := MeshInstance3D.new()
-		var cfb := BoxMesh.new()
-		cfb.size = Vector3(0.15, 0.10, 0.16)
+		var cfb := CylinderMesh.new()
+		cfb.top_radius = 0.08
+		cfb.bottom_radius = 0.08
+		cfb.height = 0.10
 		cuff.mesh = cfb
 		cuff.position = Vector3(ax, 1.70, 0.05)
 		cuff.material_override = face_mat
 		parent.add_child(cuff)
 		var hand := MeshInstance3D.new()
-		var hdb := BoxMesh.new()
-		hdb.size = Vector3(0.08, 0.08, 0.09)
+		var hdb := SphereMesh.new()
+		hdb.radius = 0.045
+		hdb.height = 0.09
+		hdb.radial_segments = 10
+		hdb.rings = 6
 		hand.mesh = hdb
 		hand.position = Vector3(ax * 0.85, 1.66, 0.16)
 		hand.material_override = skin
@@ -5310,16 +5333,20 @@ func _build_officer_colonel(parent: Node3D, coat_col: Color, facing: Color) -> v
 	# --- legs: buff breeches over the thigh, black riding boots below ---
 	for sx in [-0.27, 0.27]:
 		var leg := MeshInstance3D.new()
-		var lb := BoxMesh.new()
-		lb.size = Vector3(0.16, 0.72, 0.18)
+		var lb := CapsuleMesh.new()
+		lb.radius = 0.085
+		lb.height = 0.72
+		lb.radial_segments = 12
 		leg.mesh = lb
 		leg.position = Vector3(sx, 1.35, 0.08)
 		leg.rotation = Vector3(0.35, 0, sx * 1.2)   # thighs astride the horse
 		leg.material_override = buff
 		parent.add_child(leg)
 		var bootm := MeshInstance3D.new()
-		var btb := BoxMesh.new()
-		btb.size = Vector3(0.17, 0.40, 0.19)
+		var btb := CylinderMesh.new()
+		btb.bottom_radius = 0.10
+		btb.top_radius = 0.09
+		btb.height = 0.40
 		bootm.mesh = btb
 		bootm.position = Vector3(sx, 1.02, 0.20)
 		bootm.rotation = Vector3(0.35, 0, sx * 1.2)
@@ -5328,9 +5355,13 @@ func _build_officer_colonel(parent: Node3D, coat_col: Color, facing: Color) -> v
 
 	# --- the bicorne: gold piping, a facing-coloured cockade, a taller plume ---
 	var hat := MeshInstance3D.new()
-	var hm := BoxMesh.new()
-	hm.size = Vector3(0.55, 0.12, 0.22)
+	var hm := SphereMesh.new()
+	hm.radius = 0.275
+	hm.height = 0.12
+	hm.radial_segments = 20
+	hm.rings = 10
 	hat.mesh = hm
+	hat.scale = Vector3(1.0, 1.0, 0.22 / 0.55)
 	hat.position = Vector3(0, 2.55, 0)
 	var hmat := StandardMaterial3D.new()
 	hmat.albedo_color = Color(0.08, 0.08, 0.10)
@@ -5344,9 +5375,13 @@ func _build_officer_colonel(parent: Node3D, coat_col: Color, facing: Color) -> v
 	hat_trim.material_override = gold
 	parent.add_child(hat_trim)
 	var cockade := MeshInstance3D.new()
-	var ckb := BoxMesh.new()
-	ckb.size = Vector3(0.06, 0.06, 0.03)
+	var ckb := SphereMesh.new()
+	ckb.radius = 0.04
+	ckb.height = 0.06
+	ckb.radial_segments = 12
+	ckb.rings = 6
 	cockade.mesh = ckb
+	cockade.scale = Vector3(1.0, 1.0, 0.5)
 	cockade.position = Vector3(0, 2.58, 0.11)
 	cockade.material_override = face_mat
 	parent.add_child(cockade)
@@ -5401,7 +5436,7 @@ func _build_officer_colonel(parent: Node3D, coat_col: Color, facing: Color) -> v
 	pistol_mesh.material_override = pmat
 	parent.add_child(pistol_mesh)
 
-# Build a blocky charger under the rider: barrel, chest, hindquarters, an arched neck
+# Build the rounded charger under the rider: barrel, chest, hindquarters, an arched neck
 # and head, a tail, and four legs on pivots so they can swing at the gait — plus the
 # tack that marks a senior officer's mount: a leather saddle, a gold-piped shabraque
 # (saddle cloth) in the militia's facing colour, a bridle, a breast strap and brass
@@ -5416,32 +5451,51 @@ func _build_horse(parent: Node3D, facing: Color) -> void:
 	var white := StandardMaterial3D.new()
 	white.albedo_color = Color(0.86, 0.84, 0.80)   # a blaze down the face
 	white.roughness = 0.9
-	# --- the body: barrel, deeper chest at the front, fuller hindquarters at the rear
+	# --- the body: barrel, deeper chest at the front, fuller hindquarters at the rear —
+	# built from capsules (this mount is a single instance under the rider, same as the
+	# rider himself, so it's free of the affordability keystone like he is) instead of boxes
 	var body := MeshInstance3D.new()
-	var bb := BoxMesh.new()
-	bb.size = Vector3(0.5, 0.62, 1.42)
+	var bb := CapsuleMesh.new()
+	bb.radius = 0.28
+	bb.height = 1.42
+	bb.radial_segments = 16
+	bb.rings = 4
 	body.mesh = bb
+	body.rotation = Vector3(PI * 0.5, 0, 0)
+	body.scale = Vector3(0.5 / 0.56, 1.0, 0.62 / 0.56)
 	body.position = Vector3(0, 0.98, -0.05)
 	body.material_override = hide
 	parent.add_child(body)
 	var chest := MeshInstance3D.new()
-	var cbb := BoxMesh.new()
-	cbb.size = Vector3(0.46, 0.52, 0.42)
+	var cbb := CapsuleMesh.new()
+	cbb.radius = 0.23
+	cbb.height = 0.42
+	cbb.radial_segments = 14
+	cbb.rings = 3
 	chest.mesh = cbb
+	chest.rotation = Vector3(PI * 0.5, 0, 0)
+	chest.scale = Vector3(1.0, 1.0, 0.52 / 0.46)
 	chest.position = Vector3(0, 1.02, 0.62)
 	chest.material_override = hide
 	parent.add_child(chest)
 	var rump := MeshInstance3D.new()
-	var rbb := BoxMesh.new()
-	rbb.size = Vector3(0.52, 0.6, 0.5)
+	var rbb := CapsuleMesh.new()
+	rbb.radius = 0.26
+	rbb.height = 0.5
+	rbb.radial_segments = 14
+	rbb.rings = 3
 	rump.mesh = rbb
+	rump.rotation = Vector3(PI * 0.5, 0, 0)
+	rump.scale = Vector3(1.0, 1.0, 0.6 / 0.52)
 	rump.position = Vector3(0, 1.02, -0.78)
 	rump.material_override = hide
 	parent.add_child(rump)
 	# --- the neck, arched up and forward, with a dark mane along its crest
 	var neck := MeshInstance3D.new()
-	var nbb := BoxMesh.new()
-	nbb.size = Vector3(0.26, 0.7, 0.3)
+	var nbb := CapsuleMesh.new()
+	nbb.radius = 0.14
+	nbb.height = 0.7
+	nbb.radial_segments = 12
 	neck.mesh = nbb
 	neck.position = Vector3(0, 1.42, 0.86)
 	neck.rotation = Vector3(-0.7, 0, 0)
@@ -5457,11 +5511,14 @@ func _build_horse(parent: Node3D, facing: Color) -> void:
 	parent.add_child(mane)
 	# --- the head and muzzle, dropped a little forward, ears pricked, a white blaze
 	var head := MeshInstance3D.new()
-	var hbb := BoxMesh.new()
-	hbb.size = Vector3(0.22, 0.28, 0.5)
+	var hbb := CapsuleMesh.new()
+	hbb.radius = 0.13
+	hbb.height = 0.5
+	hbb.radial_segments = 12
 	head.mesh = hbb
+	head.scale = Vector3(0.22 / 0.26, 1.0, 1.0)
 	head.position = Vector3(0, 1.72, 1.14)
-	head.rotation = Vector3(0.42, 0, 0)
+	head.rotation = Vector3(0.42 + PI * 0.5, 0, 0)
 	head.material_override = hide
 	parent.add_child(head)
 	var blaze := MeshInstance3D.new()
@@ -5473,24 +5530,31 @@ func _build_horse(parent: Node3D, facing: Color) -> void:
 	blaze.material_override = white
 	parent.add_child(blaze)
 	var muzzle := MeshInstance3D.new()
-	var ubb := BoxMesh.new()
-	ubb.size = Vector3(0.18, 0.18, 0.2)
+	var ubb := CylinderMesh.new()
+	ubb.bottom_radius = 0.10
+	ubb.top_radius = 0.085
+	ubb.height = 0.2
 	muzzle.mesh = ubb
+	muzzle.rotation = Vector3(PI * 0.5, 0, 0)
 	muzzle.position = Vector3(0, 1.6, 1.36)
 	muzzle.material_override = dark
 	parent.add_child(muzzle)
 	for ex in [-0.07, 0.07]:
 		var ear := MeshInstance3D.new()
-		var ebb := BoxMesh.new()
-		ebb.size = Vector3(0.05, 0.14, 0.05)
+		var ebb := CylinderMesh.new()
+		ebb.bottom_radius = 0.025
+		ebb.top_radius = 0.005
+		ebb.height = 0.14
 		ear.mesh = ebb
 		ear.position = Vector3(ex, 1.92, 0.98)
 		ear.material_override = hide
 		parent.add_child(ear)
 	# --- the tail, hanging off the hindquarters
 	var tail := MeshInstance3D.new()
-	var tbb := BoxMesh.new()
-	tbb.size = Vector3(0.13, 0.58, 0.13)
+	var tbb := CapsuleMesh.new()
+	tbb.radius = 0.065
+	tbb.height = 0.58
+	tbb.radial_segments = 10
 	tail.mesh = tbb
 	tail.position = Vector3(0, 0.84, -1.04)
 	tail.rotation = Vector3(0.5, 0, 0)
@@ -5503,15 +5567,19 @@ func _build_horse(parent: Node3D, facing: Color) -> void:
 		hip.position = Vector3(lp.x, 0.72, lp.z)
 		parent.add_child(hip)
 		var leg := MeshInstance3D.new()
-		var lbb := BoxMesh.new()
-		lbb.size = Vector3(0.15, 0.72, 0.17)
+		var lbb := CapsuleMesh.new()
+		lbb.radius = 0.08
+		lbb.height = 0.72
+		lbb.radial_segments = 10
 		leg.mesh = lbb
 		leg.position = Vector3(0, -0.36, 0)
 		leg.material_override = hide
 		hip.add_child(leg)
 		var hoof := MeshInstance3D.new()
-		var hfb := BoxMesh.new()
-		hfb.size = Vector3(0.17, 0.12, 0.2)
+		var hfb := CylinderMesh.new()
+		hfb.bottom_radius = 0.10
+		hfb.top_radius = 0.085
+		hfb.height = 0.12
 		hoof.mesh = hfb
 		hoof.position = Vector3(0, -0.72, 0.02)
 		hoof.material_override = dark

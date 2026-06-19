@@ -39,17 +39,29 @@ The infantry are a **fully procedural** detailed line-infantryman built in code:
 
 ## The player's mounted officer — PROCEDURAL (settled decision)
 `_build_officer()` builds the hero **procedurally in code** (`_build_officer_colonel()` for the rider,
-`_build_horse()` for the charger + tack) — low-poly box/cylinder primitives, like the soldiers, not a
-Blender import. (`models/officer_hero.glb` is the old Blender-built hero asset; it's no longer loaded
-and is kept on disk only in case it's useful later.) The hero reads as a **Colonel**: gorget, crimson
-waist sash, gold fringed epaulettes on both shoulders, an aiguillette, and a gold-piped, tall-plumed
-bicorne, over a coat in the player's militia colour with facing-coloured collar/lapels/cuffs/cockade.
-The charger carries a leather saddle and a gold-piped shabraque in the militia's facing colour. This is
-a **single instance** (not a MultiMesh) so it can carry far more primitives/detail than a soldier —
-only the 70k masses are constrained to the cheap shader path. (Blender pipeline notes for a possible
-future Blender hero live in the assistant's memory under `blender-model-pipeline`; building/exporting a
-new `.glb` requires the user's local live Blender MCP link, which is not available in every session
-this game is built in — e.g. cloud/remote sessions — hence the move to procedural.)
+`_build_horse()` for the charger + tack) — primitive meshes, like the soldiers, not a Blender import.
+(`models/officer_hero.glb` is the old Blender-built hero asset; it's no longer loaded and is kept on
+disk only in case it's useful later.) The hero reads as a **Colonel**: gorget, crimson waist sash, gold
+fringed epaulettes on both shoulders, an aiguillette, and a gold-piped, tall-plumed bicorne, over a coat
+in the player's militia colour with facing-coloured collar/lapels/cuffs/cockade. The charger carries a
+leather saddle and a gold-piped shabraque in the militia's facing colour. This is a **single instance**
+(not a MultiMesh) so it can carry far more primitives/detail than a soldier — only the 70k masses are
+constrained to the cheap shader path. (Blender pipeline notes for a possible future Blender hero live in
+the assistant's memory under `blender-model-pipeline`; building/exporting a new `.glb` requires the
+user's local live Blender MCP link, which is not available in every session this game is built in —
+e.g. cloud/remote sessions — hence the move to procedural.)
+
+Both rider and charger were originally built from flat `BoxMesh` blocks (the soldiers' idiom, where
+boxes are cheap and the silhouette reads fine at mass scale). Because the hero is exempt from the
+affordability keystone, the round body volumes — rider's chest/tails/head/arms/cuffs/hands/legs/boots/
+bicorne/cockade/aiguillette, and the horse's body/chest/rump/neck/head/muzzle/ears/tail/legs/hooves —
+were redone as `CapsuleMesh`/`SphereMesh`/`CylinderMesh` primitives (non-uniform `.scale` approximates
+each part's original box proportions where the cross-section isn't circular) for a rounded, less
+box-man silhouette; genuinely flat parts (collar, lapels, sash, gorget, epaulettes, hat piping, sabre,
+pistol, tack) stayed as boxes since they're flat in real life too. Parts whose long axis wasn't already
+Godot's default growth axis (+Y) needed a realignment rotation composed with any existing tilt the box
+already had (same-axis rotations simply add: `θ_new = θ_old + π/2` for an axis that was local Z),
+worked out per-part rather than via a shared helper.
 
 ## Company officers & NCOs — brought up to the soldiers' standard
 `_officer_mesh()` (the company officers marching in the ranks, `officer_mm`) used to be a
