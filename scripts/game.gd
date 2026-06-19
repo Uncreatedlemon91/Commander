@@ -2063,7 +2063,7 @@ func _set_dress_palettes(m: ShaderMaterial) -> void:
 # turf material and computed normals so the light catches the slopes.
 func _build_ground_mesh() -> ArrayMesh:
 	var x0 := -PROVINCE_SIZE * 0.5
-	var x1 := COAST_X + 60.0
+	var x1 := COAST_X + COAST_AMPLITUDE + 60.0   # reach the farthest-out headland, not just the mean shore
 	var z0 := -PROVINCE_SIZE * 0.5
 	var z1 := PROVINCE_SIZE * 0.5
 	var cols := 150
@@ -3579,10 +3579,11 @@ func _build_homesteads() -> void:
 		var x := rng.randf_range(-8600.0, COAST_X - 280.0)
 		var z := rng.randf_range(-8400.0, 8400.0)
 		var p := Vector3(x, 0, z)
-		var ok := true
-		for t in field_towns:
-			if p.distance_to(t["pos"]) < 650.0 + float(t["size"]) * 150.0:
-				ok = false; break
+		var ok := x < _coast_x(z) - 280.0   # the coast bows around COAST_X — stay inland of it
+		if ok:
+			for t in field_towns:
+				if p.distance_to(t["pos"]) < 650.0 + float(t["size"]) * 150.0:
+					ok = false; break
 		if ok:
 			for s in field_sites:
 				if String(s["kind"]) != "town" and p.distance_to(s["pos"]) < 380.0:
@@ -3660,10 +3661,11 @@ func _build_farmland() -> void:
 		var x := rng.randf_range(-8600.0, COAST_X - 300.0)
 		var z := rng.randf_range(-8400.0, 8400.0)
 		var p := Vector3(x, 0, z)
-		var ok := true
-		for t in field_towns:
-			if p.distance_to(t["pos"]) < 500.0 + float(t["size"]) * 150.0:
-				ok = false; break
+		var ok := x < _coast_x(z) - 300.0   # the coast bows around COAST_X — stay inland of it
+		if ok:
+			for t in field_towns:
+				if p.distance_to(t["pos"]) < 500.0 + float(t["size"]) * 150.0:
+					ok = false; break
 		if ok and not river_pts.is_empty() and _in_river(p):
 			ok = false
 		if not ok:
@@ -3731,10 +3733,11 @@ func _build_field_forests() -> void:
 		var z := rng.randf_range(-8400.0, 8400.0)
 		var p := Vector3(x, 0, z)
 		var r := rng.randf_range(350.0, 950.0)
-		var ok := true
-		for t in field_towns:
-			if p.distance_to(t["pos"]) < r * 0.4 + 700.0 + float(t["size"]) * 150.0:
-				ok = false; break
+		var ok := x < _coast_x(z) - r - 100.0   # keep the whole disc clear of the bowed coast
+		if ok:
+			for t in field_towns:
+				if p.distance_to(t["pos"]) < r * 0.4 + 700.0 + float(t["size"]) * 150.0:
+					ok = false; break
 		if ok:
 			for s in field_sites:
 				if p.distance_to(s["pos"]) < r * 0.4 + 420.0:
@@ -3775,7 +3778,7 @@ func _build_field_forests() -> void:
 			var a := rng.randf() * TAU
 			var rr := sqrt(rng.randf()) * r
 			var p := c + Vector3(cos(a) * rr, 0, sin(a) * rr)
-			if _on_road(p) or (not river_pts.is_empty() and _in_river(p)):
+			if p.x > _coast_x(p.z) - 60.0 or _on_road(p) or (not river_pts.is_empty() and _in_river(p)):
 				continue
 			var s := rng.randf_range(0.8, 1.7)
 			var yaw := rng.randf() * TAU
@@ -3983,7 +3986,7 @@ func _build_river() -> void:
 	var ctrl := [
 		Vector3(-8200, 0, -8400), Vector3(-6400, 0, -5200), Vector3(-4900, 0, -2400),
 		Vector3(-3000, 0, -300), Vector3(-1600, 0, 2200), Vector3(-200, 0, 4400),
-		Vector3(700, 0, 6400), Vector3(COAST_X - 60, 0, 7600),
+		Vector3(700, 0, 6400), Vector3(_coast_x(7600.0) - 60.0, 0, 7600),
 	]
 	# Catmull-Rom subdivision into a smooth polyline
 	river_pts.clear()
@@ -4081,13 +4084,22 @@ func _seg_xz(p1: Vector3, p2: Vector3, p3: Vector3, p4: Vector3):
 		return p1.lerp(p2, t)
 	return null
 
+# The coastline isn't a straight line at COAST_X — it bows into a couple of broad bays and
+# headlands along its length. Two low-frequency sine terms keep it a gentle, natural curve
+# (never wilder than +/-COAST_AMPLITUDE). MUST mirror the ocean shader's copy (_build_ocean)
+# so the surf line tracks the actual shore the ground/ocean meshes draw.
+func _coast_x(z: float) -> float:
+	return COAST_X + sin(z * 0.00045 + 0.6) * 260.0 + sin(z * 0.00112 - 1.3) * 140.0
+
 # ---- TERRAIN HEIGHT: one shared rolling-ground field. Everything in the world drapes onto
 # this (the ground mesh, the men, the scenery), and the GLSL twin in the ground shader MUST
-# match. Faded to sea level near the shore so the beach and coast stay flat. ----
+# match. Faded to sea level near the shore so the beach and coast stay flat; beyond the local
+# coastline it slopes gently down into a shallow seabed so bays sink under the ocean cleanly. ----
 func _gh(x: float, z: float) -> float:
-	var c := clampf((COAST_X - x) / 350.0, 0.0, 1.0)   # flatten only the immediate shore
+	var cx := _coast_x(z)
+	var c := clampf((cx - x) / 350.0, 0.0, 1.0)   # flatten only the immediate shore
 	if c <= 0.0:
-		return 0.0
+		return lerpf(0.0, -6.0, clampf((x - cx) / 600.0, 0.0, 1.0))   # offshore seabed
 	# hills on a BATTLEFIELD scale (wavelengths ~1–2.5 km) so the ground visibly rolls over
 	# the ground a player can see — not a 14 km swell that reads as dead flat up close
 	var h := sin(x * 0.0038 + 1.7) * 13.0 + sin(z * 0.0045 - 0.6) * 11.0
@@ -4342,7 +4354,9 @@ var ocean: MeshInstance3D
 var ocean_mat: ShaderMaterial      # wind-driven Gerstner sea (uniforms updated each frame)
 var cloud_layer: MeshInstance3D    # drifting cloud sheet that follows the camera
 var cloud_mat: ShaderMaterial
-const COAST_X := 1650.0            # the shoreline — land to the west, open sea to the east
+const COAST_X := 1650.0            # the shoreline's mean position — land to the west, open sea
+                                    # to the east (the actual coast bends around this, see _coast_x)
+const COAST_AMPLITUDE := 400.0     # the most a bay/headland can pull the shore off COAST_X
 const SHIP_SPEED := 2.4            # a ship under sail makes way slowly (an accurate pace)
 const SHIP_TURN := 0.09            # max turn rate (rad/s) — a big, ponderous turning circle
 # the sea's wave model — MUST mirror the ocean shader so ships ride the visible swell.
@@ -4363,7 +4377,7 @@ const SEA_WAVES := [
 func _sea_y(wx: float, wz: float) -> float:
 	var wd := SEA_WIND_DIR.normalized()              # fixed swell heading (not the veering wind)
 	var s := clampf(0.8 + _wind.length() * 0.7, 0.3, 3.0)
-	var depth := clampf((wx - COAST_X) / 1400.0, 0.0, 1.0)
+	var depth := clampf((wx - _coast_x(wz)) / 1400.0, 0.0, 1.0)
 	var damp := lerpf(0.22, 1.0, depth)
 	var p := Vector2(wx, wz)
 	var y := 0.0
@@ -4433,7 +4447,9 @@ void vertex(){
 	gwave(rot2(w, 0.5), 0.70, 88.0,  1.6*s,  1.1,  p, t, disp, nrm, jac);
 	gwave(rot2(w,-0.7), 0.62, 50.0,  0.95*s, 1.25, p, t, disp, nrm, jac);
 	gwave(rot2(w, 1.2), 0.52, 28.0,  0.55*s, 1.5,  p, t, disp, nrm, jac);
-	v_depth = clamp((p.x - coast_x) / 1400.0, 0.0, 1.0);
+	// the shore bows into bays/headlands around coast_x — MUST mirror _coast_x() in GDScript
+	float local_coast = coast_x + sin(p.z * 0.00045 + 0.6) * 260.0 + sin(p.z * 0.00112 - 1.3) * 140.0;
+	v_depth = clamp((p.x - local_coast) / 1400.0, 0.0, 1.0);
 	float damp = mix(0.22, 1.0, v_depth);   // the sea lies calmer in the shallows by the shore
 	VERTEX += disp * damp;
 	NORMAL = normalize(nrm);
@@ -4460,35 +4476,44 @@ void fragment(){
 	# the SEA is two coplanar sheets sharing one material: a dense inshore sheet with the
 	# detailed swell where the ships sail, and a vast low-detail sheet that carries the same
 	# wave shape on to the horizon (set a hair lower so the inshore sheet always sits on top).
+	# Both reach a bit further landward than the mean COAST_X so they fully cover the deepest
+	# bay (the ground's own seabed slope, see _gh, then hides under them with no gap).
+	var ocean_x0 := COAST_X - COAST_AMPLITUDE
 	var near := PlaneMesh.new()
-	near.size = Vector2(6000, 16000)
+	near.size = Vector2(6000.0 + COAST_AMPLITUDE, 16000)
 	near.subdivide_width = 240
 	near.subdivide_depth = 320
 	ocean = MeshInstance3D.new()
 	ocean.mesh = near
-	ocean.position = Vector3(COAST_X + 3000.0, SEA_BASE_Y, 0.0)
+	ocean.position = Vector3(ocean_x0 + near.size.x * 0.5, SEA_BASE_Y, 0.0)
 	ocean.material_override = ocean_mat
 	add_child(ocean)
 	var far := PlaneMesh.new()
-	far.size = Vector2(40000, 40000)
+	far.size = Vector2(40000.0 + COAST_AMPLITUDE, 40000)
 	far.subdivide_width = 80
 	far.subdivide_depth = 80
 	var far_mi := MeshInstance3D.new()
 	far_mi.mesh = far
-	far_mi.position = Vector3(COAST_X + 20000.0, SEA_BASE_Y - 0.3, 0.0)
+	far_mi.position = Vector3(ocean_x0 + far.size.x * 0.5, SEA_BASE_Y - 0.3, 0.0)
 	far_mi.material_override = ocean_mat
 	far_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(far_mi)
-	# a pale ribbon of beach where the sea meets the land
+	# a pale ribbon of beach that follows the actual bowed shoreline, not a straight line
+	var coast_pts: Array = []
+	var cz := -PROVINCE_SIZE * 0.5
+	while cz <= PROVINCE_SIZE * 0.5:
+		coast_pts.append(Vector3(_coast_x(cz), 0.0, cz))
+		cz += 200.0
+	var beach_st := SurfaceTool.new(); beach_st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	_ribbon(beach_st, coast_pts, 100.0, 0.15)
 	var beach := MeshInstance3D.new()
-	var bm := PlaneMesh.new()
-	bm.size = Vector2(200, 16000)
-	beach.mesh = bm
-	beach.position = Vector3(COAST_X - 40.0, 0.15, 0.0)
+	beach.mesh = beach_st.commit()
 	var bmat := StandardMaterial3D.new()
 	bmat.albedo_color = Color(0.80, 0.74, 0.55)
 	bmat.roughness = 1.0
+	bmat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	beach.material_override = bmat
+	beach.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(beach)
 
 # A high sheet of fair-weather cloud that follows the camera and drifts with the wind.

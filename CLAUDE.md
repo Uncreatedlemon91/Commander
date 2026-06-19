@@ -184,6 +184,29 @@ and built through the existing `_make_scenery_mm()` (zero-scale `_zero_xf()` def
 left unused after road/river skips), so no exact count needs to be tracked ahead of time — the
 same trick `_build_homesteads()`/`_build_farmland()` already rely on.
 
+## The coastline — bowed into bays and headlands instead of a straight line
+The shore used to be a perfectly straight north-south line at `x = COAST_X` — every system
+(ground mesh, ocean planes, beach, river mouth, ship patrol bounds, scenery scatter) treated
+`COAST_X` as a flat constant. `_coast_x(z)` now returns the shore's actual position at a given
+`z` — `COAST_X` plus two low-frequency sine terms, bounded by `const COAST_AMPLITUDE := 400.0` —
+giving a couple of broad, natural-reading bays and headlands along the coast's length, and every
+consumer was updated to read the curve instead of the constant: `_gh()`'s shore flatten now
+follows `_coast_x(z)` and slopes gently down into a shallow seabed offshore (so the ground sinks
+cleanly under the sea in a bay instead of going flat-then-cliff); `_build_ground_mesh()` reaches
+`COAST_AMPLITUDE` further east so it covers the widest headland; `_build_ocean()`'s near/far sea
+planes start `COAST_AMPLITUDE` further landward so they always cover the deepest bay, and the old
+flat beach `PlaneMesh` is now a curved ribbon (built with the same `_ribbon()` helper the river
+already uses) sampled along `_coast_x(z)`; the ocean shader's foam/depth falloff recomputes the
+local shoreline from `p.z` with the identical sine formula — a GLSL "twin" of `_coast_x()`, the
+same convention the file already uses for `_gh`'s hill formula and the wave model; `_sea_y()` (the
+GDScript twin of the shader, used for ship physics) was updated the same way; the river's mouth
+now lands on `_coast_x(7600.0)` instead of the old fixed point; and the three province-scatter
+passes (`_build_homesteads`, `_build_farmland`, `_build_field_forests`) each gained a guard against
+the *local* coast (not just the old fixed bound) so a receding bay can never leave a farmhouse or
+a tree standing in open water. Ship spawn/patrol/stand-off logic was left on the fixed `COAST_X`
+reference deliberately — its margins (650+ units) are already comfortably larger than
+`COAST_AMPLITUDE`, so the ships were never at risk of running aground against the new curve.
+
 ## Player controls
 `WASD` move · `Shift` run · `R` autorun · mouse look · `RMB` spyglass · `E` hail · `Q` courier orders ·
 `M` map · `C` camp. Self: `LMB` sabre/fire · `G` pistol · **`V` present** (muskets up) ·
