@@ -4398,9 +4398,11 @@ func _smesh(parent: Node3D, mesh: Mesh, pos: Vector3, mat: Material, b: Basis = 
 	parent.add_child(mi)
 	return mi
 
-# A blocky-but-believable sloop-of-war, bow toward +Z: a tapered hull with a wale and a
-# chequered gun-deck, a raised quarterdeck and forecastle, a beak and bowsprit, three
-# masts crossed with yards and graduated square sails, headsails and the ensign astern.
+# A blocky-but-believable sloop-of-war, bow toward +Z: a tapered hull that sits properly IN
+# the water (a coppered underbody below the waterline, a boot-topping stripe right at it,
+# then the turn of the bilge up to the wale and a chequered gun-deck), a raised quarterdeck
+# and forecastle, a carved figurehead and stowed anchors at the beak, a bowsprit crossed with
+# headsails, three masts crossed with yards and graduated square sails, and the ensign astern.
 func _ship_node(team: int) -> Node3D:
 	var n := Node3D.new()
 	var timber := StandardMaterial3D.new()
@@ -4418,44 +4420,65 @@ func _ship_node(team: int) -> Node3D:
 	canvas.cull_mode = BaseMaterial3D.CULL_DISABLED
 	var rope := StandardMaterial3D.new()
 	rope.albedo_color = Color(0.16, 0.13, 0.10); rope.roughness = 1.0
-	# ---- hull: a deep keel, a wider deck, a tapering bow and a tall transom ----
-	_smesh(n, _box(7.5, 5.0, 40.0), Vector3(0, 2.5, -1.0), timber)            # lower hull / keel run
-	_smesh(n, _box(11.5, 5.0, 42.0), Vector3(0, 6.5, -1.0), timber)           # main hull at the deck
-	_smesh(n, _box(9.0, 5.0, 6.0), Vector3(0, 5.6, 21.5), timber)             # bow shoulder
-	_smesh(n, _box(5.0, 4.6, 5.0), Vector3(0, 5.4, 25.5), timber)             # bow taper
-	_smesh(n, _box(2.4, 3.6, 4.0), Vector3(0, 4.8, 28.5), dark)               # beakhead / stem
-	_smesh(n, _box(12.4, 6.0, 4.0), Vector3(0, 8.0, -22.0), timber)           # stern transom (tall)
-	_smesh(n, _box(8.0, 2.6, 0.6), Vector3(0, 9.2, -24.1), trim)              # stern gallery windows
-	# the wale (a heavy rubbing strake) and the chequered gun deck with its ports
-	_smesh(n, _box(12.0, 1.2, 43.0), Vector3(0, 4.6, -1.0), dark)             # wale
-	_smesh(n, _box(11.8, 1.8, 41.5), Vector3(0, 7.2, -1.0), strake)          # gun strake
+	var copper := StandardMaterial3D.new()
+	copper.albedo_color = Color(0.42, 0.24, 0.14); copper.roughness = 0.55; copper.metallic = 0.3   # coppered bottom
+	var boot := StandardMaterial3D.new()
+	boot.albedo_color = Color(0.05, 0.05, 0.05); boot.roughness = 0.9        # boot-topping at the waterline
+	var gold := StandardMaterial3D.new()
+	gold.albedo_color = Color(0.80, 0.66, 0.22); gold.roughness = 0.35; gold.metallic = 0.6
+	# ---- hull: a coppered underbody below the waterline (the ship rides IN the sea, not on
+	# top of it), the bilge turning up to the wale, a wider deck breadth, a tapering bow and
+	# a tall transom ----
+	_smesh(n, _box(7.6, 4.2, 40.0), Vector3(0, -2.1, -1.0), copper)           # coppered underbody (submerged)
+	_smesh(n, _box(7.8, 0.5, 40.2), Vector3(0, 0.0, -1.0), boot)              # boot-topping at the waterline
+	_smesh(n, _box(7.8, 4.2, 40.0), Vector3(0, 2.1, -1.0), timber)            # bilge, waterline up to the wale
+	_smesh(n, _box(12.5, 5.0, 44.0), Vector3(0, 6.5, -1.0), timber)           # main hull at the deck
+	_smesh(n, _box(9.5, 5.0, 6.0), Vector3(0, 5.6, 23.0), timber)             # bow shoulder
+	_smesh(n, _box(5.4, 4.6, 5.0), Vector3(0, 5.4, 27.0), timber)             # bow taper
+	_smesh(n, _box(2.6, 3.6, 4.0), Vector3(0, 4.8, 30.0), dark)               # beakhead / stem
+	_smesh(n, _box(13.4, 6.0, 4.0), Vector3(0, 8.0, -23.0), timber)           # stern transom (tall)
+	_smesh(n, _box(8.6, 2.6, 0.6), Vector3(0, 9.2, -25.1), trim)              # stern gallery windows
+	# the wale (a heavy rubbing strake at the turn of the bilge) and the chequered gun deck
+	_smesh(n, _box(12.9, 1.2, 45.0), Vector3(0, 4.6, -1.0), dark)             # wale
+	_smesh(n, _box(12.7, 1.8, 43.5), Vector3(0, 7.2, -1.0), strake)          # gun strake
 	for side in [-1.0, 1.0]:
 		for k in range(6):
-			var pz := -14.0 + float(k) * 6.0
-			_smesh(n, _box(0.6, 1.1, 1.6), Vector3(side * 5.95, 7.2, pz), dark)   # gun ports
+			var pz := -15.0 + float(k) * 6.4
+			_smesh(n, _box(0.6, 1.1, 1.6), Vector3(side * 6.4, 7.2, pz), dark)   # gun ports
 	# bulwarks + the upper decks
-	_smesh(n, _box(11.6, 1.6, 42.0), Vector3(0, 9.6, -1.0), timber)           # bulwark rail
-	_smesh(n, _box(10.6, 0.5, 41.0), Vector3(0, 9.3, -1.0), deckwood)         # weather deck
-	_smesh(n, _box(10.5, 2.2, 13.0), Vector3(0, 10.7, -14.5), timber)         # quarterdeck (raised aft)
-	_smesh(n, _box(9.0, 1.8, 8.0), Vector3(0, 10.5, 16.0), timber)            # forecastle (raised fwd)
-	# a ship's wheel & binnacle hint on the quarterdeck
-	_smesh(n, _box(0.4, 1.4, 0.4), Vector3(0, 11.8, -10.0), deckwood)
+	_smesh(n, _box(12.5, 1.6, 44.0), Vector3(0, 9.6, -1.0), timber)           # bulwark rail
+	_smesh(n, _box(11.4, 0.5, 43.0), Vector3(0, 9.3, -1.0), deckwood)         # weather deck
+	_smesh(n, _box(11.3, 2.2, 13.5), Vector3(0, 10.7, -15.0), timber)         # quarterdeck (raised aft)
+	_smesh(n, _box(9.6, 1.8, 8.5), Vector3(0, 10.5, 17.0), timber)            # forecastle (raised fwd)
+	# a ship's wheel & binnacle hint on the quarterdeck, and a ship's boat stowed amidships
+	_smesh(n, _box(0.4, 1.4, 0.4), Vector3(0, 11.8, -10.5), deckwood)
+	_smesh(n, _box(2.0, 0.9, 6.5), Vector3(0, 10.4, -4.0), deckwood)
+	# ---- the beak: a carved, gilt figurehead, cathead beams and anchors stowed each side ----
+	_smesh(n, _box(0.9, 2.0, 1.4), Vector3(0, 4.6, 32.0), trim)               # figurehead
+	_smesh(n, _box(0.5, 0.9, 0.8), Vector3(0, 5.7, 32.2), gold)               # figurehead's gilt crest
+	for side in [-1.0, 1.0]:
+		var ax := side * 5.6
+		_smesh(n, _box(0.45, 0.45, 2.6), Vector3(side * 5.6, 9.0, 26.5), deckwood)        # cathead beam
+		_smesh(n, _box(0.18, 3.4, 0.18), Vector3(ax, 5.4, 26.0), dark)                     # anchor shank
+		_smesh(n, _box(0.95, 0.18, 0.18), Vector3(ax, 7.0, 26.0), dark)                    # anchor stock
+		_smesh(n, _box(0.75, 0.5, 0.14), Vector3(ax, 3.7, 26.3), dark, Basis(Vector3.RIGHT, deg_to_rad(35.0)))   # fluke
 	# ---- bowsprit + headsails ----
 	var bsB := Basis(Vector3.RIGHT, deg_to_rad(-22.0))
-	_smesh(n, _box(0.8, 0.8, 16.0), Vector3(0, 11.5, 27.0), deckwood, bsB)
-	_smesh(n, _box(0.1, 5.0, 7.0), Vector3(0, 12.5, 24.0), canvas, Basis(Vector3.UP, deg_to_rad(90.0)) * Basis(Vector3.RIGHT, deg_to_rad(8.0)))
+	_smesh(n, _box(0.85, 0.85, 17.0), Vector3(0, 11.5, 29.0), deckwood, bsB)
+	_smesh(n, _box(0.1, 5.2, 7.5), Vector3(0, 12.6, 25.5), canvas, Basis(Vector3.UP, deg_to_rad(90.0)) * Basis(Vector3.RIGHT, deg_to_rad(8.0)))
+	_smesh(n, _box(0.1, 4.4, 6.5), Vector3(0, 10.8, 20.5), canvas, Basis(Vector3.UP, deg_to_rad(90.0)) * Basis(Vector3.RIGHT, deg_to_rad(6.0)))   # inner jib
 	# ---- three masts: fore, main (tallest), mizzen — each crossed with yards & sails ----
 	var masts := [
-		{ "z": 12.0, "h": 40.0, "course": Vector2(22.0, 12.0), "top": Vector2(16.0, 9.0) },   # fore
-		{ "z": -1.0, "h": 47.0, "course": Vector2(26.0, 14.0), "top": Vector2(19.0, 10.0) },  # main
-		{ "z": -14.0, "h": 34.0, "course": Vector2(18.0, 10.0), "top": Vector2(13.0, 8.0) },  # mizzen
+		{ "z": 13.0, "h": 44.0, "course": Vector2(24.0, 13.0), "top": Vector2(17.0, 10.0) },   # fore
+		{ "z": -1.0, "h": 52.0, "course": Vector2(28.0, 15.0), "top": Vector2(21.0, 11.0) },   # main
+		{ "z": -15.0, "h": 38.0, "course": Vector2(19.0, 11.0), "top": Vector2(14.0, 9.0) },   # mizzen
 	]
 	for m in masts:
 		var mz: float = m["z"]
 		var mh: float = m["h"]
-		var mcyl := CylinderMesh.new(); mcyl.top_radius = 0.35; mcyl.bottom_radius = 0.7; mcyl.height = mh
+		var mcyl := CylinderMesh.new(); mcyl.top_radius = 0.38; mcyl.bottom_radius = 0.75; mcyl.height = mh
 		_smesh(n, mcyl, Vector3(0, 8.0 + mh * 0.5, mz), deckwood)
-		var top := CylinderMesh.new(); top.top_radius = 0.18; top.bottom_radius = 0.35; top.height = mh * 0.5
+		var top := CylinderMesh.new(); top.top_radius = 0.19; top.bottom_radius = 0.38; top.height = mh * 0.5
 		_smesh(n, top, Vector3(0, 8.0 + mh + mh * 0.25, mz), deckwood)        # topmast
 		var cs: Vector2 = m["course"]
 		var ts: Vector2 = m["top"]
@@ -4468,8 +4491,8 @@ func _ship_node(team: int) -> Node3D:
 		# shrouds: a few raked ropes from the masthead down to the channels each side
 		for side in [-1.0, 1.0]:
 			for sh in range(3):
-				var foot := Vector3(side * 5.6, 9.5, mz + float(sh - 1) * 3.0)
-				var head := Vector3(side * 0.6, 8.0 + mh * 0.7, mz)
+				var foot := Vector3(side * 6.1, 9.5, mz + float(sh - 1) * 3.2)
+				var head := Vector3(side * 0.65, 8.0 + mh * 0.7, mz)
 				var mid := (foot + head) * 0.5
 				var dir := head - foot
 				var b := Basis.looking_at(dir.normalized(), Vector3.UP)
@@ -4477,8 +4500,8 @@ func _ship_node(team: int) -> Node3D:
 				_smesh(n, rod, mid, rope, b)
 	# the ensign at the stern staff
 	var staffB := Basis(Vector3.RIGHT, deg_to_rad(-18.0))
-	_smesh(n, _box(0.2, 0.2, 7.0), Vector3(0, 13.0, -24.0), deckwood, staffB)
-	_smesh(n, _box(0.15, 3.2, 5.0), Vector3(0, 15.0, -27.5), trim)
+	_smesh(n, _box(0.2, 0.2, 7.5), Vector3(0, 13.0, -25.5), deckwood, staffB)
+	_smesh(n, _box(0.15, 3.4, 5.4), Vector3(0, 15.1, -29.2), trim)
 	return n
 
 func _spawn_ships() -> void:
@@ -4571,15 +4594,15 @@ func _ship_broadside(s: Dictionary, foe) -> void:
 	var base: Vector3 = s["pos"] + Vector3(0, 5.0, 0)
 	# a full gun-deck speaks as one — same flash, smoke-bloom and report as the land batteries
 	for k in range(9):
-		var muzzle := base + hd * ((float(k) - 4.0) * 5.0) + side * 7.0
+		var muzzle := base + hd * ((float(k) - 4.0) * 5.3) + side * 7.3
 		_emit_flash(muzzle)
 		_emit_flash(muzzle)
 		_emit_muzzle_bloom(muzzle, side)
 		_emit_gun_smoke(muzzle + side * randf_range(0.0, 4.0), side)
 		_emit_gun_smoke(muzzle + side * randf_range(2.0, 6.0), side)
 	if cam != null:
-		_play_cannon(base + hd * 12.0 + side * 7.0)
-		_play_cannon(base - hd * 12.0 + side * 7.0)   # the report rolls down the ship's length
+		_play_cannon(base + hd * 12.5 + side * 7.3)
+		_play_cannon(base - hd * 12.5 + side * 7.3)   # the report rolls down the ship's length
 
 func _cylinder(radius: float, height: float) -> CylinderMesh:
 	var m := CylinderMesh.new()

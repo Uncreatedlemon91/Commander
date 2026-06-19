@@ -131,6 +131,25 @@ of two lazily-built coat-colour variants (bay / black, `_draft_horse_assets()`),
 way as the gunner assets. No team colouring is needed on a draft horse, so there's no per-
 instance colour plumbing — just the two shared materials.
 
+## Ships — resized to ride properly IN the sea, and detailed
+`_ship_node(team)` (one persistent `Node3D` per hull, ~6 on the field — free of the
+affordability keystone like the gun/flag) had the right rough scale for a small frigate/
+sloop-of-war (man = `CAP_HEIGHT` 1.7 m is the yardstick; hull was already ~42 m long) but a
+real bug: the lowest hull box spanned `y = 0` to `5`, i.e. the *entire* keel sat **above** the
+sea surface — the ship floated on top of the water like a raft, with zero draft. Fixed by
+splitting that box into a coppered underbody that actually sits **below** the waterline
+(`y = -4.2` to `0`, a dulled copper-tone material — historically accurate antifouling sheathing),
+a thin black boot-topping stripe right at `y = 0`, and the original timber bilge bridging back
+up to the main hull. Hull breadth/length and all three mast heights/sail spans were also bumped
+~8–10% for a more imposing tall-ship presence. Added detail at the beak: a carved, gilt
+figurehead, cathead beams, and a stowed anchor (shank/stock/fluke) each side; an inner jib
+alongside the existing headsail for a fuller sail plan; and a ship's boat stowed amidships on
+the weather deck. `_ship_broadside()`'s muzzle/report offsets were nudged to match the slightly
+wider hull. `_update_ships()`'s sea-following transform code (rides the Gerstner wave normal,
+sets `node.transform` fresh every frame) needed no change — it positions the hull's local origin
+at the wave surface, and the origin **is** the waterline, so the new underwater/boot/bilge split
+just works.
+
 ## Player controls
 `WASD` move · `Shift` run · `R` autorun · mouse look · `RMB` spyglass · `E` hail · `Q` courier orders ·
 `M` map · `C` camp. Self: `LMB` sabre/fire · `G` pistol · **`V` present** (muskets up) ·
