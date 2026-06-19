@@ -315,6 +315,7 @@ class Gun:
 	var limber_state: String = "deployed"   # deployed | limbering | moving | unlimbering
 	var limber_t: float = 0.0   # timer for the current limber/unlimber transition
 	var limber_group: Node3D    # the limber cart + horse team (shown only while limbered)
+	var limber_horses: Array = []   # the team's MeshInstance3D nodes, bobbed on the move
 
 # A brigade: several battalions and a battery under one commander, manoeuvring as a
 # body to 18th-century doctrine — advance in line, soften with artillery, assault a
@@ -6566,6 +6567,7 @@ func _make_gun(g: Gun) -> void:
 			horse.material_override = dmats[hi % dmats.size()]
 			horse.position = Vector3(sx3, 0, hz)       # the mesh already faces +Z, the direction of travel
 			g.limber_group.add_child(horse)
+			g.limber_horses.append(horse)
 			hi += 1
 
 # Pick a gun's target. It obeys its brigade's fire mission when one is set and in
@@ -6680,6 +6682,10 @@ func _update_guns(delta: float) -> void:
 					if g.node:
 						g.node.position = Vector3(g.pos.x, _gh(g.pos.x, g.pos.z), g.pos.z)
 						g.node.rotation.y = g.facing
+					# the team plods, not glides — each horse gets its own little trudge
+					for hi2 in range(g.limber_horses.size()):
+						var dh: MeshInstance3D = g.limber_horses[hi2]
+						dh.position.y = absf(sin(_t * 4.0 + float(hi2) * 1.7)) * 0.05
 			"unlimbering":
 				g.limber_t -= delta
 				if g.limber_t <= 0.0:
@@ -7970,12 +7976,15 @@ func _make_caisson_node(team: int) -> Node3D:
 	var dassets := _draft_horse_assets()
 	var dmesh: ArrayMesh = dassets[0]
 	var dmats: Array = dassets[1]
+	var horses: Array = []
 	for sx2 in [-0.4, 0.4]:
 		var horse := MeshInstance3D.new()
 		horse.mesh = dmesh
 		horse.material_override = dmats[(0 if sx2 < 0 else 1) % dmats.size()]
 		horse.position = Vector3(sx2, 0, 1.7)   # the mesh already faces +Z, the direction of travel
 		n.add_child(horse)
+		horses.append(horse)
+	n.set_meta("horses", horses)
 	return n
 
 func _update_caissons(delta: float) -> void:
@@ -7994,6 +8003,7 @@ func _update_caissons(delta: float) -> void:
 		var b: Batt = cs["target"]
 		var pos: Vector3 = cs["pos"]
 		var done := false
+		var trudging := false
 		match String(cs["state"]):
 			"out":
 				if b == null or b.spent or b.state == "routing":
@@ -8007,6 +8017,7 @@ func _update_caissons(delta: float) -> void:
 					else:
 						pos = pos.move_toward(Vector3(b.pos.x, 0, b.pos.z), CAISSON_SPEED * delta)
 						node.rotation.y = atan2(to.x, to.z)
+						trudging = true
 			"unload":
 				cs["t"] = float(cs["t"]) - delta
 				if float(cs["t"]) <= 0.0:
@@ -8026,8 +8037,12 @@ func _update_caissons(delta: float) -> void:
 				else:
 					pos = pos.move_toward(orig, CAISSON_SPEED * delta)
 					node.rotation.y = atan2(tb.x, tb.z)
+					trudging = true
 		cs["pos"] = pos
 		node.position = pos
+		if trudging:
+			for dh in (node.get_meta("horses", []) as Array):
+				(dh as MeshInstance3D).position.y = absf(sin(_t * 4.0 + (dh as MeshInstance3D).position.x * 1.7)) * 0.05
 		if done:
 			caissons.remove_at(i)
 		else:
@@ -9900,7 +9915,11 @@ func _render(delta: float) -> void:
 				var sbob := absf(sin(_t * 2.8 + float(c) * 1.3)) * 0.05
 				nco_mm.set_instance_transform(nco_i, Transform3D(Basis(Vector3.UP, syaw), Vector3(sw.x, CAP_HALF + sbob + _gh(sw.x, sw.z), sw.z)))
 				_cg_dress(nco_mm, nco_i, b.team, sw.distance_to(cp) > 0.1, true)
-				spontoon_mm.set_instance_transform(nco_i, Transform3D(Basis(Vector3.UP, syaw), Vector3(sw.x + right.x * 0.2, _gh(sw.x, sw.z), sw.z + right.z * 0.2)))
+				# the spontoon isn't just carried — it periodically levels and presses
+				# forward, the sergeant using it to true up a man who's fallen out of line
+				var sjab := pow(maxf(0.0, sin(_t * 1.1 + float(c) * 2.3 + idn)), 8.0)
+				var sspos := Vector3(sw.x + right.x * 0.2 + fwd.x * sjab * 0.5, _gh(sw.x, sw.z), sw.z + right.z * 0.2 + fwd.z * sjab * 0.5)
+				spontoon_mm.set_instance_transform(nco_i, Transform3D(Basis(Vector3.UP, syaw) * Basis(Vector3.RIGHT, sjab * 1.1), sspos))
 				nco_i += 1
 		# ...and file-closers walking the rear, herding stragglers back into their files
 		var rearY := -maxy - 0.9
@@ -9920,7 +9939,10 @@ func _render(delta: float) -> void:
 			var rbob := absf(sin(_t * 2.8 + float(fc))) * 0.05
 			nco_mm.set_instance_transform(nco_i, Transform3D(Basis(Vector3.UP, ryaw), Vector3(rw.x, CAP_HALF + rbob + _gh(rw.x, rw.z), rw.z)))
 			_cg_dress(nco_mm, nco_i, b.team, rw.distance_to(rp) > 0.1, true)
-			spontoon_mm.set_instance_transform(nco_i, Transform3D(Basis(Vector3.UP, ryaw), Vector3(rw.x + right.x * 0.2, _gh(rw.x, rw.z), rw.z + right.z * 0.2)))
+			# the same press-forward gesture, this time prodding a straggler back into his file
+			var rjab := pow(maxf(0.0, sin(_t * 1.3 + float(fc) * 2.7 + idn)), 8.0)
+			var rspos := Vector3(rw.x + right.x * 0.2 + fwd.x * rjab * 0.5, _gh(rw.x, rw.z), rw.z + right.z * 0.2 + fwd.z * rjab * 0.5)
+			spontoon_mm.set_instance_transform(nco_i, Transform3D(Basis(Vector3.UP, ryaw) * Basis(Vector3.RIGHT, rjab * 1.1), rspos))
 			nco_i += 1
 	for team in [0, 1]:
 		var mm: MultiMesh = team_mm[team]
@@ -9962,7 +9984,8 @@ func _render_commanders() -> void:
 		var pos := _brigade_center(br) - bf * 18.0    # rides behind the line centre
 		var s := MOUNT_SCALE_COMMANDER
 		var basis := Basis(Vector3.UP, yaw).scaled(Vector3(s, s, s))
-		var seat := Vector3(pos.x, _gh(pos.x, pos.z), pos.z)
+		var cbob := absf(sin(_t * 4.5 + float(i))) * 0.05   # the charger's own gait, not a statue
+		var seat := Vector3(pos.x, _gh(pos.x, pos.z) + cbob, pos.z)
 		cmd_horse_mm.set_instance_transform(i, Transform3D(basis, seat))
 		cmd_rider_mm.set_instance_transform(i, Transform3D(basis, seat))
 		cmd_horse_mm.set_instance_color(i, team_color(br.team))   # shabraque: the army's colour
@@ -9980,7 +10003,8 @@ func _render_commanders() -> void:
 		var gyaw: float = 0.0 if dv.team == 0 else PI
 		var gs := MOUNT_SCALE_GENERAL
 		var gbasis := Basis(Vector3.UP, gyaw).scaled(Vector3(gs, gs, gs))
-		var gseat := Vector3(gp.x, _gh(gp.x, gp.z), gp.z)
+		var gbob := absf(sin(_t * 4.0 + float(gi))) * 0.06   # the heaviest charger, the slowest gait
+		var gseat := Vector3(gp.x, _gh(gp.x, gp.z) + gbob, gp.z)
 		gen_horse_mm.set_instance_transform(gi, Transform3D(gbasis, gseat))
 		gen_rider_mm.set_instance_transform(gi, Transform3D(gbasis, gseat))
 		gen_horse_mm.set_instance_color(gi, team_color(dv.team))   # shabraque: the army's colour
@@ -9998,7 +10022,8 @@ func _render_commanders() -> void:
 		var cfwd := Vector3(sin(cyaw), 0, cos(cyaw))
 		var cpos: Vector3 = b.pos - cfwd * 13.0   # rides behind his battalion's colours
 		var cbasis := Basis(Vector3.UP, cyaw)
-		var cseat := Vector3(cpos.x, _gh(cpos.x, cpos.z), cpos.z)
+		var clbob := absf(sin(_t * 5.0 + float(ci))) * 0.05   # he rides, he doesn't hover
+		var cseat := Vector3(cpos.x, _gh(cpos.x, cpos.z) + clbob, cpos.z)
 		colonel_horse_mm.set_instance_transform(ci, Transform3D(cbasis, cseat))
 		colonel_rider_mm.set_instance_transform(ci, Transform3D(cbasis, cseat))
 		colonel_horse_mm.set_instance_color(ci, team_color(b.team))   # shabraque: the army's colour
@@ -10034,8 +10059,12 @@ func _place_flag(b: Batt, footpos: Vector3, yaw: float) -> void:
 	var lean := (1.0 - m) * 0.6 + b.flinch * 0.3        # pole tips back as morale falls
 	b.flag.rotation = Vector3(lean, yaw, 0.0)
 	if b.flag_cloth:
-		var wave := lerpf(0.3, 1.1, 1.0 - m)            # frantic flapping when shaken
-		b.flag_cloth.rotation.y = sin(_t * (3.0 + (1.0 - m) * 6.0) + float(b.team)) * wave
+		# the colours actually answer the wind, not just morale: a stiff breeze streams
+		# them out faster and further, and a crosswind reads as a steady push to one side
+		var wspd := _wind.length()
+		var crosswind := sin(atan2(_wind.x, _wind.z) - yaw) * wspd
+		var wave := lerpf(0.3, 1.1, 1.0 - m) + wspd * 0.4   # frantic flapping when shaken or gusty
+		b.flag_cloth.rotation.y = sin(_t * (3.0 + (1.0 - m) * 6.0 + wspd * 1.2) + float(b.team)) * wave + crosswind * 0.5
 
 func team_color(team: int) -> Color:
 	return ARMY_BLUE if team == 0 else ARMY_RED
