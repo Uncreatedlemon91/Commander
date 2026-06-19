@@ -8805,7 +8805,7 @@ func _render(delta: float) -> void:
 				fgun.set_instance_transform(fi6, _zero_xf())
 				fi6 += 1
 			idx[b.team] = fi6
-			_place_flag(b, b.pos, b.facing)   # the colours still mark him on the horizon
+			_place_flag(b, Vector3(b.pos.x, _gh(b.pos.x, b.pos.z), b.pos.z), b.facing)   # the colours still mark him on the horizon
 			continue
 		var run := 1.0
 		if b.state == "routing":
@@ -8926,7 +8926,7 @@ func _render(delta: float) -> void:
 				var bbob := absf(sin(_t * 2.4 + idn + 1.0)) * 0.04
 				bearer_mm.set_instance_transform(bearer_i, Transform3D(Basis(Vector3.UP, byaw), Vector3(bw.x, CAP_HALF + bbob + _gh(bw.x, bw.z), bw.z)))
 				bearer_i += 1
-			_place_flag(b, Vector3(bw.x, 0, bw.z), fyaw)   # lays low when the colours are down
+			_place_flag(b, Vector3(bw.x, _gh(bw.x, bw.z), bw.z), fyaw)   # lays low when the colours are down
 			# the COLOUR PARTY: a guard of two with half-pikes, posted at the colours
 			for esc in range(2):
 				if nco_i >= nco_mm.instance_count:
@@ -10433,6 +10433,11 @@ func _make_emitter(life: float, amount: int, mat: Material, quad: Vector2, kind:
 	p.emitting = false
 	p.local_coords = false
 	p.visibility_aabb = AABB(Vector3(-1500, -50, -1500), Vector3(3000, 300, 3000))
+	# sort back-to-front by depth, not emission index — without this, alpha-blended
+	# quads in a dense, overlapping bank (a big smoke cloud especially) draw in the
+	# wrong order from most angles, so the bank looks solid from the one direction
+	# that happens to match index order and patchy/half-invisible from any other
+	p.draw_order = GPUParticles3D.DRAW_ORDER_VIEW_DEPTH
 	var qm := QuadMesh.new()
 	qm.size = quad
 	qm.material = mat
