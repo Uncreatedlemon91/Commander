@@ -15,6 +15,8 @@ const CAP_RADIUS := 0.22
 const CAP_HEIGHT := 1.7           # a properly-proportioned man (with shako ~1.8)
 const CAP_HALF := CAP_HEIGHT * 0.5
 const MEN := 700                  # men per battalion, drawn 1:1
+const MILITIA_START_MEN := 60     # the founded militia steps off small, and grows by recruiting
+const MILITIA_MAX_MEN := 900      # a recruited militia caps out around one full battalion's strength
 # --- the full order of battle: battalion -> brigade -> division -> corps -> army ---
 const BATTS_PER_BRIGADE := 5      # 3,500 men to a brigade
 const BRIGADES_PER_DIVISION := 5  # 17,500 men to a division
@@ -121,6 +123,8 @@ const FATIGUE_FIRE := 0.9         # standing under arms, loading and firing
 const REST_RATE := 1.7            # weariness shed/sec when standing easy out of danger
 const CAMP_REST_RATE := 7.0       # ...and far faster once properly encamped
 const TRAIN_RATE := 0.7           # skill points/sec gained drilling a chosen skill in camp
+const PRESTIGE_TRAIN_RATE := 0.12 # prestige/sec earned by an independent battalion drilling in camp
+const PRESTIGE_PATROL_RATE := 0.015  # prestige per yard earned patrolling the country, clear of the enemy
 const CAMP_SAFE_RANGE := 240.0    # no enemy may stand within this to make camp
 const XP_PER_BLOOD := 45.0        # enemies felled before the men's fighting skills harden a notch
 # fire discipline: a massed volley SHOCKS far beyond its casualties; independent
@@ -155,7 +159,7 @@ const SHAKE_MAX := 0.55
 const COURIER_SPEED := 9.0        # an aide's canter (m/s)
 const COURIER_MAX := 16
 const AUDIO_POOL := 128           # the whole front is audible now — more voices at once
-const MAX_PER_TEAM := BATT_PER_TEAM * MEN
+const MAX_PER_TEAM := BATT_PER_TEAM * MEN + MILITIA_MAX_MEN   # headroom for an independent militia on top of the standing OOB
 const CORPSE_MAX := 24000          # per team, rolling (the oldest dead are re-used)
 # --- artillery (the great killer of the age) ---
 const BATTERIES_PER_TEAM := 8      # two batteries to a division, massed not strung out
@@ -184,6 +188,7 @@ enum Order { IDLE, FOLLOW }
 class Batt:
 	var team: int
 	var is_player: bool = false
+	var independent: bool = false   # founded militia: never joins the brigade/division/corps OOB
 	var pos: Vector3
 	var facing: float = 0.0
 	var formation: String = "line"
@@ -525,6 +530,7 @@ var _off_respawn := 0.0
 # under your command (or your own hand), -1 for every man of yours lost. Later the
 # currency for upgrades: items, skills, better officers.
 var prestige := 0
+var _prestige_acc := 0.0   # fractional prestige (e.g. from drilling), banked until it rounds to a point
 var _player_figs_prev := -1        # last known strength, for counting losses centrally
 
 # --- battle flow: deployment, army collapse, victory & the butcher's bill ---
@@ -722,6 +728,9 @@ var _roster_list: VBoxContainer    # the soldier rows for the open company
 var _roster_detail: VBoxContainer  # the selected soldier's card + action buttons
 var _camp_btn_rest: Button
 var _camp_btn_drill: Button
+var _camp_btn_recruit: Button   # an independent militia's hand: take on men at a friendly town
+var _camp_btn_hire: Button      # commission a Lieutenant over a company that lacks one
+var _camp_btn_equip: Button     # spend prestige on better muskets and kit
 var _scoped := false
 var _scope_amt := 0.0
 var _scope_rect: TextureRect
@@ -2603,6 +2612,18 @@ func _build_camp(cl: CanvasLayer) -> void:
 	bsup.text = "Resupply"
 	bsup.pressed.connect(_camp_resupply)
 	bar.add_child(bsup)
+	_camp_btn_recruit = Button.new()
+	_camp_btn_recruit.text = "Recruit"
+	_camp_btn_recruit.pressed.connect(_camp_recruit)
+	bar.add_child(_camp_btn_recruit)
+	_camp_btn_hire = Button.new()
+	_camp_btn_hire.text = "Hire Officer"
+	_camp_btn_hire.pressed.connect(_camp_hire_officer)
+	bar.add_child(_camp_btn_hire)
+	_camp_btn_equip = Button.new()
+	_camp_btn_equip.text = "Buy Muskets"
+	_camp_btn_equip.pressed.connect(_camp_equip)
+	bar.add_child(_camp_btn_equip)
 	var bins := Button.new()
 	bins.text = "Inspect Companies ›"
 	bins.pressed.connect(_open_roster)
@@ -2659,6 +2680,8 @@ func _refresh_camp() -> void:
 	var t := "[center][b][color=#ffd773]CAMP & COMMAND[/color][/b]%s[/center]\n" % seat
 	t += "[b][color=#ffe9a8]%s[/color][/b]   [color=#9fb0c8](%s)[/color]\n" % [_unit_name(b), b.quality]
 	t += "[color=#cdd6e6]%d / %d effectives · %d companies · %d rounds a man[/color]\n" % [b.figs.size(), b.start_men, b.companies, int(round(b.ammo))]
+	if b.independent:
+		t += "[color=#ffe9a8]Prestige: %d[/color]\n" % prestige
 	t += dash
 	t += "[b][color=#bcd6ff]SKILLS[/color][/b]\n"
 	for key in SKILL_KEYS:
@@ -2686,6 +2709,12 @@ func _refresh_camp() -> void:
 		_camp_btn_rest.text = "Break Camp" if b.encamped else "Make Camp"
 	if _camp_btn_drill != null:
 		_camp_btn_drill.text = "Drill: %s" % tw
+	if _camp_btn_recruit != null:
+		_camp_btn_recruit.visible = b.independent
+	if _camp_btn_hire != null:
+		_camp_btn_hire.visible = b.independent
+	if _camp_btn_equip != null:
+		_camp_btn_equip.visible = b.independent
 
 # One line per company: its strength and the senior man standing with it.
 func _company_lines(b: Batt) -> String:
@@ -3093,6 +3122,118 @@ func _camp_resupply() -> void:
 	prestige -= cost
 	player.ammo = START_ROUNDS
 	_send_player_despatch("[color=#9fe0a0]Cartridge boxes filled at the depot[/color] — %d prestige to the quartermaster." % cost, {})
+	_refresh_camp()
+
+# Recruiting (Phase 1): an independent militia takes on men only at a town in its own
+# country — not a fort or depot, and not enemy ground. The price rises as the
+# battalion grows, so a small militia stays a real choice, not a free snowball.
+const RECRUIT_BATCH := 10           # men taken on at a time
+const RECRUIT_COST_PER_MAN := 3     # prestige per recruit, before the size surcharge
+func _camp_recruit() -> void:
+	if player == null or not player.independent:
+		return
+	var town := _player_town()
+	if town.is_empty() or town.has("kind"):
+		_send_player_despatch("[color=#ff9a8a]Recruiting needs a town, not a garrison.[/color]", {})
+		return
+	if player.figs.size() >= MILITIA_MAX_MEN:
+		_send_player_despatch("[color=#9fb0c8]The battalion is at full strength — there's no more room in the ranks.[/color]", {})
+		return
+	var n := mini(RECRUIT_BATCH, MILITIA_MAX_MEN - player.figs.size())
+	var surcharge := 1.0 + float(player.figs.size()) / 200.0
+	var cost := int(ceil(float(n) * float(RECRUIT_COST_PER_MAN) * surcharge))
+	if prestige < cost:
+		_send_player_despatch("[color=#ff9a8a]Recruiting %d more would cost %d prestige — you have %d.[/color]" % [n, cost, prestige], {})
+		return
+	prestige -= cost
+	_recruit_men(player, n)
+	_send_player_despatch("[color=#9fe0a0]%d men enlist at %s[/color] — %d prestige spent." % [n, String(town.get("name", "the town")), cost], {})
+	_refresh_camp()
+
+# Fold n green recruits into a battalion: new figures fall in behind the colours and
+# walk up into their slot, new named men join the roster well below the veterans'
+# polish, and the living profile is re-derived so the new hands drag the average down
+# a touch — exactly as drilling and blooding will bring them up over time.
+func _recruit_men(b: Batt, n: int) -> void:
+	var fwd := Vector3(sin(b.facing), 0, cos(b.facing))
+	for i in range(n):
+		var w := b.pos - fwd * 6.0
+		b.figs.append({ "slot": Vector2.ZERO, "wpos": Vector3(w.x, 0, w.z), "ph": randf() * TAU,
+			"spd": randf_range(0.85, 1.18), "reload": randf_range(0.0, RELOAD_TIME),
+			"company": 0, "face": 0.0,
+			"bw": randf_range(0.92, 1.07), "bh": randf_range(0.90, 1.10),
+			"wear": randf_range(0.82, 1.07), "march": 0.0,
+			"flinch": 0.0, "nerve": randf_range(0.0, 1.0) })
+	_reslot(b)
+	if not b.roster.is_empty():
+		for i in range(n):
+			var coy := b.roster.size() % b.companies
+			var man := { "name": _rand_name(), "rank": "Pte.", "coy": coy,
+				"xp": 0.0, "kills": 0, "alive": true, "focus": "" }
+			for key in SKILL_KEYS:
+				man[key] = clampf(_sk(b, key) - 14.0 + randf_range(-8.0, 8.0), 6.0, 90.0)
+			b.roster.append(man)
+		_reprofile(b)
+	b.start_men = maxi(b.start_men, b.figs.size())
+
+# Hire an officer (Phase 1): commission a Lieutenant over the first company that lacks
+# one, raised from its most promising NCO/man. A separate mechanic from the NCO ladder
+# (promote/demote) — this is a commission, bought with prestige, not earned in the ranks.
+const HIRE_OFFICER_COST := 80
+func _camp_hire_officer() -> void:
+	if player == null or not player.independent or player.roster.is_empty():
+		return
+	var b := player
+	var has_off := {}
+	for m in b.roster:
+		if m["alive"] and String(m["rank"]) in ["Lt.", "Capt."]:
+			has_off[int(m["coy"])] = true
+	var coy := -1
+	for c in range(b.companies):
+		if not has_off.has(c):
+			coy = c
+			break
+	if coy == -1:
+		_send_player_despatch("[color=#9fb0c8]Every company already has its officer.[/color]", {})
+		return
+	if prestige < HIRE_OFFICER_COST:
+		_send_player_despatch("[color=#ff9a8a]Commissioning an officer costs %d prestige — you have %d.[/color]" % [HIRE_OFFICER_COST, prestige], {})
+		return
+	var pool: Array = []
+	for m in b.roster:
+		if m["alive"] and int(m["coy"]) == coy and String(m["rank"]) != "Capt.":
+			pool.append(m)
+	if pool.is_empty():
+		return
+	var man = _best_by_discipline(pool)
+	prestige -= HIRE_OFFICER_COST
+	man["rank"] = "Lt."
+	for key in SKILL_KEYS:
+		man[key] = clampf(float(man[key]) + 9.0, 6.0, 99.0)
+	_send_player_despatch("[color=#9fe0a0]%s commissioned Lieutenant of No. %d Company.[/color]" % [man["name"], coy + 1], {})
+	_refresh_camp()
+
+# Buy gear (Phase 1): better muskets and kit from the town armourer, a flat prestige
+# spend that lifts marksmanship and loading a notch for every man, veteran and recruit
+# alike — instant, unlike drill, but with no ceiling-breaking effect on its own.
+const EQUIP_COST := 60
+const EQUIP_AIM_GAIN := 6.0
+func _camp_equip() -> void:
+	if player == null or not player.independent:
+		return
+	if prestige < EQUIP_COST:
+		_send_player_despatch("[color=#ff9a8a]Better muskets cost %d prestige — you have %d.[/color]" % [EQUIP_COST, prestige], {})
+		return
+	prestige -= EQUIP_COST
+	var b := player
+	b.skill["aim"] = clampf(_sk(b, "aim") + EQUIP_AIM_GAIN, 6.0, 99.0)
+	b.skill["reload"] = clampf(_sk(b, "reload") + EQUIP_AIM_GAIN * 0.6, 6.0, 99.0)
+	b.exp_mul = _reload_factor(b)
+	for m in b.roster:
+		if m["alive"]:
+			m["aim"] = clampf(float(m["aim"]) + EQUIP_AIM_GAIN, 6.0, 99.0)
+			m["reload"] = clampf(float(m["reload"]) + EQUIP_AIM_GAIN * 0.6, 6.0, 99.0)
+	_send_player_despatch("[color=#9fe0a0]New muskets issued from store[/color] — %d prestige spent." % EQUIP_COST, {})
 	_refresh_camp()
 
 # ---------------------------------------------------------------- terrain & scenery
@@ -4889,6 +5030,10 @@ func _spawn_armies() -> void:
 	var humans: Array = [GameConfig.local_slot]
 	if GameConfig.mode == "host":
 		humans = Net.human_slots()
+	# a founded militia rides INDEPENDENT of the order of battle (see _spawn_independent_militia) —
+	# no slot in the standard 100-per-team OOB is the player's, so none should be marked human/player
+	if GameConfig.has_militia:
+		humans = []
 	for team in [0, 1]:
 		var z := -360.0 if team == 0 else 360.0   # deploy further apart: a deeper field, a real march
 		var face := 0.0 if team == 0 else PI    # team 0 faces +Z, team 1 faces -Z
@@ -4918,14 +5063,14 @@ func _spawn_armies() -> void:
 			var fpal: Array = FACINGS_0 if team == 0 else FACINGS_1
 			var fc: Color = fpal[brig % fpal.size()]
 			var coat_idx := 1 if kb == BATTS_PER_BRIGADE - 1 else 0
-			b.inst_col = Color(fc.r, fc.g, fc.b, _dress_packed(coat_idx, gidx, gidx == GameConfig.local_slot))
+			b.inst_col = Color(fc.r, fc.g, fc.b, _dress_packed(coat_idx, gidx, gidx == GameConfig.local_slot and not GameConfig.has_militia))
 			b.spawn = b.pos
 			b.facing = face
 			b.formation = "column"               # advance in column, deploy on contact
 			b.off_facing = face
 			b.off_pos = b.pos + Vector3(sin(face), 0, cos(face)) * 14.0
 			b.human = gidx in humans
-			b.is_player = (gidx == GameConfig.local_slot)
+			b.is_player = (gidx == GameConfig.local_slot) and not GameConfig.has_militia
 			b.companies = 6 if team == 0 else 10  # French 6-coy, Allied 10-coy
 			b.ammo = START_ROUNDS
 			b.last_pos = b.pos
@@ -4946,15 +5091,10 @@ func _spawn_armies() -> void:
 				b.ammo = u.ammo
 				b.morale = u.morale
 				_apply_seam_skills(b, u)
-				b.inst_col = Color(u.facing_col.r, u.facing_col.g, u.facing_col.b, _dress_packed(int(u.coat_idx), gidx, gidx == GameConfig.local_slot))
+				b.inst_col = Color(u.facing_col.r, u.facing_col.g, u.facing_col.b, _dress_packed(int(u.coat_idx), gidx, gidx == GameConfig.local_slot and not GameConfig.has_militia))
 				while b.figs.size() > u.men and b.figs.size() > 0:
 					b.figs.pop_back()          # losses are forever
 			b.start_men = b.figs.size()
-			if b.is_player and GameConfig.has_militia:
-				# the militia you raised on the intro screen rides as your own battalion
-				b.rname = "%s (yours)" % GameConfig.militia_name
-				var mf: Color = GameConfig.militia_facing
-				b.inst_col = Color(mf.r, mf.g, mf.b, b.inst_col.a)
 			if b.is_player:
 				_build_roster(b)               # name the men under your hand
 			_start_strength[team] += b.figs.size()
@@ -4969,8 +5109,62 @@ func _spawn_armies() -> void:
 				off_vis = face
 				_cam_yaw = face + PI                                       # look toward the enemy
 				_reslot(player)
-	if player == null:
+	if GameConfig.has_militia:
+		_spawn_independent_militia()
+	elif player == null:
 		player = battalions[clampi(GameConfig.local_slot, 0, battalions.size() - 1)]
+
+# THE FOUNDED MILITIA (Phase 0): the player's own battalion, raised on the intro
+# screen, never enters the brigade/division/corps order of battle — it rides as an
+# extra unit outside the fixed 100-per-team OOB, so the AI commanders can request it
+# (a courier, not a command) but never absorb it. See _assign_brigades, which skips
+# `independent` battalions when chunking each team into brigades.
+func _spawn_independent_militia() -> void:
+	var team := 0   # rides with the Crown until a side-choice exists at founding
+	var face := 0.0 if team == 0 else PI
+	var spawn_pos := Vector3(_sector_x(0), 0, -360.0)
+	for t in field_towns:
+		if int(t.get("owner", -1)) == team:
+			spawn_pos = (t["pos"] as Vector3) + Vector3(60.0, 0, 0)
+			break
+	var gidx: int = BATT_PER_TEAM * 2   # synthetic index, outside the standard OOB
+	var b := Batt.new()
+	b.team = team
+	b.idx = gidx
+	b.independent = true
+	b.pos = spawn_pos
+	b.spawn = b.pos
+	b.facing = face
+	b.formation = "line"
+	b.off_facing = face
+	b.off_pos = b.pos + Vector3(sin(face), 0, cos(face)) * 14.0
+	b.human = true
+	b.is_player = true
+	b.companies = 6 if team == 0 else 10
+	b.ammo = START_ROUNDS
+	b.last_pos = b.pos
+	var mp := AudioStreamPlayer3D.new()        # the drummer's marching cadence
+	mp.max_distance = 700.0
+	mp.unit_size = 14.0
+	mp.volume_db = 4.0
+	add_child(mp)
+	b.march_player = mp
+	_fill_figs(b, MILITIA_START_MEN)           # a small band, not a full battalion
+	_assign_battalion_skills(b)
+	b.rname = "%s (yours)" % GameConfig.militia_name
+	var mf: Color = GameConfig.militia_facing
+	b.inst_col = Color(mf.r, mf.g, mf.b, _dress_packed(0, gidx, true))
+	b.start_men = b.figs.size()
+	_build_roster(b)                           # name the men under your hand
+	_start_strength[team] += b.figs.size()
+	_make_flag(b, team)
+	battalions.append(b)
+	player = b
+	off_pos = b.pos - Vector3(sin(face), 0, cos(face)) * 8.0   # just behind your line
+	off_facing = face
+	off_vis = face
+	_cam_yaw = face + PI                                       # look toward the enemy
+	_reslot(player)
 
 # INFLATION (Phase 2): spawn exactly the battalions the campaign engagement
 # involves, each carrying its real history. Positions come authored from the
@@ -5061,11 +5255,11 @@ func _make_flag(b: Batt, team: int) -> void:
 	b.flag_cloth = cloth
 	b.flag.visible = false
 
-func _fill_figs(b: Batt) -> void:
+func _fill_figs(b: Batt, n: int = MEN) -> void:
 	b.figs.clear()
 	var fwd := Vector3(sin(b.facing), 0, cos(b.facing))
 	var right := Vector3(fwd.z, 0, -fwd.x)
-	for e in _layout(MEN, b.formation, b.companies):
+	for e in _layout(n, b.formation, b.companies):
 		var slot: Vector2 = e["p"]
 		var w := b.pos + right * slot.x + fwd * slot.y
 		# every man is an individual: his own build, the wear on his coat, his nerve
@@ -6516,6 +6710,13 @@ func _update_battalion_meta(b: Batt, delta: float) -> void:
 	elif b.has_target:
 		drain = FATIGUE_FIRE
 	var safe := b.melee_foe == null and not b.charging and b.state == "steady" and not b.has_target
+	# PATROLLING: an independent militia earns its keep just by riding the country clear
+	# of the enemy — no camp, no drill, just showing the flag and watching the roads.
+	if b.independent and b.is_player and not b.encamped and safe and moved > 0.02:
+		_prestige_acc += moved * PRESTIGE_PATROL_RATE
+		while _prestige_acc >= 1.0:
+			_prestige_acc -= 1.0
+			prestige += 1
 	if b.encamped and _camp_safe(b):
 		b.fatigue = maxf(0.0, b.fatigue - CAMP_REST_RATE * delta)
 		b.morale = minf(100.0, b.morale + CAMP_REST_RATE * 0.5 * delta)
@@ -6552,6 +6753,11 @@ func _train_tick(b: Batt, delta: float) -> void:
 			b.skill[b.train_skill] = minf(95.0, cur + TRAIN_RATE * delta)
 			if b.train_skill == "reload":
 				b.exp_mul = _reload_factor(b)
+			if b.independent and b.is_player:
+				_prestige_acc += PRESTIGE_TRAIN_RATE * delta   # drilling your own men earns standing
+				while _prestige_acc >= 1.0:
+					_prestige_acc -= 1.0
+					prestige += 1
 	if b.roster.is_empty():
 		return
 	var bump := TRAIN_RATE * delta * 1.05
@@ -7347,7 +7553,7 @@ func _assign_brigades() -> void:
 	for team in [0, 1]:
 		var mine: Array = []
 		for b in battalions:
-			if b.team == team:
+			if b.team == team and not b.independent:
 				mine.append(b)
 		var nbri: int = int(ceil(float(mine.size()) / float(BATTS_PER_BRIGADE)))
 		for bri in range(nbri):
@@ -10018,6 +10224,12 @@ func _unhandled_input(event: InputEvent) -> void:
 					_camp_resupply()
 				KEY_V:
 					_open_roster()
+				KEY_N:
+					_camp_recruit()
+				KEY_H:
+					_camp_hire_officer()
+				KEY_M:
+					_camp_equip()
 			return
 		match event.keycode:
 			KEY_ENTER:

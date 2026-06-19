@@ -218,7 +218,8 @@ func _take_the_field() -> void:
 	GameConfig.militia_pants = _ci_pants
 	GameConfig.militia_officers = _ci_officers.duplicate(true)
 	# ONE SCENE: the campaign rides straight into the tactical province (no world.tscn
-	# scene-swap). You command a central battalion of the Crown's line.
+	# scene-swap). Your militia rides independent of the Crown's order of battle —
+	# see _spawn_independent_militia() in game.gd.
 	GameConfig.mode = "single"
 	GameConfig.match_seed = randi() | 1
 	GameConfig.local_slot = 52
