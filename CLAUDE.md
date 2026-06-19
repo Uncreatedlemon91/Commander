@@ -163,6 +163,27 @@ through can already see which two towns are the navy's future home before any sp
 exists. Actually designing and launching ships from these two points (and wiring losing one to
 the war, presumably) is future work; this pass only stakes out *where*.
 
+## Province-wide forests — the biggest visible gap toward the colonial-America vision
+The user's vision is a colonial-North-America campaign of "large forests, plains, farmsteads and
+rolling hills," loosely evoking the US East Coast — taken as inspiration, not a literal map trace.
+Until now the only trees were `_build_forests()`'s small battle-deployment clusters (a few clumps
+near the firing lines, built solely for the non-province case) — the living-world province itself
+had **zero** woods, despite a misleading comment claiming "host uses the province's own woods &
+fields." `_build_field_forests()` (called right after `_build_homesteads()`/`_build_farmland()` in
+the init sequence, same `if _inflated or hosted: return` guard and `GameConfig.match_seed`-seeded
+RNG convention) fills that gap: it scatters ~26 large forest "stands" (radius 350–950) across the
+full province bounding box, each a dense disc of trees, with stand-level *and* per-tree avoidance
+of towns, garrison sites, roads (`_on_road`) and the river (`_in_river`) — reusing those existing
+helpers rather than duplicating geometry-distance code. Trees come in two variants sharing one
+trunk mesh: the existing broadleaf canopy (a sphere, same palette as the battle-scale woods) and a
+new pine/conifer (a cone — `CylinderMesh` with `top_radius = 0`). The pine fraction rises toward
+the coast (`lerpf(0.12, 0.42, coast_t)`) as a deliberate, lightweight nod to the real Atlantic
+seaboard's run from coastal pine barrens to inland hardwood forest — evocative biome variation,
+not historical reproduction. Every per-stand MultiMesh is pre-sized to the worst-case tree count
+and built through the existing `_make_scenery_mm()` (zero-scale `_zero_xf()` default for any slot
+left unused after road/river skips), so no exact count needs to be tracked ahead of time — the
+same trick `_build_homesteads()`/`_build_farmland()` already rely on.
+
 ## Player controls
 `WASD` move · `Shift` run · `R` autorun · mouse look · `RMB` spyglass · `E` hail · `Q` courier orders ·
 `M` map · `C` camp. Self: `LMB` sabre/fire · `G` pistol · **`V` present** (muskets up) ·

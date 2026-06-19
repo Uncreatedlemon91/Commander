@@ -761,6 +761,7 @@ func _ready() -> void:
 	_build_province_sites()         # forts & depots: a garrison home per brigade, plus roads
 	_build_homesteads()             # farmsteads, fields, fences and stock across the country
 	_build_farmland()               # crop fields in varied colours, hedgerows along roads & fields
+	_build_field_forests()          # province-wide forest stands, pine-biased toward the coast
 	_build_officer()
 	_build_wounded_layer()
 	_spawn_armies()
@@ -3709,6 +3710,83 @@ func _build_farmland() -> void:
 		var pt: Vector3 = bushes[i]
 		var sx := rng.randf_range(1.6, 2.6); var sy := rng.randf_range(1.6, 2.4)
 		hedge.set_instance_transform(i, Transform3D(Basis(Vector3.UP, rng.randf_range(0, TAU)).scaled(Vector3(sx, sy, sx)), Vector3(pt.x, _gh(pt.x, pt.z) + sy * 0.5, pt.z)))
+
+# The province's woods: big randomly-placed forest "stands" scattered across the whole
+# map (not just the battle clutter near the firing lines — see _build_forests for that),
+# each a dense disc of trees avoiding the towns, garrison sites, roads and the river.
+# Mixes broadleaf (trunk + round canopy, same palette as the battle-scale woods) with a
+# pine/conifer variant (a simple cone), the pine fraction rising toward the coast — a nod
+# to the real Atlantic seaboard's run from pine barrens at the shore to hardwood inland.
+func _build_field_forests() -> void:
+	if _inflated or hosted:
+		return
+	var rng := RandomNumberGenerator.new()
+	rng.seed = (GameConfig.match_seed if GameConfig.match_seed != 0 else 1) ^ 0x6a09e667
+	var stand_defs: Array = []   # [center, radius]
+	var wanted := 26
+	var tries := 0
+	while stand_defs.size() < wanted and tries < wanted * 20:
+		tries += 1
+		var x := rng.randf_range(-8600.0, COAST_X - 280.0)
+		var z := rng.randf_range(-8400.0, 8400.0)
+		var p := Vector3(x, 0, z)
+		var r := rng.randf_range(350.0, 950.0)
+		var ok := true
+		for t in field_towns:
+			if p.distance_to(t["pos"]) < r * 0.4 + 700.0 + float(t["size"]) * 150.0:
+				ok = false; break
+		if ok:
+			for s in field_sites:
+				if p.distance_to(s["pos"]) < r * 0.4 + 420.0:
+					ok = false; break
+		if not ok:
+			continue
+		stand_defs.append([p, r])
+	# size every shared MultiMesh to the worst case (every stand at full budget); unused
+	# slots stay invisible via _zero_xf, same trick _make_scenery_mm already relies on
+	var stand_counts: Array = []
+	var total := 0
+	for d in stand_defs:
+		var r: float = d[1]
+		var n := int(r * r / 1800.0)
+		stand_counts.append(n)
+		total += n
+	var trunk_mm := _make_scenery_mm(_cylinder(0.32, 4.0), Color(0.26, 0.18, 0.10), total)
+	var leaf_mesh := SphereMesh.new()
+	leaf_mesh.radius = 2.6
+	leaf_mesh.height = 5.6
+	leaf_mesh.radial_segments = 12
+	leaf_mesh.rings = 7
+	var broadleaf_mm := _make_scenery_mm(leaf_mesh, Color(0.18, 0.30, 0.15), total)
+	var cone_mesh := CylinderMesh.new()
+	cone_mesh.top_radius = 0.0
+	cone_mesh.bottom_radius = 2.0
+	cone_mesh.height = 7.0
+	cone_mesh.radial_segments = 8
+	var pine_mm := _make_scenery_mm(cone_mesh, Color(0.10, 0.22, 0.14), total)
+	var ti := 0
+	for i in range(stand_defs.size()):
+		var c: Vector3 = stand_defs[i][0]
+		var r: float = stand_defs[i][1]
+		var n: int = stand_counts[i]
+		var coast_t := clampf((c.x + 8600.0) / (COAST_X - 280.0 + 8600.0), 0.0, 1.0)
+		var pine_chance := lerpf(0.12, 0.42, coast_t)
+		for j in range(n):
+			var a := rng.randf() * TAU
+			var rr := sqrt(rng.randf()) * r
+			var p := c + Vector3(cos(a) * rr, 0, sin(a) * rr)
+			if _on_road(p) or (not river_pts.is_empty() and _in_river(p)):
+				continue
+			var s := rng.randf_range(0.8, 1.7)
+			var yaw := rng.randf() * TAU
+			var b := Basis(Vector3.UP, yaw).scaled(Vector3(s, s, s))
+			var tgh := _gh(p.x, p.z)
+			trunk_mm.set_instance_transform(ti, Transform3D(b, Vector3(p.x, 2.0 * s + tgh, p.z)))
+			if rng.randf() < pine_chance:
+				pine_mm.set_instance_transform(ti, Transform3D(b, Vector3(p.x, 3.5 * s + tgh, p.z)))
+			else:
+				broadleaf_mm.set_instance_transform(ti, Transform3D(b, Vector3(p.x, 5.6 * s + tgh, p.z)))
+			ti += 1
 
 # Lay out the strategic furniture of the province: the towns (already built) plus a
 # spread of FORTS and DEPOTS across each side's territory — a distinct garrison home
