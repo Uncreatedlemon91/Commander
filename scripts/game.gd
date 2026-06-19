@@ -425,6 +425,10 @@ var _shots: Array = []                    # flying roundshot: {active,pos,vel,fr
 var shot_mm: MultiMesh
 var scar_mm: MultiMesh                     # furrows gouged in the ground by roundshot
 var scar_idx := 0
+var _gunner_mesh_cache: ArrayMesh          # shared detailed gun-crew figure (built once, lazily)
+var _gunner_mats: Array = [null, null]     # per-team gunner ShaderMaterial, built once each
+var _draft_horse_mesh_cache: ArrayMesh     # shared limber/caisson draft-horse mesh (built once)
+var _draft_horse_mats: Array = []          # a couple of coat-colour variants, built once
 
 # regimental dress: facing colours cycle per BRIGADE (a brigade was usually one
 # regiment's battalions); coat variants pick from each team's small uniform table
@@ -1122,19 +1126,17 @@ func _build_world() -> void:
 		colonel_horse_mm.set_instance_transform(i, _zero_xf())
 		colonel_rider_mm.set_instance_transform(i, _zero_xf())
 
-	# colour-bearers (one per battalion, dark coat — the cloth carries the colour)
+	# colour-bearers (one per battalion) — the same detailed officer figure as
+	# officer_mm/nco_mm, shouldering the colours instead of a musket
 	var bmi := MultiMeshInstance3D.new()
 	bearer_mm = MultiMesh.new()
 	bearer_mm.transform_format = MultiMesh.TRANSFORM_3D
-	var bcap := CapsuleMesh.new()
-	bcap.radius = 0.22
-	bcap.height = 1.7
-	bearer_mm.mesh = bcap
+	bearer_mm.mesh = officer_mesh
+	bearer_mm.use_colors = true
+	bearer_mm.use_custom_data = true
 	bearer_mm.instance_count = BATT_PER_TEAM * 2
 	bmi.multimesh = bearer_mm
-	var bmat := StandardMaterial3D.new()
-	bmat.albedo_color = Color(0.16, 0.16, 0.20)
-	bmi.material_override = bmat
+	bmi.material_override = _officer_shader()
 	add_child(bmi)
 	for i in range(BATT_PER_TEAM * 2):
 		bearer_mm.set_instance_transform(i, _zero_xf())
@@ -3571,6 +3573,11 @@ func _make_scenery_mm(mesh: Mesh, col: Color, count: int) -> MultiMesh:
 		mm.set_instance_transform(i, _zero_xf())
 	return mm
 
+# The two market towns nearest the coast on each side — Crown-held Hartsfield, Continental-
+# held Oakford — are the navy's future build-points: a visible shipyard goes up at each now,
+# ahead of the actual design/spawn logic that will one day launch a side's fleet from here.
+const SHIPYARD_TOWNS := ["Hartsfield", "Oakford"]
+
 # The province's towns, spread across the wider map — the strategic landmarks brought
 # INTO the tactical scene (the first of world.gd's content to live in the one world).
 # Far out and fogged: you ride toward them, not survey them from afar.
@@ -3616,6 +3623,9 @@ func _build_field_settlements() -> void:
 			roof_mm.set_instance_transform(ti, Transform3D(rot.scaled(Vector3(wx * 1.06, rh, wz * 1.06)), Vector3(p.x, wy + rh * 0.5 + _gh(p.x, p.z), p.z)))
 			ti += 1
 		_build_church(c)
+		var has_yard := String(t[0]) in SHIPYARD_TOWNS
+		if has_yard:
+			_build_shipyard(c)
 		# (no floating name billboard — you learn a place's name as a quiet toast on arrival)
 		# the town starts in the hands of whichever army's country it sits in (north Crown,
 		# south Continental, the middle neutral) — and can change hands as the war moves
@@ -3626,7 +3636,7 @@ func _build_field_settlements() -> void:
 			owner = 1
 		# (no coloured ownership disc on the ground — ownership reads from the M map instead)
 		field_towns.append({ "name": String(t[0]), "pos": c, "size": sz, "owner": owner,
-			"cap_t": 0.0, "cap_team": -1, "disc": null })
+			"cap_t": 0.0, "cap_team": -1, "disc": null, "shipyard": has_yard })
 
 # A parish church at the heart of a town: a stone nave, a square tower and a spire —
 # the landmark you pick the town out by from across the fields.
@@ -3661,6 +3671,81 @@ func _build_church(c: Vector3) -> void:
 	spire.material_override = slate
 	spire.position = c + off + Vector3(0, 30 + gy, -15)
 	add_child(spire)
+
+# A shipyard at the edge of a market town: a slipway with a part-built hull on the stocks
+# (a keel and a row of ribs — the unmistakable skeleton of a ship under construction), a
+# timber-built yard crane for lowering frames and masts into place, stacked seasoning logs,
+# and a sawpit shed. Marks the spot a side's navy will one day be designed and launched from.
+func _build_shipyard(c: Vector3) -> void:
+	var timber := StandardMaterial3D.new()
+	timber.albedo_color = Color(0.42, 0.30, 0.18); timber.roughness = 0.95
+	var dark := StandardMaterial3D.new()
+	dark.albedo_color = Color(0.10, 0.08, 0.07); dark.roughness = 1.0
+	var deckwood := StandardMaterial3D.new()
+	deckwood.albedo_color = Color(0.50, 0.40, 0.26); deckwood.roughness = 1.0
+	var log := StandardMaterial3D.new()
+	log.albedo_color = Color(0.55, 0.40, 0.22); log.roughness = 1.0
+	var off := Vector3(randf_range(-20.0, 20.0), 0, randf_range(-20.0, 20.0))
+	var gy := _gh(c.x + off.x, c.z + off.z)
+	var base := c + off + Vector3(0, gy, 0)
+	# the slipway: a long inclined way a hull is built on and would be launched down
+	var way := MeshInstance3D.new()
+	way.mesh = _box(8.0, 0.6, 34.0)
+	way.material_override = deckwood
+	way.rotation_degrees = Vector3(-6.0, 0, 0)
+	way.position = base + Vector3(0, 1.0, 0)
+	add_child(way)
+	# a part-built hull on the stocks: a keel and a row of ribs
+	var keel := MeshInstance3D.new()
+	keel.mesh = _box(1.2, 1.0, 30.0)
+	keel.material_override = timber
+	keel.position = base + Vector3(0, 2.4, -2.0)
+	add_child(keel)
+	for i in range(9):
+		var rz := -12.0 + float(i) * 3.0
+		var rib := MeshInstance3D.new()
+		rib.mesh = _box(7.0, 4.0, 0.6)
+		rib.material_override = timber
+		rib.position = base + Vector3(0, 4.6, rz - 2.0)
+		add_child(rib)
+	# the yard crane: an A-frame with a raking boom, for swinging frames and masts into place
+	var legA := MeshInstance3D.new()
+	legA.mesh = _box(0.5, 9.0, 0.5)
+	legA.material_override = dark
+	legA.position = base + Vector3(-2.2, 4.5, 16.0)
+	legA.rotation_degrees = Vector3(0, 0, 8.0)
+	add_child(legA)
+	var legB := MeshInstance3D.new()
+	legB.mesh = _box(0.5, 9.0, 0.5)
+	legB.material_override = dark
+	legB.position = base + Vector3(2.2, 4.5, 16.0)
+	legB.rotation_degrees = Vector3(0, 0, -8.0)
+	add_child(legB)
+	var boom := MeshInstance3D.new()
+	boom.mesh = _box(0.4, 0.4, 9.0)
+	boom.material_override = dark
+	boom.position = base + Vector3(0, 9.2, 20.0)
+	boom.rotation_degrees = Vector3(-20.0, 0, 0)
+	add_child(boom)
+	# stacks of seasoning ship's timber beside the ways
+	for i in range(3):
+		var pile := MeshInstance3D.new()
+		pile.mesh = _cylinder(0.35, 9.0)
+		pile.material_override = log
+		pile.rotation_degrees = Vector3(0, 0, 90.0)
+		pile.position = base + Vector3(7.0 + float(i % 2), 0.4 + float(i) * 0.7, -16.0 + float(i) * 1.2)
+		add_child(pile)
+	# a sawpit shed at the head of the ways
+	var shed := MeshInstance3D.new()
+	shed.mesh = _box(6.0, 4.0, 5.0)
+	shed.material_override = timber
+	shed.position = base + Vector3(8.0, 2.0, 14.0)
+	add_child(shed)
+	var shed_roof := MeshInstance3D.new()
+	shed_roof.mesh = _prism(6.4, 2.4, 5.4)
+	shed_roof.material_override = dark
+	shed_roof.position = base + Vector3(8.0, 5.2, 14.0)
+	add_child(shed_roof)
 
 # The lived-in countryside: farmsteads scattered across the land between the towns —
 # a farmhouse and barn, a haystack, a tilled field, a paddock fence and grazing stock.
@@ -4596,9 +4681,11 @@ func _smesh(parent: Node3D, mesh: Mesh, pos: Vector3, mat: Material, b: Basis = 
 	parent.add_child(mi)
 	return mi
 
-# A blocky-but-believable sloop-of-war, bow toward +Z: a tapered hull with a wale and a
-# chequered gun-deck, a raised quarterdeck and forecastle, a beak and bowsprit, three
-# masts crossed with yards and graduated square sails, headsails and the ensign astern.
+# A blocky-but-believable sloop-of-war, bow toward +Z: a tapered hull that sits properly IN
+# the water (a coppered underbody below the waterline, a boot-topping stripe right at it,
+# then the turn of the bilge up to the wale and a chequered gun-deck), a raised quarterdeck
+# and forecastle, a carved figurehead and stowed anchors at the beak, a bowsprit crossed with
+# headsails, three masts crossed with yards and graduated square sails, and the ensign astern.
 func _ship_node(team: int) -> Node3D:
 	var n := Node3D.new()
 	var timber := StandardMaterial3D.new()
@@ -4616,44 +4703,65 @@ func _ship_node(team: int) -> Node3D:
 	canvas.cull_mode = BaseMaterial3D.CULL_DISABLED
 	var rope := StandardMaterial3D.new()
 	rope.albedo_color = Color(0.16, 0.13, 0.10); rope.roughness = 1.0
-	# ---- hull: a deep keel, a wider deck, a tapering bow and a tall transom ----
-	_smesh(n, _box(7.5, 5.0, 40.0), Vector3(0, 2.5, -1.0), timber)            # lower hull / keel run
-	_smesh(n, _box(11.5, 5.0, 42.0), Vector3(0, 6.5, -1.0), timber)           # main hull at the deck
-	_smesh(n, _box(9.0, 5.0, 6.0), Vector3(0, 5.6, 21.5), timber)             # bow shoulder
-	_smesh(n, _box(5.0, 4.6, 5.0), Vector3(0, 5.4, 25.5), timber)             # bow taper
-	_smesh(n, _box(2.4, 3.6, 4.0), Vector3(0, 4.8, 28.5), dark)               # beakhead / stem
-	_smesh(n, _box(12.4, 6.0, 4.0), Vector3(0, 8.0, -22.0), timber)           # stern transom (tall)
-	_smesh(n, _box(8.0, 2.6, 0.6), Vector3(0, 9.2, -24.1), trim)              # stern gallery windows
-	# the wale (a heavy rubbing strake) and the chequered gun deck with its ports
-	_smesh(n, _box(12.0, 1.2, 43.0), Vector3(0, 4.6, -1.0), dark)             # wale
-	_smesh(n, _box(11.8, 1.8, 41.5), Vector3(0, 7.2, -1.0), strake)          # gun strake
+	var copper := StandardMaterial3D.new()
+	copper.albedo_color = Color(0.42, 0.24, 0.14); copper.roughness = 0.55; copper.metallic = 0.3   # coppered bottom
+	var boot := StandardMaterial3D.new()
+	boot.albedo_color = Color(0.05, 0.05, 0.05); boot.roughness = 0.9        # boot-topping at the waterline
+	var gold := StandardMaterial3D.new()
+	gold.albedo_color = Color(0.80, 0.66, 0.22); gold.roughness = 0.35; gold.metallic = 0.6
+	# ---- hull: a coppered underbody below the waterline (the ship rides IN the sea, not on
+	# top of it), the bilge turning up to the wale, a wider deck breadth, a tapering bow and
+	# a tall transom ----
+	_smesh(n, _box(7.6, 4.2, 40.0), Vector3(0, -2.1, -1.0), copper)           # coppered underbody (submerged)
+	_smesh(n, _box(7.8, 0.5, 40.2), Vector3(0, 0.0, -1.0), boot)              # boot-topping at the waterline
+	_smesh(n, _box(7.8, 4.2, 40.0), Vector3(0, 2.1, -1.0), timber)            # bilge, waterline up to the wale
+	_smesh(n, _box(12.5, 5.0, 44.0), Vector3(0, 6.5, -1.0), timber)           # main hull at the deck
+	_smesh(n, _box(9.5, 5.0, 6.0), Vector3(0, 5.6, 23.0), timber)             # bow shoulder
+	_smesh(n, _box(5.4, 4.6, 5.0), Vector3(0, 5.4, 27.0), timber)             # bow taper
+	_smesh(n, _box(2.6, 3.6, 4.0), Vector3(0, 4.8, 30.0), dark)               # beakhead / stem
+	_smesh(n, _box(13.4, 6.0, 4.0), Vector3(0, 8.0, -23.0), timber)           # stern transom (tall)
+	_smesh(n, _box(8.6, 2.6, 0.6), Vector3(0, 9.2, -25.1), trim)              # stern gallery windows
+	# the wale (a heavy rubbing strake at the turn of the bilge) and the chequered gun deck
+	_smesh(n, _box(12.9, 1.2, 45.0), Vector3(0, 4.6, -1.0), dark)             # wale
+	_smesh(n, _box(12.7, 1.8, 43.5), Vector3(0, 7.2, -1.0), strake)          # gun strake
 	for side in [-1.0, 1.0]:
 		for k in range(6):
-			var pz := -14.0 + float(k) * 6.0
-			_smesh(n, _box(0.6, 1.1, 1.6), Vector3(side * 5.95, 7.2, pz), dark)   # gun ports
+			var pz := -15.0 + float(k) * 6.4
+			_smesh(n, _box(0.6, 1.1, 1.6), Vector3(side * 6.4, 7.2, pz), dark)   # gun ports
 	# bulwarks + the upper decks
-	_smesh(n, _box(11.6, 1.6, 42.0), Vector3(0, 9.6, -1.0), timber)           # bulwark rail
-	_smesh(n, _box(10.6, 0.5, 41.0), Vector3(0, 9.3, -1.0), deckwood)         # weather deck
-	_smesh(n, _box(10.5, 2.2, 13.0), Vector3(0, 10.7, -14.5), timber)         # quarterdeck (raised aft)
-	_smesh(n, _box(9.0, 1.8, 8.0), Vector3(0, 10.5, 16.0), timber)            # forecastle (raised fwd)
-	# a ship's wheel & binnacle hint on the quarterdeck
-	_smesh(n, _box(0.4, 1.4, 0.4), Vector3(0, 11.8, -10.0), deckwood)
+	_smesh(n, _box(12.5, 1.6, 44.0), Vector3(0, 9.6, -1.0), timber)           # bulwark rail
+	_smesh(n, _box(11.4, 0.5, 43.0), Vector3(0, 9.3, -1.0), deckwood)         # weather deck
+	_smesh(n, _box(11.3, 2.2, 13.5), Vector3(0, 10.7, -15.0), timber)         # quarterdeck (raised aft)
+	_smesh(n, _box(9.6, 1.8, 8.5), Vector3(0, 10.5, 17.0), timber)            # forecastle (raised fwd)
+	# a ship's wheel & binnacle hint on the quarterdeck, and a ship's boat stowed amidships
+	_smesh(n, _box(0.4, 1.4, 0.4), Vector3(0, 11.8, -10.5), deckwood)
+	_smesh(n, _box(2.0, 0.9, 6.5), Vector3(0, 10.4, -4.0), deckwood)
+	# ---- the beak: a carved, gilt figurehead, cathead beams and anchors stowed each side ----
+	_smesh(n, _box(0.9, 2.0, 1.4), Vector3(0, 4.6, 32.0), trim)               # figurehead
+	_smesh(n, _box(0.5, 0.9, 0.8), Vector3(0, 5.7, 32.2), gold)               # figurehead's gilt crest
+	for side in [-1.0, 1.0]:
+		var ax := side * 5.6
+		_smesh(n, _box(0.45, 0.45, 2.6), Vector3(side * 5.6, 9.0, 26.5), deckwood)        # cathead beam
+		_smesh(n, _box(0.18, 3.4, 0.18), Vector3(ax, 5.4, 26.0), dark)                     # anchor shank
+		_smesh(n, _box(0.95, 0.18, 0.18), Vector3(ax, 7.0, 26.0), dark)                    # anchor stock
+		_smesh(n, _box(0.75, 0.5, 0.14), Vector3(ax, 3.7, 26.3), dark, Basis(Vector3.RIGHT, deg_to_rad(35.0)))   # fluke
 	# ---- bowsprit + headsails ----
 	var bsB := Basis(Vector3.RIGHT, deg_to_rad(-22.0))
-	_smesh(n, _box(0.8, 0.8, 16.0), Vector3(0, 11.5, 27.0), deckwood, bsB)
-	_smesh(n, _box(0.1, 5.0, 7.0), Vector3(0, 12.5, 24.0), canvas, Basis(Vector3.UP, deg_to_rad(90.0)) * Basis(Vector3.RIGHT, deg_to_rad(8.0)))
+	_smesh(n, _box(0.85, 0.85, 17.0), Vector3(0, 11.5, 29.0), deckwood, bsB)
+	_smesh(n, _box(0.1, 5.2, 7.5), Vector3(0, 12.6, 25.5), canvas, Basis(Vector3.UP, deg_to_rad(90.0)) * Basis(Vector3.RIGHT, deg_to_rad(8.0)))
+	_smesh(n, _box(0.1, 4.4, 6.5), Vector3(0, 10.8, 20.5), canvas, Basis(Vector3.UP, deg_to_rad(90.0)) * Basis(Vector3.RIGHT, deg_to_rad(6.0)))   # inner jib
 	# ---- three masts: fore, main (tallest), mizzen — each crossed with yards & sails ----
 	var masts := [
-		{ "z": 12.0, "h": 40.0, "course": Vector2(22.0, 12.0), "top": Vector2(16.0, 9.0) },   # fore
-		{ "z": -1.0, "h": 47.0, "course": Vector2(26.0, 14.0), "top": Vector2(19.0, 10.0) },  # main
-		{ "z": -14.0, "h": 34.0, "course": Vector2(18.0, 10.0), "top": Vector2(13.0, 8.0) },  # mizzen
+		{ "z": 13.0, "h": 44.0, "course": Vector2(24.0, 13.0), "top": Vector2(17.0, 10.0) },   # fore
+		{ "z": -1.0, "h": 52.0, "course": Vector2(28.0, 15.0), "top": Vector2(21.0, 11.0) },   # main
+		{ "z": -15.0, "h": 38.0, "course": Vector2(19.0, 11.0), "top": Vector2(14.0, 9.0) },   # mizzen
 	]
 	for m in masts:
 		var mz: float = m["z"]
 		var mh: float = m["h"]
-		var mcyl := CylinderMesh.new(); mcyl.top_radius = 0.35; mcyl.bottom_radius = 0.7; mcyl.height = mh
+		var mcyl := CylinderMesh.new(); mcyl.top_radius = 0.38; mcyl.bottom_radius = 0.75; mcyl.height = mh
 		_smesh(n, mcyl, Vector3(0, 8.0 + mh * 0.5, mz), deckwood)
-		var top := CylinderMesh.new(); top.top_radius = 0.18; top.bottom_radius = 0.35; top.height = mh * 0.5
+		var top := CylinderMesh.new(); top.top_radius = 0.19; top.bottom_radius = 0.38; top.height = mh * 0.5
 		_smesh(n, top, Vector3(0, 8.0 + mh + mh * 0.25, mz), deckwood)        # topmast
 		var cs: Vector2 = m["course"]
 		var ts: Vector2 = m["top"]
@@ -4666,8 +4774,8 @@ func _ship_node(team: int) -> Node3D:
 		# shrouds: a few raked ropes from the masthead down to the channels each side
 		for side in [-1.0, 1.0]:
 			for sh in range(3):
-				var foot := Vector3(side * 5.6, 9.5, mz + float(sh - 1) * 3.0)
-				var head := Vector3(side * 0.6, 8.0 + mh * 0.7, mz)
+				var foot := Vector3(side * 6.1, 9.5, mz + float(sh - 1) * 3.2)
+				var head := Vector3(side * 0.65, 8.0 + mh * 0.7, mz)
 				var mid := (foot + head) * 0.5
 				var dir := head - foot
 				var b := Basis.looking_at(dir.normalized(), Vector3.UP)
@@ -4675,8 +4783,8 @@ func _ship_node(team: int) -> Node3D:
 				_smesh(n, rod, mid, rope, b)
 	# the ensign at the stern staff
 	var staffB := Basis(Vector3.RIGHT, deg_to_rad(-18.0))
-	_smesh(n, _box(0.2, 0.2, 7.0), Vector3(0, 13.0, -24.0), deckwood, staffB)
-	_smesh(n, _box(0.15, 3.2, 5.0), Vector3(0, 15.0, -27.5), trim)
+	_smesh(n, _box(0.2, 0.2, 7.5), Vector3(0, 13.0, -25.5), deckwood, staffB)
+	_smesh(n, _box(0.15, 3.4, 5.4), Vector3(0, 15.1, -29.2), trim)
 	return n
 
 func _spawn_ships() -> void:
@@ -4818,7 +4926,7 @@ func _ship_broadside(s: Dictionary, foe) -> void:
 	var base: Vector3 = s["pos"] + Vector3(0, 5.0, 0)
 	# a full gun-deck speaks as one — same flash, smoke-bloom and report as the land batteries
 	for k in range(9):
-		var muzzle := base + hd * ((float(k) - 4.0) * 5.0) + side * 7.0
+		var muzzle := base + hd * ((float(k) - 4.0) * 5.3) + side * 7.3
 		_emit_flash(muzzle)
 		_emit_flash(muzzle)
 		_emit_muzzle_bloom(muzzle, side)
@@ -4828,8 +4936,8 @@ func _ship_broadside(s: Dictionary, foe) -> void:
 		if k % 2 == 0:
 			_spawn_naval_shot(muzzle + side * 3.0, foe, int(s["team"]))
 	if cam != null:
-		_play_cannon(base + hd * 12.0 + side * 7.0)
-		_play_cannon(base - hd * 12.0 + side * 7.0)   # the report rolls down the ship's length
+		_play_cannon(base + hd * 12.5 + side * 7.3)
+		_play_cannon(base - hd * 12.5 + side * 7.3)   # the report rolls down the ship's length
 
 func _cylinder(radius: float, height: float) -> CylinderMesh:
 	var m := CylinderMesh.new()
@@ -5689,19 +5797,87 @@ func _make_flag(b: Batt, team: int) -> void:
 	pmat.albedo_color = Color(0.25, 0.16, 0.08)
 	pole.material_override = pmat
 	b.flag.add_child(pole)
-	var cloth := MeshInstance3D.new()
-	var cbox := BoxMesh.new()
-	cbox.size = Vector3(0.95, 0.62, 0.02)
-	cloth.mesh = cbox
-	cloth.position = Vector3(0.5, 1.85, 0)      # the colours fly just above the men's heads
-	var cmat := StandardMaterial3D.new()
-	# the cloth carries the REGIMENT's facing colour quartered with the national one
+
+	# a gold spearhead finial atop the staff, the mark of a proper stand of colours
+	var gold := Color(0.83, 0.68, 0.21)
+	var finial := MeshInstance3D.new()
+	var fcone := CylinderMesh.new()
+	fcone.top_radius = 0.0
+	fcone.bottom_radius = 0.04
+	fcone.height = 0.16
+	finial.mesh = fcone
+	finial.position = Vector3(0, 2.23, 0)
+	var finmat := StandardMaterial3D.new()
+	finmat.albedo_color = gold
+	finmat.metallic = 0.6
+	finmat.roughness = 0.3
+	finial.material_override = finmat
+	b.flag.add_child(finial)
+
 	var nat := ARMY_BLUE if team == 0 else ARMY_RED
-	cmat.albedo_color = nat.lerp(Color(b.inst_col.r, b.inst_col.g, b.inst_col.b), 0.5)
-	cmat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	cloth.material_override = cmat
+	var fac := Color(b.inst_col.r, b.inst_col.g, b.inst_col.b)
+
+	# the cloth assembly: one wrapper node so the existing sway/flap animation
+	# (which rotates b.flag_cloth as a whole) still drives every part together
+	var cloth := Node3D.new()
+	cloth.position = Vector3(0.5, 1.85, 0)      # the colours fly just above the men's heads
 	b.flag.add_child(cloth)
 	b.flag_cloth = cloth
+
+	# the field — the regiment's facing colour quartered with the national one
+	var field := MeshInstance3D.new()
+	var cbox := BoxMesh.new()
+	cbox.size = Vector3(0.95, 0.62, 0.018)
+	field.mesh = cbox
+	var cmat := StandardMaterial3D.new()
+	cmat.albedo_color = nat.lerp(fac, 0.5)
+	cmat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	field.material_override = cmat
+	cloth.add_child(field)
+
+	# a hoist canton in the facing colour, by the staff edge
+	var canton := MeshInstance3D.new()
+	var canbox := BoxMesh.new()
+	canbox.size = Vector3(0.34, 0.29, 0.02)
+	canton.mesh = canbox
+	canton.position = Vector3(-0.30, 0.16, 0.0015)
+	var canmat := StandardMaterial3D.new()
+	canmat.albedo_color = fac
+	canmat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	canton.material_override = canmat
+	cloth.add_child(canton)
+
+	# a gold roundel at the centre, standing for the regimental badge
+	var roundel := MeshInstance3D.new()
+	var rcyl := CylinderMesh.new()
+	rcyl.top_radius = 0.13
+	rcyl.bottom_radius = 0.13
+	rcyl.height = 0.012
+	roundel.mesh = rcyl
+	roundel.rotation_degrees = Vector3(90, 0, 0)
+	roundel.position = Vector3(0.05, 0, 0.013)
+	var rolmat := StandardMaterial3D.new()
+	rolmat.albedo_color = gold
+	rolmat.metallic = 0.4
+	roundel.material_override = rolmat
+	cloth.add_child(roundel)
+
+	# a gold fringe along the top, bottom and fly edge
+	var fringe_mat := StandardMaterial3D.new()
+	fringe_mat.albedo_color = gold
+	for fr in [
+		[Vector3(0, 0.325, 0), Vector3(0.99, 0.03, 0.02)],   # top edge
+		[Vector3(0, -0.325, 0), Vector3(0.99, 0.03, 0.02)],  # bottom edge
+		[Vector3(0.49, 0, 0), Vector3(0.03, 0.65, 0.02)],    # fly edge
+	]:
+		var fr_mi := MeshInstance3D.new()
+		var fr_box := BoxMesh.new()
+		fr_box.size = fr[1]
+		fr_mi.mesh = fr_box
+		fr_mi.position = fr[0]
+		fr_mi.material_override = fringe_mat
+		cloth.add_child(fr_mi)
+
 	b.flag.visible = false
 
 func _fill_figs(b: Batt, n: int = MEN) -> void:
@@ -6068,6 +6244,133 @@ func _build_guns() -> void:
 				_make_gun(g)
 				guns.append(g)
 
+# A gun-crew figure: the same coat/collar/cuff/leg layout idiom as the soldiers and
+# officers, but a working gunner's rig — short-skirted coat, no shako, a round forage
+# cap, and a cartridge pouch at the hip instead of crossbelts. One shared mesh, painted
+# by a per-team ShaderMaterial (coat = the army's colour; trim is brass/buff on both
+# sides — the artillery's own branch colour, not the infantry's gold lace).
+func _gunner_mesh() -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	_add_box(st, Vector3(0, 0.175, 0.0), Vector3(0.38, 0.46, 0.22))         # coat body
+	_add_box(st, Vector3(0, -0.02, -0.08), Vector3(0.34, 0.18, 0.12))      # short coat skirt (back)
+	_add_box(st, Vector3(0, 0.40, 0.0), Vector3(0.32, 0.06, 0.225))        # collar
+	_add_box(st, Vector3(0, 0.18, 0.118), Vector3(0.20, 0.36, 0.03))       # lapel / plastron
+	_add_box(st, Vector3(0, 0.0, 0.10), Vector3(0.42, 0.07, 0.18))         # waist belt
+	_add_box(st, Vector3(0.22, -0.08, 0.16), Vector3(0.12, 0.13, 0.08))    # cartridge pouch (hip)
+	for sx in [-0.255, 0.255]:
+		_add_box(st, Vector3(sx, 0.17, 0.0), Vector3(0.11, 0.44, 0.125))      # sleeve
+		_add_box(st, Vector3(sx, -0.05, 0.0), Vector3(0.12, 0.07, 0.135))     # cuff
+		_add_box(st, Vector3(sx, -0.15, -0.01), Vector3(0.095, 0.10, 0.105)) # hand
+	for sx in [-0.10, 0.10]:
+		_add_box(st, Vector3(sx, -0.45, 0), Vector3(0.16, 0.78, 0.19))        # leg
+	_add_box(st, Vector3(0, 0.555, 0), Vector3(0.205, 0.21, 0.205))         # head
+	_add_cyl(st, Vector3(0, 0.70, 0), 0.165, 0.155, 0.10, 10)               # forage cap body
+	_add_box(st, Vector3(0, 0.655, 0.155), Vector3(0.14, 0.03, 0.07))      # cap peak
+	_add_box(st, Vector3(0, 0.765, 0), Vector3(0.05, 0.035, 0.05))         # cap top button
+	return st.commit()
+
+func _gunner_shader(coat: Color) -> ShaderMaterial:
+	var sh := Shader.new()
+	sh.code = """
+shader_type spatial;
+uniform vec3 coat_col;
+uniform vec3 trim = vec3(0.62, 0.50, 0.22);    // brass / buff — the artillery's own colour
+uniform vec3 skin = vec3(0.76, 0.58, 0.46);
+varying float vy;
+varying float vx;
+varying float vz;
+void vertex() { vy = VERTEX.y; vx = VERTEX.x; vz = VERTEX.z; }
+void fragment() {
+	vec3 col = coat_col;
+	if (vy < -0.05) col = vec3(0.16, 0.16, 0.18);                          // dark trousers
+	if (vy > 0.37 && vy < 0.43) col = trim;                                // collar
+	if (vz > 0.09 && abs(vx) < 0.13 && vy > 0.0 && vy < 0.36) col = trim;  // lapel
+	if (abs(vx) > 0.20 && vy > -0.09 && vy < -0.015) col = trim;           // cuffs
+	if (vy > -0.04 && vy < 0.07 && vz > 0.0) col = vec3(0.30, 0.27, 0.20); // waist belt (buff leather)
+	if (vx > 0.13 && vy < -0.01 && vy > -0.22) col = vec3(0.22, 0.16, 0.10); // cartridge pouch
+	if (abs(vx) > 0.20 && vy < -0.10) col = skin;                          // hands
+	if (vy > 0.44 && vy < 0.65) col = skin;                                // head
+	if (vy >= 0.65 && vy < 0.76) col = vec3(0.07, 0.07, 0.08);             // forage cap body
+	if (vz > 0.10 && vy > 0.60 && vy < 0.70) col = vec3(0.05, 0.05, 0.06); // cap peak
+	if (vy >= 0.75) col = trim;                                            // cap top button
+	ALBEDO = col;
+	ROUGHNESS = 0.85;
+}
+"""
+	var m := ShaderMaterial.new()
+	m.shader = sh
+	m.set_shader_parameter("coat_col", Vector3(coat.r, coat.g, coat.b))
+	return m
+
+# Lazily build (once) and return [mesh, material] for a gunner of the given team —
+# every gun on the field shares the same two materials, so building 30+ pieces costs
+# nothing extra beyond the first gunner of each side.
+func _gunner_assets(team: int) -> Array:
+	if _gunner_mesh_cache == null:
+		_gunner_mesh_cache = _gunner_mesh()
+	if _gunner_mats[team] == null:
+		_gunner_mats[team] = _gunner_shader(team_color(team).darkened(0.15))
+	return [_gunner_mesh_cache, _gunner_mats[team]]
+
+# A draft horse in harness — the same body plan as the cavalry's mount but stripped of
+# saddle/shabraque/stirrups and given a collar, back band and breeching strap instead,
+# since it tows the limber rather than carries a rider.
+func _draft_horse_mesh() -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	_add_box(st, Vector3(0, 0.95, 0), Vector3(0.46, 0.58, 1.30))            # barrel
+	_add_box(st, Vector3(0, 0.98, 0.60), Vector3(0.42, 0.48, 0.38))        # chest
+	_add_box(st, Vector3(0, 0.98, -0.70), Vector3(0.46, 0.55, 0.46))       # hindquarters
+	_add_box(st, Vector3(0, 1.48, 0.95), Vector3(0.24, 0.50, 0.40))        # neck
+	_add_box(st, Vector3(0, 1.72, 1.28), Vector3(0.20, 0.24, 0.38))        # head
+	_add_box(st, Vector3(0, 1.62, 1.46), Vector3(0.16, 0.14, 0.14))        # muzzle
+	for ex in [-0.06, 0.06]:
+		_add_box(st, Vector3(ex, 1.88, 1.06), Vector3(0.045, 0.12, 0.045))    # ears
+	_add_box(st, Vector3(0, 1.50, 0.95), Vector3(0.30, 0.10, 0.46))        # mane crest
+	_add_box(st, Vector3(0, 0.76, -1.00), Vector3(0.12, 0.58, 0.12))       # tail
+	for lp in [Vector2(0.17, 0.48), Vector2(-0.17, 0.48), Vector2(0.19, -0.52), Vector2(-0.19, -0.52)]:
+		_add_box(st, Vector3(lp.x, 0.34, lp.y), Vector3(0.14, 0.68, 0.16))        # leg
+		_add_box(st, Vector3(lp.x, 0.02, lp.y + 0.02), Vector3(0.16, 0.12, 0.19)) # hoof
+	_add_box(st, Vector3(0, 1.20, 0.58), Vector3(0.36, 0.22, 0.18))        # neck collar (harness)
+	_add_box(st, Vector3(0, 1.08, -0.05), Vector3(0.42, 0.10, 0.30))       # back band
+	_add_box(st, Vector3(0, 0.92, -0.62), Vector3(0.40, 0.06, 0.10))       # breeching strap (hip band)
+	return st.commit()
+
+func _draft_horse_shader(coat: Color) -> ShaderMaterial:
+	var sh := Shader.new()
+	sh.code = """
+shader_type spatial;
+uniform vec3 coat_col;
+varying float vy;
+varying float vz;
+void vertex() { vy = VERTEX.y; vz = VERTEX.z; }
+void fragment() {
+	vec3 col = coat_col;
+	if (vy < 0.10) col = vec3(0.07, 0.06, 0.05);                                     // hooves
+	if (vz < -0.85) col = vec3(0.05, 0.05, 0.05);                                    // tail
+	if (vy > 1.40 && vz > 0.75 && vz < 1.15) col = vec3(0.07, 0.06, 0.05);           // mane
+	if (vz > 1.35) col = vec3(0.10, 0.08, 0.07);                                     // muzzle
+	if (vy > 1.05 && vy < 1.32 && vz > 0.35 && vz < 0.85) col = vec3(0.32, 0.25, 0.14); // collar
+	if (vy > 0.98 && vy < 1.20 && vz > -0.35 && vz < 0.20) col = vec3(0.30, 0.24, 0.14); // back band
+	if (vy > 0.82 && vy < 1.00 && vz < -0.45) col = vec3(0.30, 0.24, 0.14);          // breeching
+	ALBEDO = col;
+	ROUGHNESS = 0.85;
+}
+"""
+	var m := ShaderMaterial.new()
+	m.shader = sh
+	m.set_shader_parameter("coat_col", Vector3(coat.r, coat.g, coat.b))
+	return m
+
+# Lazily build (once) the shared draft-horse mesh and a couple of coat-colour variants
+# (bay / black) so every limber and caisson team draws from the same two materials.
+func _draft_horse_assets() -> Array:
+	if _draft_horse_mesh_cache == null:
+		_draft_horse_mesh_cache = _draft_horse_mesh()
+		_draft_horse_mats = [_draft_horse_shader(Color(0.34, 0.22, 0.12)), _draft_horse_shader(Color(0.14, 0.13, 0.12))]
+	return [_draft_horse_mesh_cache, _draft_horse_mats]
+
 # Build one piece: a bronze barrel on a wooden carriage with two wheels and a crew.
 func _make_gun(g: Gun) -> void:
 	var n := Node3D.new()
@@ -6097,7 +6400,45 @@ func _make_gun(g: Gun) -> void:
 	trail.material_override = wood
 	n.add_child(trail)
 
-	# two wheels (cylinders laid on the axle)
+	# carriage cheeks — the wooden sidewalls that cradle the barrel's trunnions
+	for sx0 in [-0.30, 0.30]:
+		var cheek := MeshInstance3D.new()
+		var chb := BoxMesh.new()
+		chb.size = Vector3(0.08, 0.50, 1.55)
+		cheek.mesh = chb
+		cheek.position = Vector3(sx0, 0.58, 0.10)
+		cheek.material_override = wood
+		n.add_child(cheek)
+
+	# axle binding the two wheels under the trail
+	var axle := MeshInstance3D.new()
+	var axb := BoxMesh.new()
+	axb.size = Vector3(1.3, 0.10, 0.12)
+	axle.mesh = axb
+	axle.position = Vector3(0, 0.55, 0.15)
+	axle.material_override = iron
+	n.add_child(axle)
+
+	# trail spade — digs into the ground at the rear and takes the recoil
+	var spade := MeshInstance3D.new()
+	var spb := BoxMesh.new()
+	spb.size = Vector3(0.42, 0.30, 0.06)
+	spade.mesh = spb
+	spade.rotation.x = deg_to_rad(-25.0)
+	spade.position = Vector3(0, 0.18, -1.68)
+	spade.material_override = iron
+	n.add_child(spade)
+
+	# elevating-screw block, under the breech
+	var quoin := MeshInstance3D.new()
+	var qb := BoxMesh.new()
+	qb.size = Vector3(0.22, 0.20, 0.30)
+	quoin.mesh = qb
+	quoin.position = Vector3(0, 0.62, -0.30)
+	quoin.material_override = wood
+	n.add_child(quoin)
+
+	# two wheels (cylinders laid on the axle), each with a hub cap
 	for sx in [-0.62, 0.62]:
 		var wheel := MeshInstance3D.new()
 		var wc := CylinderMesh.new()
@@ -6109,6 +6450,14 @@ func _make_gun(g: Gun) -> void:
 		wheel.position = Vector3(sx, 0.55, 0.15)
 		wheel.material_override = wood
 		n.add_child(wheel)
+		var hub := MeshInstance3D.new()
+		var hc2 := CylinderMesh.new()
+		hc2.top_radius = 0.12
+		hc2.bottom_radius = 0.12
+		hc2.height = 0.16
+		hub.mesh = hc2
+		hub.material_override = iron
+		wheel.add_child(hub)
 
 	# the barrel — recoils backward when fired, so keep it on its own node
 	var barrel := Node3D.new()
@@ -6125,19 +6474,59 @@ func _make_gun(g: Gun) -> void:
 	tube.material_override = bronze
 	barrel.add_child(tube)
 
-	# the crew — capsules clustered at the breech (the last one is the rammer, who
-	# steps up to the muzzle to load). Kept as nodes so they can be animated.
+	# reinforcing rings, the muzzle swell, the cascabel knob and the trunnions —
+	# children of the tube itself, so they recoil with the barrel and need no extra
+	# rotation (the tube's local Y is already its own long axis)
+	for ry in [-0.35, 0.22]:
+		var ring := MeshInstance3D.new()
+		var rc := CylinderMesh.new()
+		rc.top_radius = 0.155
+		rc.bottom_radius = 0.155
+		rc.height = 0.05
+		ring.mesh = rc
+		ring.position = Vector3(0, ry, 0)
+		ring.material_override = bronze
+		tube.add_child(ring)
+	var muzzle_swell := MeshInstance3D.new()
+	var msc := CylinderMesh.new()
+	msc.top_radius = 0.155
+	msc.bottom_radius = 0.13
+	msc.height = 0.16
+	muzzle_swell.mesh = msc
+	muzzle_swell.position = Vector3(0, 0.79, 0)
+	muzzle_swell.material_override = bronze
+	tube.add_child(muzzle_swell)
+	var cascabel := MeshInstance3D.new()
+	var csph := SphereMesh.new()
+	csph.radius = 0.075
+	csph.height = 0.15
+	cascabel.mesh = csph
+	cascabel.position = Vector3(0, -0.90, 0)
+	cascabel.material_override = bronze
+	tube.add_child(cascabel)
+	for sxn in [-0.14, 0.14]:
+		var trunnion := MeshInstance3D.new()
+		var trc := CylinderMesh.new()
+		trc.top_radius = 0.045
+		trc.bottom_radius = 0.045
+		trc.height = 0.20
+		trunnion.mesh = trc
+		trunnion.rotation = Vector3(0, 0, PI * 0.5)
+		trunnion.position = Vector3(sxn, -0.05, 0)
+		trunnion.material_override = iron
+		tube.add_child(trunnion)
+
+	# the crew — detailed gunner figures clustered at the breech (the last one is the
+	# rammer, who steps up to the muzzle to load). Kept as nodes so they can be animated.
+	var gassets := _gunner_assets(g.team)
 	for off in [Vector3(0.8, 0, -0.4), Vector3(-0.8, 0, -0.4), Vector3(0, 0, -1.4)]:
-		var crew := MeshInstance3D.new()
-		var cc := CapsuleMesh.new()
-		cc.radius = 0.2
-		cc.height = 1.7
-		crew.mesh = cc
-		var base := Vector3(off.x, CAP_HALF, off.z)
+		var crew := Node3D.new()
+		var cmi := MeshInstance3D.new()
+		cmi.mesh = gassets[0]
+		cmi.material_override = gassets[1]
+		crew.add_child(cmi)
+		var base := Vector3(off.x, 0.85, off.z)
 		crew.position = base
-		var crewmat := StandardMaterial3D.new()
-		crewmat.albedo_color = team_color(g.team).darkened(0.25)
-		crew.material_override = crewmat
 		n.add_child(crew)
 		g.crew.append(crew)
 		g.crew_base.append(base)
@@ -6147,9 +6536,6 @@ func _make_gun(g: Gun) -> void:
 	g.limber_group = Node3D.new()
 	n.add_child(g.limber_group)
 	g.limber_group.visible = false
-	var horsemat := StandardMaterial3D.new()
-	horsemat.albedo_color = Color(0.20, 0.13, 0.08)
-	horsemat.roughness = 0.9
 	var chest := MeshInstance3D.new()
 	var cb := BoxMesh.new()
 	cb.size = Vector3(0.9, 0.55, 1.0)
@@ -6168,17 +6554,18 @@ func _make_gun(g: Gun) -> void:
 		lw.position = Vector3(sx2, 0.5, 1.5)
 		lw.material_override = wood
 		g.limber_group.add_child(lw)
+	var dassets := _draft_horse_assets()
+	var dmesh: ArrayMesh = dassets[0]
+	var dmats: Array = dassets[1]
+	var hi := 0
 	for hz in [3.0, 4.7]:
 		for sx3 in [-0.45, 0.45]:
 			var horse := MeshInstance3D.new()
-			var hc := CapsuleMesh.new()
-			hc.radius = 0.3
-			hc.height = 1.7
-			horse.mesh = hc
-			horse.rotation = Vector3(PI * 0.5, 0, 0)   # lay it along the travel direction
-			horse.position = Vector3(sx3, 0.9, hz)
-			horse.material_override = horsemat
+			horse.mesh = dmesh
+			horse.material_override = dmats[hi % dmats.size()]
+			horse.position = Vector3(sx3, 0, hz)       # the mesh already faces +Z, the direction of travel
 			g.limber_group.add_child(horse)
+			hi += 1
 
 # Pick a gun's target. It obeys its brigade's fire mission when one is set and in
 # range, otherwise prioritises by doctrine: the nearest FORMED body (skirmishers make
@@ -6238,7 +6625,7 @@ func _drop_crewman(g: Gun, from_pos: Vector3) -> void:
 	if g.crew.is_empty():
 		g.dead = true
 		return
-	var node: MeshInstance3D = g.crew.pop_back()
+	var node: Node3D = g.crew.pop_back()
 	g.crew_base.pop_back()
 	var wp: Vector3 = g.node.to_global(node.position)
 	var knock := wp - from_pos
@@ -6801,7 +7188,7 @@ const SLEEP_TICK := 0.5            # a far (sleeping) battalion is simulated in 
 const PROVINCE_SIZE := 18000.0    # the tactical scene now spans the whole province (±9 km, float-safe)
 const TOWN_CAPTURE_RANGE := 480.0 # men this near a town hold/take it
 const TOWN_CAPTURE_TIME := 16.0   # seconds of uncontested occupation to flip a town
-var field_towns: Array = []       # the province's towns, now CAPTURABLE: {name,pos,size,owner,cap_t,cap_team,disc}
+var field_towns: Array = []       # the province's towns, now CAPTURABLE: {name,pos,size,owner,cap_t,cap_team,disc,shipyard}
 var _cap_cd := 0.0                 # throttle on the capture check
 # the wider strategic furniture: every named place on the province map and the roads
 # that join them. Forts & depots are each side's garrison homes (one per brigade).
@@ -7579,17 +7966,14 @@ func _make_caisson_node(team: int) -> Node3D:
 		wh.position = Vector3(sx, 0.5, 0.0)
 		wh.material_override = wood
 		n.add_child(wh)
-	var hmat := StandardMaterial3D.new()
-	hmat.albedo_color = Color(0.20, 0.13, 0.08)
+	var dassets := _draft_horse_assets()
+	var dmesh: ArrayMesh = dassets[0]
+	var dmats: Array = dassets[1]
 	for sx2 in [-0.4, 0.4]:
 		var horse := MeshInstance3D.new()
-		var hc := CapsuleMesh.new()
-		hc.radius = 0.3
-		hc.height = 1.7
-		horse.mesh = hc
-		horse.rotation = Vector3(PI * 0.5, 0, 0)
-		horse.position = Vector3(sx2, 0.9, 1.7)
-		horse.material_override = hmat
+		horse.mesh = dmesh
+		horse.material_override = dmats[(0 if sx2 < 0 else 1) % dmats.size()]
+		horse.position = Vector3(sx2, 0, 1.7)   # the mesh already faces +Z, the direction of travel
 		n.add_child(horse)
 	return n
 
@@ -9468,7 +9852,8 @@ func _render(delta: float) -> void:
 				byaw = atan2(bmv.x, bmv.z)
 			if not b.colours_down:
 				var bbob := absf(sin(_t * 2.4 + idn + 1.0)) * 0.04
-				bearer_mm.set_instance_transform(bearer_i, Transform3D(Basis(Vector3.UP, byaw), Vector3(bw.x, CAP_HALF + bbob + _gh(bw.x, bw.z), bw.z)))
+				bearer_mm.set_instance_transform(bearer_i, Transform3D(Basis(Vector3.UP, byaw), Vector3(bw.x, 0.85 + bbob + _gh(bw.x, bw.z), bw.z)))
+				_cg_dress(bearer_mm, bearer_i, b.team, bw.distance_to(bp) > 0.1, false)
 				bearer_i += 1
 			_place_flag(b, Vector3(bw.x, _gh(bw.x, bw.z), bw.z), fyaw)   # lays low when the colours are down
 			# the COLOUR PARTY: a guard of two with half-pikes, posted at the colours

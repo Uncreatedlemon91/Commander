@@ -86,6 +86,83 @@ horse's-feet** (ground level), matching `_build_horse()`/`_build_officer_colonel
 manual capsule-center y-offsets. Colour-bearers (`bearer_mm`) were left as a plain capsule —
 out of scope for this pass.
 
+## The colour party — flag and bearer brought up to standard
+`bearer_mm` was the last bare capsule among the command group; it now reuses the existing
+`officer_mm` assets (`_officer_mesh()` + `_officer_shader()`, shared — no new mesh/shader
+needed) with `use_colors`/`use_custom_data` on and `_cg_dress()` painting his coat each frame,
+placed with the same `0.85`-style ground-origin offset as `officer_mm` (not `CAP_HALF`, which
+is only for capsule-center origins). The two colour-party escorts (`nco_mm` + `spontoon_mm`)
+were already at this standard from the officer/NCO pass and needed no change.
+`_make_flag()` was a bare pole + one flat solid-colour box; since the flag is **one node per
+battalion, not a MultiMesh**, it's free of the affordability keystone and can carry real detail
+like the hero. It now builds a small stand-of-colours assembly: a gold spearhead finial atop
+the staff, a hoist canton in the regiment's facing colour, a gold roundel badge at the centre,
+and a gold fringe along the top/bottom/fly edges — all individual `MeshInstance3D` parts. The
+cloth is now a `Node3D` wrapper (still assigned to `b.flag_cloth`) holding all these parts, so
+`_place_flag()`'s existing sway/lean/drag-when-down animation (which rotates `b.flag_cloth` as
+a whole) keeps working on the whole assembly unchanged.
+
+## Artillery — guns, crew and the limber team brought up to standard
+Each gun (`Gun`/`_make_gun()`) is **one persistent `Node3D` per piece** (~64 on the field at
+full strength), not a MultiMesh — like the flag, it's free of the affordability keystone and
+can carry real per-node detail. The carriage gained cheeks (the sidewalls that cradle the
+trunnions), an axle, a trail spade, and an elevating-screw block under the breech; the wheels
+got hub caps; the barrel (still its own recoiling `Node3D`, unchanged mechanically) gained
+reinforcing rings, a muzzle swell, a cascabel knob and trunnions, all as children of the tube
+so they recoil with it for free.
+
+The **gun crew** (`g.crew`, 3 bare capsules before) are now detailed gunner figures —
+`_gunner_mesh()` (the soldiers'/officers' box-and-cylinder idiom: short-skirted coat, collar,
+lapel, cartridge pouch at the hip, a round forage cap instead of a shako — no crossbelts, no
+gold lace) painted by `_gunner_shader(coat)`, a position-banded shader with brass/buff trim
+(the artillery's own branch colour) instead of the infantry's gold. Because every gun's crew on
+a side shares the SAME mesh and material (`_gunner_assets(team)` builds them once, lazily, and
+hands back the cached resources to every gun after the first), this costs nothing extra per
+piece despite the higher per-figure detail. Each crewman is still an individual `Node3D` (now
+wrapping a `MeshInstance3D` instead of being one directly) so `_animate_gun_crew()`'s existing
+per-node position/rotation animation (the rammer's stroke, the gunners' sway and recoil step)
+and `_drop_crewman()`'s pop-and-`queue_free()` casualty handling keep working unchanged.
+
+The **limber team and caisson team** (4 and 2 bare horse-capsules before) now use a shared
+`_draft_horse_mesh()` — the same body plan as the cavalry's mount (`_mount_horse_mesh()`) but
+stripped of saddle/shabraque/stirrups and given a collar, back band and breeching strap, since
+it pulls in harness rather than carries a rider — painted by `_draft_horse_shader(coat)` in one
+of two lazily-built coat-colour variants (bay / black, `_draft_horse_assets()`), reused the same
+way as the gunner assets. No team colouring is needed on a draft horse, so there's no per-
+instance colour plumbing — just the two shared materials.
+
+## Ships — resized to ride properly IN the sea, and detailed
+`_ship_node(team)` (one persistent `Node3D` per hull, ~6 on the field — free of the
+affordability keystone like the gun/flag) had the right rough scale for a small frigate/
+sloop-of-war (man = `CAP_HEIGHT` 1.7 m is the yardstick; hull was already ~42 m long) but a
+real bug: the lowest hull box spanned `y = 0` to `5`, i.e. the *entire* keel sat **above** the
+sea surface — the ship floated on top of the water like a raft, with zero draft. Fixed by
+splitting that box into a coppered underbody that actually sits **below** the waterline
+(`y = -4.2` to `0`, a dulled copper-tone material — historically accurate antifouling sheathing),
+a thin black boot-topping stripe right at `y = 0`, and the original timber bilge bridging back
+up to the main hull. Hull breadth/length and all three mast heights/sail spans were also bumped
+~8–10% for a more imposing tall-ship presence. Added detail at the beak: a carved, gilt
+figurehead, cathead beams, and a stowed anchor (shank/stock/fluke) each side; an inner jib
+alongside the existing headsail for a fuller sail plan; and a ship's boat stowed amidships on
+the weather deck. `_ship_broadside()`'s muzzle/report offsets were nudged to match the slightly
+wider hull. `_update_ships()`'s sea-following transform code (rides the Gerstner wave normal,
+sets `node.transform` fresh every frame) needed no change — it positions the hull's local origin
+at the wave surface, and the origin **is** the waterline, so the new underwater/boot/bilge split
+just works.
+
+## Shipyards — two navy build-points, ahead of the actual navy
+`field_towns` (the province's ten capturable market towns) now carries a `shipyard: bool` flag.
+Two towns are marked true via `const SHIPYARD_TOWNS` — **Hartsfield** (Crown-held, the team-0
+town with the highest `x`, i.e. nearest the coast at `COAST_X`) and **Oakford** (Continental-
+held, same logic for team 1) — one build-point per side, since none of the ten towns sit
+exactly on the shoreline. `_build_shipyard(c)` (called from `_build_field_settlements()` right
+after `_build_church(c)`, same one-`Node3D`-per-part idiom, no MultiMesh needed for a couple of
+yards) raises a visible dockyard at each: a slipway, a part-built hull on the stocks (keel +
+ribs), an A-frame yard crane, stacked seasoning timber, and a sawpit shed — so a player riding
+through can already see which two towns are the navy's future home before any spawn logic
+exists. Actually designing and launching ships from these two points (and wiring losing one to
+the war, presumably) is future work; this pass only stakes out *where*.
+
 ## Player controls
 `WASD` move · `Shift` run · `R` autorun · mouse look · `RMB` spyglass · `E` hail · `Q` courier orders ·
 `M` map · `C` camp. Self: `LMB` sabre/fire · `G` pistol · **`V` present** (muskets up) ·
