@@ -3377,6 +3377,11 @@ func _make_scenery_mm(mesh: Mesh, col: Color, count: int) -> MultiMesh:
 		mm.set_instance_transform(i, _zero_xf())
 	return mm
 
+# The two market towns nearest the coast on each side — Crown-held Hartsfield, Continental-
+# held Oakford — are the navy's future build-points: a visible shipyard goes up at each now,
+# ahead of the actual design/spawn logic that will one day launch a side's fleet from here.
+const SHIPYARD_TOWNS := ["Hartsfield", "Oakford"]
+
 # The province's towns, spread across the wider map — the strategic landmarks brought
 # INTO the tactical scene (the first of world.gd's content to live in the one world).
 # Far out and fogged: you ride toward them, not survey them from afar.
@@ -3422,6 +3427,9 @@ func _build_field_settlements() -> void:
 			roof_mm.set_instance_transform(ti, Transform3D(rot.scaled(Vector3(wx * 1.06, rh, wz * 1.06)), Vector3(p.x, wy + rh * 0.5 + _gh(p.x, p.z), p.z)))
 			ti += 1
 		_build_church(c)
+		var has_yard := String(t[0]) in SHIPYARD_TOWNS
+		if has_yard:
+			_build_shipyard(c)
 		# (no floating name billboard — you learn a place's name as a quiet toast on arrival)
 		# the town starts in the hands of whichever army's country it sits in (north Crown,
 		# south Continental, the middle neutral) — and can change hands as the war moves
@@ -3432,7 +3440,7 @@ func _build_field_settlements() -> void:
 			owner = 1
 		# (no coloured ownership disc on the ground — ownership reads from the M map instead)
 		field_towns.append({ "name": String(t[0]), "pos": c, "size": sz, "owner": owner,
-			"cap_t": 0.0, "cap_team": -1, "disc": null })
+			"cap_t": 0.0, "cap_team": -1, "disc": null, "shipyard": has_yard })
 
 # A parish church at the heart of a town: a stone nave, a square tower and a spire —
 # the landmark you pick the town out by from across the fields.
@@ -3467,6 +3475,81 @@ func _build_church(c: Vector3) -> void:
 	spire.material_override = slate
 	spire.position = c + off + Vector3(0, 30 + gy, -15)
 	add_child(spire)
+
+# A shipyard at the edge of a market town: a slipway with a part-built hull on the stocks
+# (a keel and a row of ribs — the unmistakable skeleton of a ship under construction), a
+# timber-built yard crane for lowering frames and masts into place, stacked seasoning logs,
+# and a sawpit shed. Marks the spot a side's navy will one day be designed and launched from.
+func _build_shipyard(c: Vector3) -> void:
+	var timber := StandardMaterial3D.new()
+	timber.albedo_color = Color(0.42, 0.30, 0.18); timber.roughness = 0.95
+	var dark := StandardMaterial3D.new()
+	dark.albedo_color = Color(0.10, 0.08, 0.07); dark.roughness = 1.0
+	var deckwood := StandardMaterial3D.new()
+	deckwood.albedo_color = Color(0.50, 0.40, 0.26); deckwood.roughness = 1.0
+	var log := StandardMaterial3D.new()
+	log.albedo_color = Color(0.55, 0.40, 0.22); log.roughness = 1.0
+	var off := Vector3(randf_range(-20.0, 20.0), 0, randf_range(-20.0, 20.0))
+	var gy := _gh(c.x + off.x, c.z + off.z)
+	var base := c + off + Vector3(0, gy, 0)
+	# the slipway: a long inclined way a hull is built on and would be launched down
+	var way := MeshInstance3D.new()
+	way.mesh = _box(8.0, 0.6, 34.0)
+	way.material_override = deckwood
+	way.rotation_degrees = Vector3(-6.0, 0, 0)
+	way.position = base + Vector3(0, 1.0, 0)
+	add_child(way)
+	# a part-built hull on the stocks: a keel and a row of ribs
+	var keel := MeshInstance3D.new()
+	keel.mesh = _box(1.2, 1.0, 30.0)
+	keel.material_override = timber
+	keel.position = base + Vector3(0, 2.4, -2.0)
+	add_child(keel)
+	for i in range(9):
+		var rz := -12.0 + float(i) * 3.0
+		var rib := MeshInstance3D.new()
+		rib.mesh = _box(7.0, 4.0, 0.6)
+		rib.material_override = timber
+		rib.position = base + Vector3(0, 4.6, rz - 2.0)
+		add_child(rib)
+	# the yard crane: an A-frame with a raking boom, for swinging frames and masts into place
+	var legA := MeshInstance3D.new()
+	legA.mesh = _box(0.5, 9.0, 0.5)
+	legA.material_override = dark
+	legA.position = base + Vector3(-2.2, 4.5, 16.0)
+	legA.rotation_degrees = Vector3(0, 0, 8.0)
+	add_child(legA)
+	var legB := MeshInstance3D.new()
+	legB.mesh = _box(0.5, 9.0, 0.5)
+	legB.material_override = dark
+	legB.position = base + Vector3(2.2, 4.5, 16.0)
+	legB.rotation_degrees = Vector3(0, 0, -8.0)
+	add_child(legB)
+	var boom := MeshInstance3D.new()
+	boom.mesh = _box(0.4, 0.4, 9.0)
+	boom.material_override = dark
+	boom.position = base + Vector3(0, 9.2, 20.0)
+	boom.rotation_degrees = Vector3(-20.0, 0, 0)
+	add_child(boom)
+	# stacks of seasoning ship's timber beside the ways
+	for i in range(3):
+		var pile := MeshInstance3D.new()
+		pile.mesh = _cylinder(0.35, 9.0)
+		pile.material_override = log
+		pile.rotation_degrees = Vector3(0, 0, 90.0)
+		pile.position = base + Vector3(7.0 + float(i % 2), 0.4 + float(i) * 0.7, -16.0 + float(i) * 1.2)
+		add_child(pile)
+	# a sawpit shed at the head of the ways
+	var shed := MeshInstance3D.new()
+	shed.mesh = _box(6.0, 4.0, 5.0)
+	shed.material_override = timber
+	shed.position = base + Vector3(8.0, 2.0, 14.0)
+	add_child(shed)
+	var shed_roof := MeshInstance3D.new()
+	shed_roof.mesh = _prism(6.4, 2.4, 5.4)
+	shed_roof.material_override = dark
+	shed_roof.position = base + Vector3(8.0, 5.2, 14.0)
+	add_child(shed_roof)
 
 # The lived-in countryside: farmsteads scattered across the land between the towns —
 # a farmhouse and barn, a haystack, a tilled field, a paddock fence and grazing stock.
@@ -6732,7 +6815,7 @@ const SLEEP_TICK := 0.5            # a far (sleeping) battalion is simulated in 
 const PROVINCE_SIZE := 18000.0    # the tactical scene now spans the whole province (±9 km, float-safe)
 const TOWN_CAPTURE_RANGE := 480.0 # men this near a town hold/take it
 const TOWN_CAPTURE_TIME := 16.0   # seconds of uncontested occupation to flip a town
-var field_towns: Array = []       # the province's towns, now CAPTURABLE: {name,pos,size,owner,cap_t,cap_team,disc}
+var field_towns: Array = []       # the province's towns, now CAPTURABLE: {name,pos,size,owner,cap_t,cap_team,disc,shipyard}
 var _cap_cd := 0.0                 # throttle on the capture check
 # the wider strategic furniture: every named place on the province map and the roads
 # that join them. Forts & depots are each side's garrison homes (one per brigade).

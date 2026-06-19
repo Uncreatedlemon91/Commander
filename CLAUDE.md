@@ -150,6 +150,19 @@ sets `node.transform` fresh every frame) needed no change — it positions the h
 at the wave surface, and the origin **is** the waterline, so the new underwater/boot/bilge split
 just works.
 
+## Shipyards — two navy build-points, ahead of the actual navy
+`field_towns` (the province's ten capturable market towns) now carries a `shipyard: bool` flag.
+Two towns are marked true via `const SHIPYARD_TOWNS` — **Hartsfield** (Crown-held, the team-0
+town with the highest `x`, i.e. nearest the coast at `COAST_X`) and **Oakford** (Continental-
+held, same logic for team 1) — one build-point per side, since none of the ten towns sit
+exactly on the shoreline. `_build_shipyard(c)` (called from `_build_field_settlements()` right
+after `_build_church(c)`, same one-`Node3D`-per-part idiom, no MultiMesh needed for a couple of
+yards) raises a visible dockyard at each: a slipway, a part-built hull on the stocks (keel +
+ribs), an A-frame yard crane, stacked seasoning timber, and a sawpit shed — so a player riding
+through can already see which two towns are the navy's future home before any spawn logic
+exists. Actually designing and launching ships from these two points (and wiring losing one to
+the war, presumably) is future work; this pass only stakes out *where*.
+
 ## Player controls
 `WASD` move · `Shift` run · `R` autorun · mouse look · `RMB` spyglass · `E` hail · `Q` courier orders ·
 `M` map · `C` camp. Self: `LMB` sabre/fire · `G` pistol · **`V` present** (muskets up) ·
