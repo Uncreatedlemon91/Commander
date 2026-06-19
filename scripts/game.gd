@@ -4739,7 +4739,8 @@ func _ship_node(team: int) -> Node3D:
 	# ---- the beak: a carved, gilt figurehead, cathead beams and anchors stowed each side ----
 	_smesh(n, _box(0.9, 2.0, 1.4), Vector3(0, 4.6, 32.0), trim)               # figurehead
 	_smesh(n, _box(0.5, 0.9, 0.8), Vector3(0, 5.7, 32.2), gold)               # figurehead's gilt crest
-	for side in [-1.0, 1.0]:
+	var cathead_sides: Array[float] = [-1.0, 1.0]
+	for side in cathead_sides:
 		var ax := side * 5.6
 		_smesh(n, _box(0.45, 0.45, 2.6), Vector3(side * 5.6, 9.0, 26.5), deckwood)        # cathead beam
 		_smesh(n, _box(0.18, 3.4, 0.18), Vector3(ax, 5.4, 26.0), dark)                     # anchor shank
