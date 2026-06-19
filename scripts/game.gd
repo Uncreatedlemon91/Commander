@@ -9741,6 +9741,12 @@ func _render(delta: float) -> void:
 			run = 1.7
 		elif b.charging:
 			run = 1.6
+		elif b.formation == "march":
+			# a road march column moves at up to BATT_SPEED * MARCH_MUL * (road bonus), which
+			# can outrun MAN_SPEED's plain walking gait — without this the rank-and-file can
+			# never close on their slot, so they perpetually trail and stutter instead of
+			# settling into a smooth marching stride
+			run = maxf(1.0, _move_speed(b) / MAN_SPEED)
 		# each man levels his own musket once he's loaded (front two ranks, enemy present)
 		var maxy := -1e9
 		for f0 in b.figs:
