@@ -161,6 +161,7 @@ const COURIER_MAX := 16
 const AUDIO_POOL := 128           # the whole front is audible now — more voices at once
 const MAX_PER_TEAM := BATT_PER_TEAM * MEN + MILITIA_MAX_MEN   # headroom for an independent militia on top of the standing OOB
 const CORPSE_MAX := 24000          # per team, rolling (the oldest dead are re-used)
+const RAID_CAP := 480              # team 2's render headroom — raiding parties are small war-bands, not armies
 # --- artillery (the great killer of the age) ---
 const BATTERIES_PER_TEAM := 8      # two batteries to a division, massed not strung out
 const GUNS_PER_BATTERY := 4
@@ -291,6 +292,14 @@ class Batt:
 	var obj_text: String = ""      # "Secure the ridge" — the order in plain words
 	var obj_pos: Vector3           # the ground that order points at (marked in 3D for the player)
 	var obj_kind: String = ""      # attack | hold | support | reserve | fix (drives the marker colour)
+	# --- NATIVE RAID PARTIES (team 2): a small war-band, hostile to both colonial sides,
+	# that rides the existing generic AI/combat code rather than a parallel system ---
+	var is_raider: bool = false
+	var raid_state: String = "march"   # march (to the town) | raid (draining it) | retreat (home) | idle (resting, re-taskable)
+	var raid_t: float = 0.0            # seconds spent in the current raid_state
+	var raid_drain_t: float = 0.0      # accumulator that bleeds the town a point at a time
+	var raid_town: Dictionary = {}     # the field_towns entry being raided
+	var raid_home: Vector3 = Vector3.ZERO   # the forest the party came from — and returns to
 
 # a single field piece served by a crew, lobbing roundshot / canister at the enemy
 class Gun:
@@ -435,8 +444,12 @@ const FACINGS_1 := [Color(0.92, 0.85, 0.30), Color(0.20, 0.45, 0.20), Color(0.10
 # change from regiment to regiment. (All three variants are the same colour now.)
 const ARMY_BLUE := Color(0.07, 0.10, 0.30)   # navy blue
 const ARMY_RED := Color(0.64, 0.15, 0.15)
+const ARMY_RAID := Color(0.34, 0.24, 0.13)   # buckskin/earth — a raiding war-party, no European coat
 const COATS_0 := [ARMY_BLUE, ARMY_BLUE, ARMY_BLUE]
 const COATS_1 := [ARMY_RED, ARMY_RED, ARMY_RED]
+const COATS_2 := [ARMY_RAID, ARMY_RAID, ARMY_RAID]
+const FACINGS_2 := [Color(0.78, 0.62, 0.30), Color(0.55, 0.10, 0.08), Color(0.85, 0.80, 0.72),
+	Color(0.20, 0.30, 0.16), Color(0.40, 0.20, 0.10), Color(0.10, 0.10, 0.10)]
 
 var battalions: Array[Batt] = []
 var player: Batt
@@ -454,7 +467,7 @@ var _sight_pitch: float = 0.0             # the depression of your gaze (sets th
 var _aim_marker: MeshInstance3D = null    # a ring on the ground where the battery is laid
 var _obj_label: Label3D = null            # the player battalion's order, painted in the world
 var _obj_marker: MeshInstance3D = null    # a ring on the ground at the objective
-var team_mm: Array = [null, null]
+var team_mm: Array = [null, null, null]
 var _troop_glb := false            # the living troops render the Blender vertex-coloured LOD
 # TROOP-TYPE MODELS FOR ALL INFANTRY: every man is drawn from his battalion's detailed Blender
 # model — line (shako), light (green plume, wings) or grenadier (bearskin) — through one MultiMesh
@@ -464,12 +477,12 @@ var _troop_glb := false            # the living troops render the Blender vertex
 const NEAR_CAP := 64               # near_mm currently unused (all infantry go through team_mm); keep tiny
 const TROOP_GLB := ["res://models/troop_line.glb", "res://models/troop_light.glb", "res://models/troop_grenadier.glb"]
 const TROOP_PLUME := [Color(0.92, 0.90, 0.86), Color(0.12, 0.42, 0.16), Color(0.80, 0.14, 0.12)]  # white / green / red
-var near_mm: Array = [[null, null, null], [null, null, null]]    # [team][troop_type] LOD bodies
-var near_gun: Array = [[null, null, null], [null, null, null]]   # [team][troop_type] their muskets
-var near_prev: Array = [[0, 0, 0], [0, 0, 0]]                    # tail-zero watermark, per team/type
-var team_prev: Array[int] = [0, 0]
-var musket_mm: Array = [null, null]      # a placeholder musket per rendered soldier
-var musket_prev: Array[int] = [0, 0]
+var near_mm: Array = [[null, null, null], [null, null, null], [null, null, null]]    # [team][troop_type] LOD bodies
+var near_gun: Array = [[null, null, null], [null, null, null], [null, null, null]]   # [team][troop_type] their muskets
+var near_prev: Array = [[0, 0, 0], [0, 0, 0], [0, 0, 0]]                    # tail-zero watermark, per team/type
+var team_prev: Array[int] = [0, 0, 0]
+var musket_mm: Array = [null, null, null]      # a placeholder musket per rendered soldier
+var musket_prev: Array[int] = [0, 0, 0]
 var bearer_mm: MultiMesh                  # colour-bearer per battalion
 var nco_mm: MultiMesh                     # company sergeants + rear file-closers
 var spontoon_mm: MultiMesh               # the half-pikes (spontoons) the NCOs carry
@@ -485,11 +498,11 @@ var _flash_rect: ColorRect                # screen flash on a near volley
 var _flash_amt := 0.0
 var _suppress_rect: TextureRect           # smoky vignette that pulses on nearby fire
 var _suppress := 0.0
-var corpse_mm: Array = [null, null]       # per-team fallen (kept in team colour)
-var corpse_idx: Array[int] = [0, 0]
+var corpse_mm: Array = [null, null, null]       # per-team fallen (kept in team colour)
+var corpse_idx: Array[int] = [0, 0, 0]
 # not every man hit is killed outright — some drag themselves toward the rear
 var wounded: Array = []                   # { pos, dir, t, team, ph }
-var wounded_mm: Array = [null, null]
+var wounded_mm: Array = [null, null, null]
 const WOUNDED_MAX := 110                  # crawling at once, per team
 const WOUNDED_FRAC := 0.3                 # fraction of the fallen who are wounded, not killed
 const WOUNDED_TIME := 26.0                # how long a man crawls before he is still
@@ -541,8 +554,8 @@ var battle_over := false
 var _night_end := false             # the battle was closed by nightfall (not a rout)
 var _town_winner := -1              # >=0 if the day was decided by a clean sweep of the towns
 const NIGHTFALL_HOUR := 20.0        # when dusk deepens to this hour, the day's fighting ends
-var _army_broken := [false, false]
-var _start_strength := [0, 0]      # men each army brought to the field
+var _army_broken := [false, false, false]
+var _start_strength := [0, 0, 0]      # men each army brought to the field (index 2 unused — raiders have no army)
 var _bill_t := -1.0                # countdown from the collapse to the final despatch
 var _bill_panel: PanelContainer
 var _bill_label: RichTextLabel
@@ -878,13 +891,14 @@ func _build_world() -> void:
 	# (shako / round hat / bicorne) per battalion from the packed dress.
 	var troop_mesh: Mesh = null
 	_troop_glb = troop_mesh != null
-	for team in [0, 1]:
+	for team in [0, 1, 2]:
 		var mmi := MultiMeshInstance3D.new()
 		var mm := MultiMesh.new()
 		mm.transform_format = MultiMesh.TRANSFORM_3D
 		mm.use_custom_data = true         # per-instance: r=wear  g=gait phase  b=march amount
 		mm.use_colors = true              # per-instance: rgb=facings, a=packed dress (set BEFORE count)
-		mm.instance_count = MAX_PER_TEAM
+		var team_cap: int = RAID_CAP if team == 2 else MAX_PER_TEAM
+		mm.instance_count = team_cap
 		if _troop_glb:
 			mm.mesh = troop_mesh          # the Blender model, recoloured per region by the dress
 			mmi.material_override = _soldier_glb_shader(team)
@@ -894,31 +908,32 @@ func _build_world() -> void:
 		mmi.multimesh = mm
 		add_child(mmi)
 		team_mm[team] = mm
-		var def := Color(COATS_0[0], 0.0) if team == 0 else Color(COATS_1[0], 0.0)
-		for i in range(MAX_PER_TEAM):
+		var def := Color(team_color(team), 0.0)
+		for i in range(team_cap):
 			mm.set_instance_transform(i, _zero_xf())
 			mm.set_instance_color(i, def)
 			mm.set_instance_custom_data(i, Color(1, 1, 1, 1))
 
 	# a placeholder musket (thin box) per soldier — shouldered, levelled to fire
-	for team in [0, 1]:
+	for team in [0, 1, 2]:
 		var gmi := MultiMeshInstance3D.new()
 		var gmm := MultiMesh.new()
 		gmm.transform_format = MultiMesh.TRANSFORM_3D
 		gmm.mesh = _musket_mesh()
-		gmm.instance_count = MAX_PER_TEAM
+		var gun_cap: int = RAID_CAP if team == 2 else MAX_PER_TEAM
+		gmm.instance_count = gun_cap
 		gmi.multimesh = gmm
 		gmi.material_override = _musket_shader()
 		add_child(gmi)
 		musket_mm[team] = gmm
-		for i in range(MAX_PER_TEAM):
+		for i in range(gun_cap):
 			gmm.set_instance_transform(i, _zero_xf())
 
 	# (near_mm is retired now that ALL infantry use the procedural soldier through team_mm;
 	# these tiny buffers stay only so the struct/draw code keeps working — no Blender models.)
 	var troop_lod := soldier_mesh
 	var lod_musket := _musket_mesh()
-	for team in [0, 1]:
+	for team in [0, 1, 2]:
 		for tt in range(3):
 			var nmi := MultiMeshInstance3D.new()
 			var nm := MultiMesh.new()
@@ -956,7 +971,7 @@ func _build_world() -> void:
 		_lights.append(l)
 
 	# fallen men, one MultiMesh per team so corpses keep their unit's colour
-	for team in [0, 1]:
+	for team in [0, 1, 2]:
 		var cmi := MultiMeshInstance3D.new()
 		var cmm := MultiMesh.new()
 		cmm.transform_format = MultiMesh.TRANSFORM_3D
@@ -968,7 +983,11 @@ func _build_world() -> void:
 		cmi.material_override = _soldier_shader(team)   # shako / coat / facings / trousers, static
 		add_child(cmi)
 		corpse_mm[team] = cmm
-		var cfac: Color = FACINGS_0[0] if team == 0 else FACINGS_1[0]
+		var cfac: Color = FACINGS_2[0]
+		if team == 0:
+			cfac = FACINGS_0[0]
+		elif team == 1:
+			cfac = FACINGS_1[0]
 		var ccol := Color(cfac.r, cfac.g, cfac.b, 0.0)
 		for i in range(CORPSE_MAX):
 			cmm.set_instance_transform(i, _zero_xf())
@@ -1426,6 +1445,13 @@ func _load_glb_mesh(path: String) -> Mesh:
 # A fully procedural line-infantryman — no Blender. Built to the same height bands the
 # shader colours and animates by (game coords: +Z front, Y up). ~30 primitives, one mesh,
 # instanced across the whole army; the shader paints each part by position.
+func _coats_for(team: int) -> Array:
+	if team == 0:
+		return COATS_0
+	elif team == 1:
+		return COATS_1
+	return COATS_2
+
 func _soldier_mesh() -> ArrayMesh:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
@@ -1685,7 +1711,7 @@ void fragment() {
 	var m := ShaderMaterial.new()
 	m.shader = sh
 	var coats := PackedVector3Array()
-	for c in (COATS_0 if team == 0 else COATS_1):
+	for c in _coats_for(team):
 		coats.append(Vector3(c.r, c.g, c.b))
 	m.set_shader_parameter("coats", coats)
 	_set_dress_palettes(m)
@@ -1782,7 +1808,7 @@ void fragment() {
 	var m := ShaderMaterial.new()
 	m.shader = sh
 	var coats := PackedVector3Array()
-	for c in (COATS_0 if team == 0 else COATS_1):
+	for c in _coats_for(team):
 		coats.append(Vector3(c.r, c.g, c.b))
 	m.set_shader_parameter("coats", coats)
 	_set_dress_palettes(m)
@@ -1892,7 +1918,7 @@ void fragment() {
 	var m := ShaderMaterial.new()
 	m.shader = sh
 	var coats := PackedVector3Array()
-	for c in (COATS_0 if team == 0 else COATS_1):
+	for c in _coats_for(team):
 		coats.append(Vector3(c.r, c.g, c.b))
 	m.set_shader_parameter("coats", coats)
 	_set_dress_palettes(m)
@@ -2472,7 +2498,7 @@ func _update_map() -> void:
 			continue                                  # the enemy is fogged on the strategic map
 		var sp: Vector2 = P.call(b.pos)
 		var dot := _map_dot(di); di += 1
-		var base: Color = (ARMY_BLUE.lightened(0.45) if b.team == 0 else ARMY_RED.lightened(0.32))
+		var base: Color = team_color(b.team).lightened(0.45 if b.team == 0 else (0.32 if b.team == 1 else 0.4))
 		if b.broken or b.state == "routing":
 			base = base.darkened(0.45)
 		var is_me: bool = b == player
@@ -3292,6 +3318,7 @@ func _build_forests() -> void:
 	var total := 0
 	for d in defs:
 		total += int(d[2])
+		forest_clusters.append({ "pos": d[0] as Vector3, "radius": float(d[1]) })
 	var trunk_mm := _make_scenery_mm(_cylinder(0.32, 4.0), Color(0.26, 0.18, 0.10), total)
 	var leaf_mesh := SphereMesh.new()
 	leaf_mesh.radius = 2.6
@@ -4003,7 +4030,7 @@ func _update_capture(delta: float) -> void:
 	var changed := false
 	for t in field_towns:
 		var tp: Vector3 = t["pos"]
-		var men := [0, 0]
+		var men := [0, 0, 0]   # raiders (index 2) never contest ownership — they drain, not capture
 		for b in battalions:
 			if b.spent or b.state == "routing":
 				continue
@@ -4029,6 +4056,139 @@ func _update_capture(delta: float) -> void:
 			t["cap_t"] = maxf(0.0, float(t["cap_t"]) - tick)
 	if changed:
 		_color_towns()
+
+# ------------------------------------------------------------------ native raid parties
+# Small war-bands out of the woodland — team 2, hostile to both colonial sides alike.
+# They ride the existing generic AI (_sim_ai) and combat code; this just sets their
+# task each frame (where to march, when to hold and bleed a town, when to go home) and
+# drains the raided town's "size" stat while they sit on it, exactly like an unrepelled
+# raid would: the town is worth less to hold and sees less far, but never changes hands.
+func _update_raiders(delta: float) -> void:
+	raid_spawn_cd -= delta
+	if raid_spawn_cd <= 0.0:
+		raid_spawn_cd = RAID_SPAWN_COOLDOWN * randf_range(0.7, 1.4)
+		_maybe_spawn_raid_party()
+	for b in battalions:
+		if b.is_raider:
+			_drive_raid_party(b, delta)
+
+# Reuse an idle war-band if one is resting in the woods; otherwise raise a fresh one,
+# up to RAID_MAX_PARTIES abroad (broken bands don't count — they're done for good).
+func _maybe_spawn_raid_party() -> void:
+	if forest_clusters.is_empty() or field_towns.is_empty():
+		return
+	var idle: Batt = null
+	var active := 0
+	for b in battalions:
+		if not b.is_raider or b.broken:
+			continue
+		if b.raid_state == "idle":
+			if idle == null:
+				idle = b
+		else:
+			active += 1
+	if idle == null and active >= RAID_MAX_PARTIES:
+		return
+	var origin: Vector3 = idle.raid_home if idle != null else (forest_clusters[randi() % forest_clusters.size()]["pos"] as Vector3)
+	var target := _nearest_raidable_town(origin)
+	if target.is_empty():
+		return
+	if idle != null:
+		idle.raid_town = target
+		idle.raid_state = "march"
+		idle.raid_t = 0.0
+		idle.raid_drain_t = 0.0
+	else:
+		_spawn_raid_party(origin, target)
+
+func _nearest_raidable_town(from_pos: Vector3) -> Dictionary:
+	var target := {}
+	var bd := 1.0e18
+	for t in field_towns:
+		if int(t["size"]) <= RAID_MIN_SIZE:
+			continue
+		var d: float = from_pos.distance_to(t["pos"])
+		if d < bd:
+			bd = d
+			target = t
+	return target
+
+func _spawn_raid_party(origin: Vector3, target: Dictionary) -> void:
+	var b := Batt.new()
+	b.team = 2
+	b.idx = BATT_PER_TEAM * 2 + 1 + battalions.size()   # synthetic, outside the standing OOB
+	b.is_raider = true
+	b.independent = true
+	var spawn_pos := origin + Vector3(randf_range(-40.0, 40.0), 0, randf_range(-40.0, 40.0))
+	b.pos = spawn_pos
+	b.spawn = spawn_pos
+	b.raid_home = origin
+	b.raid_town = target
+	b.raid_state = "march"
+	var face := atan2((target["pos"] as Vector3).x - spawn_pos.x, (target["pos"] as Vector3).z - spawn_pos.z)
+	b.facing = face
+	b.formation = "column"
+	b.off_facing = face
+	b.off_pos = b.pos + Vector3(sin(face), 0, cos(face)) * 14.0
+	b.companies = 4
+	b.ammo = START_ROUNDS
+	b.last_pos = b.pos
+	b.ai_target = target["pos"]
+	b.ai_facing = face
+	b.ai_posture = "advance"
+	var n := randi_range(RAID_PARTY_MEN[0], RAID_PARTY_MEN[1])
+	_fill_figs(b, n)
+	_assign_battalion_skills(b)
+	b.rname = "Raiding party"
+	var fc: Color = FACINGS_2[randi() % FACINGS_2.size()]
+	b.inst_col = Color(fc.r, fc.g, fc.b, _dress_packed(0, b.idx, false))
+	b.start_men = b.figs.size()
+	battalions.append(b)
+
+# March on the town, hold and bleed it a while, then melt back into the woods — but
+# fight back exactly like any other battalion the instant a foe closes (see _sim_ai).
+func _drive_raid_party(b: Batt, delta: float) -> void:
+	if b.broken or b.figs.size() < 60:
+		return   # a beaten war-band routs and is left alone, same as any other broken unit
+	b.raid_t += delta
+	match b.raid_state:
+		"march":
+			b.ai_posture = "advance"
+			b.ai_target = b.raid_town["pos"]
+			b.ai_facing = b.facing
+			if b.pos.distance_to(b.raid_town["pos"] as Vector3) < TOWN_CAPTURE_RANGE * 0.7:
+				b.raid_state = "raid"
+				b.raid_t = 0.0
+				b.raid_drain_t = 0.0
+				_send_player_despatch("[color=#caa15a]%s is under raid![/color] A war-party has fallen on the town." % b.raid_town["name"], {})
+		"raid":
+			b.ai_posture = "hold"
+			b.ai_target = b.pos
+			b.ai_facing = b.facing
+			b.raid_drain_t += delta
+			if b.raid_drain_t >= RAID_DRAIN_TIME:
+				b.raid_drain_t -= RAID_DRAIN_TIME
+				var t: Dictionary = b.raid_town
+				if int(t["size"]) > RAID_MIN_SIZE:
+					t["size"] = int(t["size"]) - 1
+			if b.raid_t >= RAID_DURATION or int(b.raid_town["size"]) <= RAID_MIN_SIZE:
+				b.raid_state = "retreat"
+				b.raid_t = 0.0
+				_send_player_despatch("[color=#caa15a]The war-party[/color] melts back into the woods, %s plundered." % String(b.raid_town["name"]), {})
+		"retreat":
+			b.ai_posture = "withdraw"
+			b.ai_target = b.raid_home
+			b.ai_facing = b.facing
+			if b.pos.distance_to(b.raid_home) < 60.0:
+				b.raid_state = "idle"
+				b.raid_t = 0.0
+				b.morale = 100.0
+				b.cohesion = _disc_cohesion(b)
+				b.ammo = START_ROUNDS
+		"idle":
+			b.ai_posture = "hold"
+			b.ai_target = b.pos
+			b.ai_facing = b.facing
 
 func _town_counts() -> Array:
 	var c := [0, 0, 0]   # crown, continental, neutral
@@ -5247,7 +5407,7 @@ func _make_flag(b: Batt, team: int) -> void:
 	cloth.position = Vector3(0.5, 1.85, 0)      # the colours fly just above the men's heads
 	var cmat := StandardMaterial3D.new()
 	# the cloth carries the REGIMENT's facing colour quartered with the national one
-	var nat := ARMY_BLUE if team == 0 else ARMY_RED
+	var nat := team_color(team)
 	cmat.albedo_color = nat.lerp(Color(b.inst_col.r, b.inst_col.g, b.inst_col.b), 0.5)
 	cmat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	cloth.material_override = cmat
@@ -6127,6 +6287,7 @@ func _process(delta: float) -> void:
 		# the host (or single-player) runs the whole simulation
 		_player_order_cd = maxf(0.0, _player_order_cd - delta)
 		_update_brigades(delta)          # commanders set every AI battalion's task first
+		_update_raiders(delta)           # native war-bands set their own task, hostile to both sides
 		_commander_task(delta)           # the General sends you on tasks / summons you to the push
 		# SLEEP/WAKE: near the eye every battalion ticks each frame; far away they bank time
 		# and tick in bursts — so ONE scene can carry a whole province of men for the cost of
@@ -6286,6 +6447,17 @@ const TOWN_CAPTURE_RANGE := 480.0 # men this near a town hold/take it
 const TOWN_CAPTURE_TIME := 16.0   # seconds of uncontested occupation to flip a town
 var field_towns: Array = []       # the province's towns, now CAPTURABLE: {name,pos,size,owner,cap_t,cap_team,disc}
 var _cap_cd := 0.0                 # throttle on the capture check
+
+# --- NATIVE RAID PARTIES: small war-bands out of the woodland, hostile to both colonial
+# sides alike, that fall on the roads and the towns — a reason to keep a patrol out ---
+const RAID_MAX_PARTIES := 3        # never more than this many war-bands abroad at once
+const RAID_SPAWN_COOLDOWN := 150.0 # average seconds between spawn attempts (jittered)
+const RAID_PARTY_MEN := [65, 120]  # band strength range (min, max) — kept above the 60-man "viable foe" floor
+const RAID_DURATION := 70.0        # seconds spent raiding a town before withdrawing
+const RAID_MIN_SIZE := 1           # a raided town's size never bleeds below this floor
+const RAID_DRAIN_TIME := 12.0      # seconds of presence to bleed one point of a town's size
+const RAID_SPEED_MUL := 0.92       # a war-band moves at a hard march, not a parade-ground pace
+var raid_spawn_cd := RAID_SPAWN_COOLDOWN * 0.5   # the first band can be a while finding its feet
 # the wider strategic furniture: every named place on the province map and the roads
 # that join them. Forts & depots are each side's garrison homes (one per brigade).
 var field_sites: Array = []       # all map sites incl. towns: {name,pos,kind,team}  kind: town|fort|depot
@@ -6298,7 +6470,8 @@ const RIVER_HALF := 26.0          # the river's half-width — fording it off a 
 const BRIDGE_REACH := 34.0        # how near a bridge you must be to cross dry-shod
 const ROAD_SPEED_MUL := 1.45      # the pace gained marching on a made road
 const FORD_SPEED_MUL := 0.32      # the crawl of fording the river away from a bridge
-var _team_sites: Array = [[], []] # per-team garrison positions (Vector3), one per brigade
+var _team_sites: Array = [[], [], []] # per-team garrison positions (Vector3), one per brigade (raiders never garrison)
+var forest_clusters: Array = []   # { pos: Vector3, radius: float } — the woodland scatter, reused as raid spawn ground
 var _map_reveal := false          # dev only: reveal the enemy on the province map
 
 func _sim_far(b: Batt) -> bool:
@@ -6521,7 +6694,7 @@ func _update_firing(b: Batt, delta: float) -> void:
 					# a real ball with a cone of dispersion: it strikes the FIRST enemy
 					# body in its path — whichever unit that is — or flies clean past
 					var sd := _scatter_dir(fwd, MUSKET_YAW_SD, MUSKET_PITCH_SD)
-					var hit := _ray_hit_world(Vector3(w.x, 1.3, w.z), sd, FIRE_RANGE, 1 - b.team)
+					var hit := _ray_hit_world(Vector3(w.x, 1.3, w.z), sd, FIRE_RANGE, b.team)
 					if not hit.is_empty():
 						kills += 1
 						felled += 1
@@ -8699,7 +8872,7 @@ func _ray_hit_in_batt(b: Batt, origin: Vector3, dir: Vector3, max_range: float) 
 
 # Ray test across every enemy battalion (used by the player's pistol): returns the
 # nearest man struck, as { "b": Batt, "i": int }, or {} for a clean miss.
-func _ray_hit_world(origin: Vector3, dir: Vector3, max_range: float, enemy_team: int) -> Dictionary:
+func _ray_hit_world(origin: Vector3, dir: Vector3, max_range: float, exclude_team: int) -> Dictionary:
 	var dh := Vector2(dir.x, dir.z)
 	var dl := dh.length()
 	if dl < 0.0001:
@@ -8710,7 +8883,7 @@ func _ray_hit_world(origin: Vector3, dir: Vector3, max_range: float, enemy_team:
 	var rb: Batt = null
 	var ri := -1
 	for b in battalions:
-		if b.team != enemy_team or b.spent or b.figs.is_empty():
+		if b.team == exclude_team or b.spent or b.figs.is_empty():
 			continue
 		if Vector2(b.pos.x - origin.x, b.pos.z - origin.z).length() > max_range + 130.0:
 			continue
@@ -8785,8 +8958,8 @@ func _batt_lod(b: Batt) -> int:
 	return 6          # the far impression: a static mass on the horizon, stride 6
 
 func _render(delta: float) -> void:
-	var idx: Array[int] = [0, 0]
-	var nidx := [[0, 0, 0], [0, 0, 0]]      # near-LOD body/musket counters, per team & troop type
+	var idx: Array[int] = [0, 0, 0]
+	var nidx := [[0, 0, 0], [0, 0, 0], [0, 0, 0]]      # near-LOD body/musket counters, per team & troop type
 	var off_i := 0
 	var bearer_i := 0
 	var nco_i := 0
@@ -8843,7 +9016,7 @@ func _render(delta: float) -> void:
 		var mm: MultiMesh = team_mm[b.team]
 		var gun: MultiMesh = musket_mm[b.team]
 		var i: int = idx[b.team]
-		var icap: int = MAX_PER_TEAM
+		var icap: int = RAID_CAP if b.team == 2 else MAX_PER_TEAM
 		for fi in range(b.figs.size()):
 			var f: Dictionary = b.figs[fi]
 			var slot: Vector2 = f["slot"]
@@ -9003,7 +9176,7 @@ func _render(delta: float) -> void:
 			_cg_dress(nco_mm, nco_i, b.team, rw.distance_to(rp) > 0.1, true)
 			spontoon_mm.set_instance_transform(nco_i, Transform3D(Basis(Vector3.UP, ryaw), Vector3(rw.x + right.x * 0.2, _gh(rw.x, rw.z), rw.z + right.z * 0.2)))
 			nco_i += 1
-	for team in [0, 1]:
+	for team in [0, 1, 2]:
 		var mm: MultiMesh = team_mm[team]
 		var gun: MultiMesh = musket_mm[team]
 		for j in range(idx[team], team_prev[team]):
@@ -9110,7 +9283,11 @@ func _place_flag(b: Batt, footpos: Vector3, yaw: float) -> void:
 		b.flag_cloth.rotation.y = sin(_t * (3.0 + (1.0 - m) * 6.0) + float(b.team)) * wave
 
 func team_color(team: int) -> Color:
-	return ARMY_BLUE if team == 0 else ARMY_RED
+	if team == 0:
+		return ARMY_BLUE
+	elif team == 1:
+		return ARMY_RED
+	return ARMY_RAID
 
 # Paint an officer/NCO instance in his battalion's coat and set his gait (the bicorne
 # shader reads COLOR.rgb as the coat, CUSTOM.b as the march amount).
@@ -9129,7 +9306,8 @@ func _drop_dead(pos: Vector3, team: int, knock_dir: Vector3, seen: bool) -> void
 	if seen:
 		_emit_blood(pos, knock_dir)          # a spray of blood at the moment of the hit
 	if seen and randf() < WOUNDED_FRAC and _wounded_count(team) < WOUNDED_MAX:
-		var rear := Vector3(randf_range(-0.35, 0.35), 0, -1.0 if team == 0 else 1.0).normalized()
+		var rear_z := (-1.0 if team == 0 else 1.0) if team < 2 else (-1.0 if randf() < 0.5 else 1.0)
+		var rear := Vector3(randf_range(-0.35, 0.35), 0, rear_z).normalized()
 		wounded.append({ "pos": Vector3(pos.x, 0, pos.z), "dir": rear,
 			"t": WOUNDED_TIME * randf_range(0.5, 1.0), "team": team, "ph": randf() * TAU })
 		return
@@ -9145,7 +9323,7 @@ func _wounded_count(team: int) -> int:
 	return n
 
 func _build_wounded_layer() -> void:
-	for team in [0, 1]:
+	for team in [0, 1, 2]:
 		var mmi := MultiMeshInstance3D.new()
 		var mm := MultiMesh.new()
 		mm.transform_format = MultiMesh.TRANSFORM_3D
@@ -9169,7 +9347,7 @@ func _build_wounded_layer() -> void:
 # The wounded crawl toward their own rear in fits and starts, then lie still and
 # join the field of the fallen.
 func _update_wounded(delta: float) -> void:
-	var counts := [0, 0]
+	var counts := [0, 0, 0]
 	var i := 0
 	while i < wounded.size():
 		var w: Dictionary = wounded[i]
@@ -9194,7 +9372,7 @@ func _update_wounded(delta: float) -> void:
 			mm.set_instance_transform(counts[team], Transform3D(basis, Vector3(p.x, CAP_RADIUS + 0.02, p.z)))
 			counts[team] += 1
 		i += 1
-	for team in [0, 1]:
+	for team in [0, 1, 2]:
 		var mm2: MultiMesh = wounded_mm[team]
 		if mm2 == null:
 			continue
@@ -9450,9 +9628,9 @@ func _show_bill() -> void:
 		return
 	var pt := player.team
 	var et := 1 - pt
-	var men_now := [0, 0]
-	var guns_lost := [0, 0]
-	var horse_now := [0, 0]
+	var men_now := [0, 0, 0]   # index 2 (raiders) is summed but never displayed
+	var guns_lost := [0, 0]    # raiders never field guns
+	var horse_now := [0, 0]    # raiders never field cavalry
 	for b in battalions:
 		men_now[b.team] += b.figs.size()
 	for g in guns:
@@ -9672,7 +9850,7 @@ func _fire_pistol() -> void:
 	_emit_muzzle_bloom(muzzle, aim)
 	_play_shot(muzzle)
 	_shake = minf(_shake + 0.15, SHAKE_MAX)
-	var hit := _ray_hit_world(muzzle, sd, PISTOL_RANGE, 1 - player.team)
+	var hit := _ray_hit_world(muzzle, sd, PISTOL_RANGE, player.team)
 	if not hit.is_empty():
 		_drop_fig(hit["b"], hit["i"], sd)
 		prestige += 1                    # felled by your own hand
