@@ -10707,8 +10707,7 @@ func _smoke_material() -> StandardMaterial3D:
 	m.cull_mode = BaseMaterial3D.CULL_DISABLED
 	m.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
 	m.billboard_keep_scale = true
-	# a Blender-baked billowy smoke puff instead of a flat radial gradient (falls back cleanly)
-	m.albedo_texture = (load("res://images/smoke_puff.png") if ResourceLoader.exists("res://images/smoke_puff.png") else _radial_tex())
+	m.albedo_texture = _radial_tex()
 	m.vertex_color_use_as_albedo = true
 	return m
 
