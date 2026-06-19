@@ -2018,7 +2018,7 @@ func _build_rain() -> GPUParticles3D:
 	pm.gravity = Vector3(0, -12.0, 0)         # wind adds a sideways pull on top of this, live
 	pm.scale_min = 1.0
 	pm.scale_max = 1.0
-	pm.particle_flag_align_y_to_velocity = true   # streaks rake over to match how they're actually falling
+	pm.set_particle_flag(ParticleProcessMaterial.PARTICLE_FLAG_ALIGN_Y_TO_VELOCITY, true)   # streaks rake to match how they're actually falling
 	p.process_material = pm
 	_rain_proc = pm
 	var mesh := QuadMesh.new()
