@@ -4849,7 +4849,7 @@ var ocean_mat: ShaderMaterial      # wind-driven Gerstner sea (uniforms updated 
 var cloud_layer: MeshInstance3D    # drifting cloud sheet that follows the camera
 var cloud_mat: ShaderMaterial
 const COAST_X := 1650.0            # the shoreline's mean position — land to the west, open sea
-                                    # to the east (the actual coast bends around this, see _coast_x)
+									# to the east (the actual coast bends around this, see _coast_x)
 const COAST_AMPLITUDE := 400.0     # the most a bay/headland can pull the shore off COAST_X
 const SHIP_SPEED := 2.4            # a ship under sail makes way slowly (an accurate pace)
 const SHIP_TURN := 0.09            # max turn rate (rad/s) — a big, ponderous turning circle
