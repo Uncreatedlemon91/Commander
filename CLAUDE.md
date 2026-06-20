@@ -219,6 +219,47 @@ a tree standing in open water. Ship spawn/patrol/stand-off logic was left on the
 reference deliberately — its margins (650+ units) are already comfortably larger than
 `COAST_AMPLITUDE`, so the ships were never at risk of running aground against the new curve.
 
+## Cavalry — four arms, each with its own ride, fight and look
+Cavalry used to be one undifferentiated regiment type (one shared horse+rider mesh, one
+flat `CAV_TROT`/`CAV_GALLOP`/`CAV_RALLY_TIME` for every trooper). It's now four arms —
+**hussars, light dragoons, heavy dragoons, lancers** — selected per-regiment, driven by a
+single data table, `CAV_TYPE_DATA` (indexed by `Cav.cav_type`, 0..3), so adding/tuning an
+arm never means hunting through scattered branches: `trot`/`gallop` (hussars fastest, heavy
+dragoons slowest), `rally_mult` (how long blown horses take to re-form — heavy dragoons take
+longest), `shock` (the weight of the blow each arm lands — heavy dragoons and a lancer's
+couched reach hit hardest, hussars lightest), `sturdy` (divides the losses the regiment
+itself takes — heavy dragoons soak it best, lancers worst once the lances are through),
+`scout` (charge-opportunity range multiplier — hussars/light dragoons range furthest), and
+`mount_scale` (heavy dragoons ride visibly the biggest horse, hussars the lightest).
+`_cav_decide()` gives each arm its own eye for an opening (hussars/light dragoons relish a
+rout or a loose skirmish screen; heavy dragoons want a real, formed fight; lancers favour
+anything not yet in square) and `_cav_resolve()` applies `shock`/`sturdy` (and the enemy's
+own, for cav-vs-cav) to every loss calculation. Visually, each arm gets its own rider mesh
+— `_cav_rider_mesh(ctype)`/`_cav_rider_shader(trim, ctype)`, the same banded box-and-cylinder
+idiom as the soldiers/officers, sharing a common enlisted body (no sash/gorget/aiguillette —
+those stay the player-hero's and company officers' marks) and branching per arm for
+headgear+weapon: hussars get a fur busby with bag and plume; light dragoons a crested
+leather Tarleton helmet with a slung carbine; heavy dragoons a bigger crested steel helmet
+with a horsehair tail and a heavier sabre; lancers a square-topped czapka and a couched lance
+(built via `_add_box`/`_add_cyl`'s new optional `rot: Basis` parameter, which both helpers
+now accept — default `Basis()`, so every prior call site is unaffected — to tilt the lance
+cylinder off its default +Y axis). All four arms still ride the one shared horse mesh
+(`_mount_horse_mesh()`, the same one the AI mounted commanders use), just scaled per-arm.
+Each arm gets its own lace colour too (`CAV_TRIM_PER_TYPE`: gold for hussars/lancers, white
+metal for light dragoons, brass for heavy dragoons) baked into the shader as a `trim`
+uniform, the same idiom the mounted-commander ranks use for rank trim. Because every
+regiment of a given arm on a side shares that arm's MultiMesh (never one per regiment), the
+affordability keystone still holds — there are just up to four buckets per team now instead
+of one (`cav_horse_mm[team][cav_type]` / `cav_rider_mm[team][cav_type]`), sized only for the
+arms actually present (regiments are assigned an arm round-robin in `_spawn_cavalry()`, and a
+team/arm combination with zero regiments simply gets no MultiMesh at all). `_render_cavalry()`
+was also corrected onto the ground-origin seat convention the mounted commanders already use
+(feet-at-y=0 meshes, seat at `(x, _gh(x,z)+bob, z)`, one scaled `Basis` driving both horse and
+rider) — the old code carried capsule-era manual y-offsets and a 90°-tilt `Basis` that no
+longer apply now the rider is a real built-up figure, not a bare capsule. Despatch text now
+names the actual arm (`"You take command of the Lancers."`) and the charge order reads
+`"Lances down"` instead of `"Sabres out"` when you're riding with the lancers.
+
 ## Player controls
 `WASD` move · `Shift` run · `R` autorun · mouse look · `RMB` spyglass · `E` hail · `Q` courier orders ·
 `M` map · `C` camp. Self: `LMB` sabre/fire · `G` pistol · **`V` present** (muskets up) ·
@@ -245,3 +286,5 @@ reference deliberately — its margins (650+ units) are already comfortably larg
 - Fixed the **see-through rolling ground** (inverted triangle winding) and **lowered the colours**.
 - Removed the facing-colour picker from character creation (uses the regimental default).
 - Repo published: **github.com/Uncreatedlemon91/Commander**.
+- **Cavalry refactor**: hussars/light dragoons/heavy dragoons/lancers now ride, fight and
+  look distinct — see "Cavalry — four arms..." above.
