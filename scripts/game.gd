@@ -99,6 +99,12 @@ const OFF_MELEE_DPS := 26.0       # hp lost per second per enemy at sword's leng
 const OFF_FIRE_DPS := 9.0         # hp lost per second standing in a close enemy's fire
 const OFF_REGEN := 7.0            # hp recovered per second when not under threat
 const OFF_DOWN_TIME := 6.5        # seconds carried to the rear before you are back
+# --- being shot at: near misses rattle you, a true hit on your line puts you down ---
+const BALL_HIT_RADIUS := 1.4      # a roundshot passing this close to you connects outright
+const BALL_HIT_HEIGHT := 2.8      # ...and this low (rider + horse stand about this tall)
+const BALL_NEARMISS_RADIUS := 9.0 # beyond the hit radius but still close enough to rattle you
+const BALL_NEARMISS_HEIGHT := 8.0
+const TINNITUS_DECAY := 0.22      # the ringing fades over roughly 4-5 seconds
 const ROUT_THRESHOLD := 30.0      # nerve below this and the unit gives way and runs
 const SHAKEN_THRESHOLD := 55.0
 const MORALE_PER_CASUALTY := 0.7
@@ -567,6 +573,10 @@ var _bill_panel: PanelContainer
 var _bill_label: RichTextLabel
 var _dmg_flash := 0.0             # red screen pulse when you take a hit
 var _dmg_rect: ColorRect
+var _blood_rect: TextureRect      # persistent bloody tunnel-vision, deepens as your HP drops
+var _tinnitus := 0.0              # ringing-ears intensity (0 = clear hearing, 1 = deafened)
+var _world_lpf: AudioEffectLowPassFilter   # muffles the battlefield while your ears ring
+var _tinnitus_player: AudioStreamPlayer    # the ring itself — stays on Master, unmuffled
 
 var cam: Camera3D
 # --- HOST MODE (seam merge, staged): the tactical sim running INSIDE world.gd,
@@ -611,6 +621,7 @@ var snd_cannon: AudioStream
 var snd_reload: AudioStream               # ramrod work — the firing line loading
 var snd_ball_land: AudioStream            # a roundshot striking the ground
 var snd_ball_over: AudioStream            # a roundshot screaming overhead the player
+var snd_tinnitus: AudioStream             # ringing in your ears after a close blast (optional file)
 var snd_hooves: AudioStream               # the thunder of a charge (optional file)
 var snd_cheer: AudioStream                # the charge goes in with a shout (optional)
 var snd_v_ready: AudioStream              # officer: "Make ready!"  (optional)
@@ -1298,11 +1309,31 @@ func _build_world() -> void:
 	snd_v_present = _load_first(["VoicePresent.wav", "VoicePresent.mp3"])
 	snd_v_fire = _load_first(["VoiceFire.wav", "VoiceFire.mp3"])
 	snd_v_charge = _load_first(["VoiceCharge.wav", "VoiceCharge.mp3"])
+	snd_tinnitus = _load_first(["Tinnitus.wav", "EarRinging.wav", "Tinnitus.mp3"])
+
+	# the battlefield routes through its own "World" bus so a close blast can muffle
+	# everything you hear (cannon, drums, hooves...) while the ringing in your own
+	# ears — on the unfiltered Master bus — stays the one thing that cuts through
+	var world_bus := AudioServer.get_bus_index("World")
+	if world_bus == -1:
+		AudioServer.add_bus(AudioServer.bus_count)
+		world_bus = AudioServer.bus_count - 1
+		AudioServer.set_bus_name(world_bus, "World")
+		AudioServer.set_bus_send(world_bus, "Master")
+	_world_lpf = AudioEffectLowPassFilter.new()
+	_world_lpf.cutoff_hz = 20000.0
+	AudioServer.add_bus_effect(world_bus, _world_lpf)
+	if snd_tinnitus != null:
+		_tinnitus_player = AudioStreamPlayer.new()
+		_tinnitus_player.stream = snd_tinnitus
+		_tinnitus_player.volume_db = -80.0
+		add_child(_tinnitus_player)
 	for i in range(AUDIO_POOL):
 		var ap := AudioStreamPlayer3D.new()
 		ap.max_distance = 1000.0
 		ap.unit_size = 24.0          # carries much further before attenuating
 		ap.volume_db = 11.0          # much louder
+		ap.bus = "World"
 		add_child(ap)
 		_audio_pool.append(ap)
 	# DISTANT BATTLE — a muffled rumble that carries clear across the map, so fighting you
@@ -1314,6 +1345,7 @@ func _build_world() -> void:
 		dp.volume_db = 4.0
 		dp.attenuation_filter_cutoff_hz = 1400.0   # low-pass with distance: a dull thud, not a crack
 		dp.attenuation_filter_db = -26.0
+		dp.bus = "World"
 		add_child(dp)
 		_distant_pool.append(dp)
 
@@ -1356,6 +1388,15 @@ func _build_world() -> void:
 	_dmg_rect.color = Color(0.6, 0.0, 0.0, 0.0)
 	_dmg_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	cl.add_child(_dmg_rect)
+
+	# bloody tunnel-vision — a vignette (not a flat wash, so it never blots out the
+	# centre of your sight) that deepens the lower your HP runs and clears as you heal
+	_blood_rect = TextureRect.new()
+	_blood_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_blood_rect.texture = _blood_vignette_tex()
+	_blood_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_blood_rect.modulate = Color(1, 1, 1, 0.0)
+	cl.add_child(_blood_rect)
 
 	# spyglass tube — a circular mask that fades in when you raise the glass
 	_scope_rect = TextureRect.new()
@@ -5415,6 +5456,21 @@ func _vignette_tex() -> Texture2D:
 	t.height = 256
 	return t
 
+# a darker, blood-red ring at the very edge of sight — for the wounded vignette,
+# clear in the centre so it reads as "your vision closing in", not a colour wash
+func _blood_vignette_tex() -> Texture2D:
+	var g := Gradient.new()
+	g.set_color(0, Color(0.15, 0.0, 0.0, 0.0))
+	g.set_color(1, Color(0.25, 0.0, 0.0, 0.95))
+	var t := GradientTexture2D.new()
+	t.gradient = g
+	t.fill = GradientTexture2D.FILL_RADIAL
+	t.fill_from = Vector2(0.5, 0.5)
+	t.fill_to = Vector2(1.0, 0.78)
+	t.width = 256
+	t.height = 256
+	return t
+
 func _zero_xf() -> Transform3D:
 	return Transform3D(Basis().scaled(Vector3.ZERO), Vector3.ZERO)
 
@@ -5968,6 +6024,7 @@ func _spawn_armies() -> void:
 			mp.max_distance = 700.0
 			mp.unit_size = 14.0
 			mp.volume_db = 4.0
+			mp.bus = "World"
 			add_child(mp)
 			b.march_player = mp
 			_fill_figs(b)
@@ -6037,6 +6094,7 @@ func _spawn_independent_militia() -> void:
 	mp.max_distance = 700.0
 	mp.unit_size = 14.0
 	mp.volume_db = 4.0
+	mp.bus = "World"
 	add_child(mp)
 	b.march_player = mp
 	_fill_figs(b, MILITIA_START_MEN)           # a small band, not a full battalion
@@ -6086,6 +6144,7 @@ func _spawn_from_setup() -> void:
 		mp.max_distance = 700.0
 		mp.unit_size = 14.0
 		mp.volume_db = 4.0
+		mp.bus = "World"
 		add_child(mp)
 		b.march_player = mp
 		_fill_figs(b)
@@ -7082,6 +7141,7 @@ func _gun_fire_cav(g: Gun, c: Cav) -> void:
 	var prox := clampf(1.0 - cam.position.distance_to(g.pos) / 160.0, 0.0, 1.0) if cam else 0.0
 	if prox > 0.0:
 		_shake = minf(_shake + prox * 0.6, SHAKE_MAX)
+		_add_tinnitus(prox * 0.5)   # a gun's blast this close rings your ears
 	_cav_lose(c, randi_range(4, 9), near)
 
 # Drive the crew through the loading drill: the rammer steps to the muzzle and rams,
@@ -7129,6 +7189,7 @@ func _gun_fire(g: Gun, foe: Batt) -> void:
 	var prox := clampf(1.0 - cam.position.distance_to(g.pos) / 160.0, 0.0, 1.0)
 	if prox > 0.0:
 		_shake = minf(_shake + prox * 0.6, SHAKE_MAX)
+		_add_tinnitus(prox * 0.5)   # a gun's blast this close rings your ears
 		_flash_amt = minf(_flash_amt + prox * 0.14, 0.32)
 	if d <= CANISTER_RANGE:
 		_canister(muzzle, fwd, g.team)        # close work: a wall of balls, instantly
@@ -7252,6 +7313,17 @@ func _update_shots(delta: float) -> void:
 			if Vector2(p.x - off_pos.x, p.z - off_pos.z).length() < 22.0:
 				_play_ball_over(p)
 				s["whooshed"] = true
+		# a ball flying low and close enough to actually threaten you: square in your
+		# path puts you down outright (your horse shot from under you); a near miss at
+		# roughly head height just rattles you — shake, ringing ears, no harm done
+		if player != null and not _off_down and int(s.get("team", -1)) != player.team:
+			var hd := Vector2(p.x - off_pos.x, p.z - off_pos.z).length()
+			if p.y < BALL_HIT_HEIGHT and hd < BALL_HIT_RADIUS:
+				_player_unhorsed()
+			elif not s.get("near_missed", false) and p.y < BALL_NEARMISS_HEIGHT and hd < BALL_NEARMISS_RADIUS:
+				s["near_missed"] = true
+				_shake = minf(_shake + 0.5, SHAKE_MAX)
+				_add_tinnitus(0.65)
 		var flat_trav := Vector2(p.x - from.x, p.z - from.z).length()
 		if flat_trav >= float(s["dist"]):
 			var dir: Vector3 = s["dir"]
@@ -7513,6 +7585,16 @@ func _decay_cinematic(delta: float) -> void:
 	_suppress = maxf(0.0, _suppress - delta * 1.1)   # eases off gently
 	if _suppress_rect:
 		_suppress_rect.modulate.a = _suppress
+	if _tinnitus > 0.0:
+		_tinnitus = maxf(0.0, _tinnitus - delta * TINNITUS_DECAY)
+	if _world_lpf:
+		_world_lpf.cutoff_hz = lerpf(20000.0, 450.0, _tinnitus)
+	if _tinnitus_player:
+		_tinnitus_player.volume_db = lerpf(-80.0, -6.0, _tinnitus)
+		if _tinnitus > 0.02 and not _tinnitus_player.playing:
+			_tinnitus_player.play()
+		elif _tinnitus <= 0.02 and _tinnitus_player.playing:
+			_tinnitus_player.stop()
 	for l in _lights:
 		if l.light_energy > 0.0:
 			l.light_energy = maxf(0.0, l.light_energy - delta * 55.0)
@@ -8463,6 +8545,7 @@ func _spawn_cavalry() -> void:
 			hp.max_distance = 1100.0
 			hp.unit_size = 22.0
 			hp.volume_db = 7.0
+			hp.bus = "World"
 			add_child(hp)
 			c.hoof_player = hp
 			_fill_troopers(c)
@@ -10864,6 +10947,8 @@ func _update_combat(delta: float) -> void:
 			_pistol_loaded = true
 	if _dmg_rect:
 		_dmg_rect.color.a = _dmg_flash * 0.45
+	if _blood_rect:
+		_blood_rect.modulate.a = clampf((1.0 - _off_hp / OFF_HP) * 1.15, 0.0, 1.0)
 	if _off_down:
 		_off_respawn -= delta
 		if _off_respawn <= 0.0:
@@ -10918,6 +11003,22 @@ func _player_down() -> void:
 		player.morale -= OFFICER_SHOCK * 1.5
 		player.calm_t = 0.0
 	_send_player_despatch("[color=#ff7a6a]You are cut down![/color] Your men drag you to the rear...", {})
+
+# a roundshot found you square — not a graze: down you go, horse and all
+func _player_unhorsed() -> void:
+	_off_down = true
+	_off_respawn = OFF_DOWN_TIME
+	_off_hp = 0.0
+	_dmg_flash = 1.0
+	_shake = SHAKE_MAX
+	_add_tinnitus(1.0)
+	if player != null:
+		player.morale -= OFFICER_SHOCK * 2.0
+		player.calm_t = 0.0
+	_send_player_despatch("[color=#ff7a6a]Your horse is shot from under you![/color] Your men drag you clear...", {})
+
+func _add_tinnitus(amount: float) -> void:
+	_tinnitus = minf(1.0, _tinnitus + amount)
 
 func _animate_weapons(delta: float) -> void:
 	if sabre:
@@ -11259,6 +11360,7 @@ func _gun_fire_at(g: Gun, aim_pos: Vector3) -> void:
 	var prox := clampf(1.0 - cam.position.distance_to(g.pos) / 160.0, 0.0, 1.0) if cam else 0.0
 	if prox > 0.0:
 		_shake = minf(_shake + prox * 0.6, SHAKE_MAX)
+		_add_tinnitus(prox * 0.5)   # a gun's blast this close rings your ears
 		_flash_amt = minf(_flash_amt + prox * 0.14, 0.32)
 	if g.pos.distance_to(aim_pos) <= CANISTER_RANGE:
 		_canister(muzzle, fwd, g.team)
