@@ -1189,7 +1189,7 @@ func _build_world() -> void:
 	nco_mm.use_custom_data = true
 	nco_mm.instance_count = BATT_PER_TEAM * 2 * MAX_NCO
 	nmi.multimesh = nco_mm
-	nmi.material_override = _officer_shader()
+	nmi.material_override = _nco_shader()   # proper shako + sergeant's sash (not the old flat hat)
 	add_child(nmi)
 	for i in range(BATT_PER_TEAM * 2 * MAX_NCO):
 		nco_mm.set_instance_transform(i, _zero_xf())
@@ -1491,8 +1491,8 @@ func _soldier_mesh() -> ArrayMesh:
 	_add_box(st, Vector3(0, 0.31, -0.19), Vector3(0.32, 0.07, 0.12))         # rolled blanket on top
 	# --- head ---
 	var head := SphereMesh.new()
-	head.radius = 0.112; head.height = 0.224; head.radial_segments = 8; head.rings = 4
-	st.append_from(head, 0, Transform3D(Basis(), Vector3(0, 0.55, 0)))       # skin (vy 0.44..0.66)
+	head.radius = 0.128; head.height = 0.236; head.radial_segments = 8; head.rings = 4   # a touch bigger head
+	st.append_from(head, 0, Transform3D(Basis(), Vector3(0, 0.55, 0)))       # skin (vy 0.43..0.67)
 	# --- shako: tapered cap with a brass band & front peak, surmounted by a plume. The shader
 	# MORPHS this block (vy>0.655) per battalion into a round hat or a bicorne, from COLOR.a. ---
 	_add_cyl(st, Vector3(0, 0.78, 0.0), 0.125, 0.150, 0.225, 12)             # shako body (vy 0.67..0.89)
@@ -1579,13 +1579,41 @@ void fragment() {
 func _officer_mesh() -> ArrayMesh:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	_add_box(st, Vector3(0, 0.70, 0), Vector3(0.16, 0.11, 0.50))       # bicorne (wide fore-aft)
-	_add_box(st, Vector3(0, 0.55, 0), Vector3(0.21, 0.22, 0.21))       # head
-	_add_box(st, Vector3(0, 0.225, 0), Vector3(0.42, 0.55, 0.26))      # chest / coat
-	_add_box(st, Vector3(-0.265, 0.20, 0), Vector3(0.13, 0.52, 0.14))  # left arm
-	_add_box(st, Vector3(0.265, 0.20, 0), Vector3(0.13, 0.52, 0.14))   # right arm
-	_add_box(st, Vector3(-0.105, -0.45, 0), Vector3(0.17, 0.80, 0.20)) # left leg
-	_add_box(st, Vector3(0.105, -0.45, 0), Vector3(0.17, 0.80, 0.20))  # right leg
+	# Built to the SAME position bands as `_soldier_mesh()` (legs < -0.05 swing at the hip,
+	# arms |x|>0.215 swing at the shoulder) so the shared gait animation drives it unchanged —
+	# but dressed as a company officer: faced lapels/collar/cuffs, a crimson waist sash, gold
+	# fringed epaulettes, a gorget at the throat, and a gold-piped, plumed bicorne. No knapsack
+	# or crossbelts (officers carried neither). Painted by `_officer_shader()`.
+	# --- legs: breeches into tall riding boots ---
+	for sx in [-0.105, 0.105]:
+		_add_box(st, Vector3(sx, -0.27, 0.0), Vector3(0.16, 0.50, 0.19))     # breeches (vy -0.52..-0.02)
+		_add_box(st, Vector3(sx, -0.70, 0.02), Vector3(0.175, 0.36, 0.21))   # tall boot (vy -0.88..-0.52)
+		_add_box(st, Vector3(sx, -0.88, 0.06), Vector3(0.175, 0.10, 0.24))   # boot foot
+	# --- coat: body, tails behind, stand collar, faced lapels down the breast ---
+	_add_box(st, Vector3(0, 0.175, 0.0), Vector3(0.40, 0.49, 0.24))          # coat body (vy -0.07..0.42)
+	_add_box(st, Vector3(0, -0.05, -0.085), Vector3(0.36, 0.32, 0.14))       # coat tails (back)
+	_add_box(st, Vector3(0, 0.435, 0.0), Vector3(0.345, 0.075, 0.245))       # stand collar (facing)
+	_add_box(st, Vector3(0, 0.20, 0.125), Vector3(0.245, 0.40, 0.035))       # lapels / plastron (facing)
+	# --- crimson waist sash with a tassel at the left hip ---
+	_add_box(st, Vector3(0, 0.05, 0.0), Vector3(0.41, 0.10, 0.255))          # sash around the waist
+	_add_box(st, Vector3(-0.185, -0.07, 0.07), Vector3(0.07, 0.22, 0.06))    # sash tassel
+	# --- arms: sleeves with faced/laced cuffs, bare hands, gold epaulettes ---
+	for sx in [-0.265, 0.265]:
+		_add_box(st, Vector3(sx, 0.18, 0.0), Vector3(0.115, 0.46, 0.13))     # sleeve (|x|>0.215 -> swings)
+		_add_box(st, Vector3(sx, -0.03, 0.0), Vector3(0.125, 0.075, 0.145))  # cuff (facing)
+		_add_box(st, Vector3(sx, -0.13, -0.01), Vector3(0.10, 0.10, 0.11))   # hand (skin)
+		_add_box(st, Vector3(sx, 0.405, 0.0), Vector3(0.17, 0.06, 0.16))     # gold fringed epaulette
+	# --- gorget hung at the throat (gold, front of the collar) ---
+	_add_box(st, Vector3(0, 0.425, 0.135), Vector3(0.11, 0.06, 0.03))        # gorget
+	# --- head (a touch bigger), matching the soldier's ---
+	var head := SphereMesh.new()
+	head.radius = 0.128; head.height = 0.236; head.radial_segments = 8; head.rings = 4
+	st.append_from(head, 0, Transform3D(Basis(), Vector3(0, 0.55, 0)))       # skin (vy 0.43..0.67)
+	# --- bicorne worn fore-and-aft, gold-piped, with a cockade and a tall plume ---
+	_add_box(st, Vector3(0, 0.725, 0.0), Vector3(0.155, 0.105, 0.50))        # bicorne body (vy 0.672..0.777)
+	_add_box(st, Vector3(0, 0.673, 0.0), Vector3(0.185, 0.028, 0.53))        # gold piping along the brim
+	_add_box(st, Vector3(0, 0.74, 0.175), Vector3(0.055, 0.07, 0.03))        # cockade (front)
+	_add_cyl(st, Vector3(0, 0.88, 0.06), 0.032, 0.012, 0.32, 8)              # plume (front, vy > 0.79)
 	return st.commit()
 
 # The officer's coat colour rides per-instance in COLOR.rgb; the bicorne is black;
@@ -1597,12 +1625,12 @@ shader_type spatial;
 uniform vec3 skin = vec3(0.76, 0.58, 0.46);
 varying float vy;
 varying float vx;
-varying float vnz;
+varying float vz;
 void vertex() {
-	vy = VERTEX.y; vx = VERTEX.x; vnz = NORMAL.z;
+	vy = VERTEX.y; vx = VERTEX.x; vz = VERTEX.z;     // rest-pose bands (stable as he moves)
 	float march = INSTANCE_CUSTOM.b;
 	float phase = INSTANCE_CUSTOM.g;
-	// per-man cadence/stride jitter so officers & file-closers don't keep clockwork time either
+	// per-man cadence/stride jitter so officers don't keep clockwork time either
 	float gait = 6.0 + (phase - 0.5) * 1.6;
 	float t6 = TIME * gait + phase * 6.28318;
 	float stride = 0.5 + (phase - 0.5) * 0.14;
@@ -1628,19 +1656,125 @@ void vertex() {
 		VERTEX.y = yy * cl - VERTEX.z * sl + hip;
 		VERTEX.z = yy * sl + VERTEX.z * cl;
 	}
+	// arms swing fore-and-aft on the march (an officer shoulders no musket)
+	if (abs(VERTEX.x) > 0.215 && march > 0.001) {
+		float armside = (VERTEX.x < 0.0) ? 1.0 : -1.0;
+		float ang = sin(t6) * march * 0.30 * -armside;
+		float sh2 = 0.45;
+		float yy = VERTEX.y - sh2;
+		float cs = cos(ang); float sn = sin(ang);
+		VERTEX.y = yy * cs - VERTEX.z * sn + sh2;
+		VERTEX.z = yy * sn + VERTEX.z * cs;
+	}
 }
 void fragment() {
-	vec3 col = COLOR.rgb;                                 // the battalion coat
-	if (vy > 0.655) { col = vec3(0.05, 0.05, 0.06); }     // shako / bicorne
-	else if (vy > 0.46) { col = skin; }                   // the head / neck
-	else if (vy < -0.05) { col = vec3(0.58, 0.56, 0.52); } // trousers
-	// white CROSSBELTS for the rank-and-file/NCOs (COLOR.a flags it; officers wear none)
-	if (COLOR.a > 0.5 && abs(vx) < 0.215 && vy > -0.05 && vy < 0.45 && abs(vnz) > 0.5) {
-		float u = vx / 0.21; float v = (vy - 0.22) / 0.27;
-		if (min(abs(u - v), abs(u + v)) < 0.20) { col = vec3(0.90, 0.88, 0.82); }
-	}
+	// A company officer: faced coat, crimson sash, gold epaulettes/gorget/lace, plumed bicorne.
+	// Colour by rest-pose position bands (last write wins), the same idiom as the soldier shader.
+	vec3 coat = COLOR.rgb;                                  // the battalion coat (team colour)
+	vec3 facing = vec3(0.84, 0.80, 0.68);                  // buff facings (collar / lapels / cuffs)
+	vec3 gold = vec3(0.86, 0.69, 0.24);
+	vec3 crim = vec3(0.55, 0.05, 0.08);
+	vec3 col = coat;
+	if (vy < -0.06) col = (vy < -0.52) ? vec3(0.06, 0.05, 0.05) : vec3(0.80, 0.76, 0.66);  // boots / buff breeches
+	if (vz > 0.11 && abs(vx) < 0.15 && vy > 0.12 && vy < 0.40) col = facing;   // faced lapels down the breast
+	if (vy > -0.01 && vy < 0.11) col = crim;                                   // crimson waist sash
+	if (vy > 0.40 && vy < 0.475) col = facing;                                 // stand collar (facing)
+	if (abs(vx) > 0.21 && vy > -0.07 && vy < 0.02) col = facing;               // faced cuffs
+	if (abs(vx) > 0.21 && vy > -0.052 && vy < -0.032) col = gold;              // gold lace ring on the cuff
+	if (abs(vx) > 0.18 && vy > 0.375 && vy < 0.44) col = gold;                 // gold fringed epaulettes
+	if (abs(vx) > 0.21 && vy > -0.18 && vy < -0.075) col = skin;               // bare hands below the cuff
+	if (vy > 0.44 && vy < 0.66 && abs(vx) < 0.17) col = skin;                  // head / neck
+	if (vz > 0.12 && abs(vx) < 0.12 && vy > 0.395 && vy < 0.452) col = gold;   // gorget at the throat
+	if (vy > 0.66) col = vec3(0.05, 0.05, 0.06);                               // bicorne (black felt)
+	if (vy > 0.659 && vy < 0.688) col = gold;                                  // gold piping on the brim
+	if (vz > 0.15 && abs(vx) < 0.06 && vy > 0.71 && vy < 0.77) col = gold;     // gold cockade loop (front)
+	if (vy > 0.79) col = vec3(0.92, 0.90, 0.86);                               // tall plume
 	ALBEDO = col;
-	ROUGHNESS = 0.8;
+	ROUGHNESS = 0.75;
+}
+"""
+	var m := ShaderMaterial.new()
+	m.shader = sh
+	return m
+
+# NCOs / file-closers ride the full detailed `_soldier_mesh()` (shako, knapsack, crossbelts)
+# but were being painted by the officer shader — a flat-black hat blob with no shako detail.
+# This shader paints the soldier mesh properly (brass-banded shako, peak, plume, faced
+# collar/cuffs, white crossbelts) AND adds the sergeant's crimson sash, so a file-closer reads
+# as a proper NCO at a glance. Coat colour rides in COLOR.rgb (set per-frame by `_cg_dress`).
+func _nco_shader() -> ShaderMaterial:
+	var sh := Shader.new()
+	sh.code = """
+shader_type spatial;
+uniform vec3 skin = vec3(0.76, 0.58, 0.46);
+varying float vy;
+varying float vx;
+varying float vz;
+varying float vnz;
+void vertex() {
+	vy = VERTEX.y; vx = VERTEX.x; vz = VERTEX.z; vnz = NORMAL.z;
+	float phase = INSTANCE_CUSTOM.g;
+	float march = INSTANCE_CUSTOM.b;
+	float armp = INSTANCE_CUSTOM.a;
+	float gait = 6.5 + (phase - 0.5) * 1.7;
+	float t6 = TIME * gait + phase * 6.28318;
+	float stride = 0.55 + (phase - 0.5) * 0.16;
+	float hip = -0.05;
+	if (VERTEX.y < hip && march > 0.001) {
+		float legside = (VERTEX.x < 0.0) ? 1.0 : -1.0;
+		float ang = sin(t6) * march * stride * legside;
+		float yy = VERTEX.y - hip;
+		float cs = cos(ang); float sn = sin(ang);
+		VERTEX.y = yy * cs - VERTEX.z * sn + hip;
+		VERTEX.z = yy * sn + VERTEX.z * cs;
+	}
+	if (VERTEX.y > hip && march > 0.001) {
+		float yy = VERTEX.y - hip;
+		float roll = sin(t6) * march * 0.05;
+		float cr = cos(roll); float sr = sin(roll);
+		float nx = VERTEX.x * cr - yy * sr;
+		yy = VERTEX.x * sr + yy * cr;
+		VERTEX.x = nx;
+		float lean = march * (0.05 + sin(t6 * 2.0) * 0.018);
+		float cl = cos(lean); float sl = sin(lean);
+		VERTEX.y = yy * cl - VERTEX.z * sl + hip;
+		VERTEX.z = yy * sl + VERTEX.z * cl;
+	}
+	if (abs(VERTEX.x) > 0.215) {
+		float armside = (VERTEX.x < 0.0) ? 1.0 : -1.0;
+		float swing = (march > 0.001 && armp < 0.15) ? (sin(t6) * march * 0.35 * -armside) : 0.0;
+		float sh2 = 0.45;
+		float yy = VERTEX.y - sh2;
+		float cs = cos(swing); float sn = sin(swing);
+		VERTEX.y = yy * cs - VERTEX.z * sn + sh2;
+		VERTEX.z = yy * sn + VERTEX.z * cs;
+	}
+}
+void fragment() {
+	vec3 coat = COLOR.rgb;                                  // the battalion coat (team colour)
+	vec3 facing = vec3(0.84, 0.80, 0.68);                  // buff facings
+	vec3 col = coat;
+	if (vy < -0.05) col = (vy < -0.52) ? vec3(0.10, 0.10, 0.11) : vec3(0.80, 0.78, 0.72);   // gaiters / overalls
+	if (vz < -0.11 && vy > -0.02 && vy < 0.36) col = (vy > 0.27) ? vec3(0.55, 0.52, 0.47) : vec3(0.31, 0.21, 0.12);  // knapsack & blanket
+	if (vy > 0.40 && vy < 0.47) col = facing;                                  // collar (facing)
+	if (vz > 0.10 && abs(vx) < 0.12 && vy > 0.0 && vy < 0.40) col = facing;    // plastron down the breast
+	if (abs(vx) > 0.21 && vy > -0.07 && vy < 0.02) col = facing;               // faced cuffs
+	if (abs(vx) > 0.21 && vy > -0.18 && vy < -0.075) col = skin;               // bare hands
+	if (vy > 0.44 && vy < 0.655 && abs(vx) < 0.17) col = skin;                 // head / neck
+	if (vy > 0.655 && vy < 0.695) col = vec3(0.72, 0.55, 0.20);               // brass shako band
+	if (vy >= 0.695 && vy < 0.90) col = vec3(0.10, 0.10, 0.12);               // shako body (dark — NCO)
+	if (vz > 0.10 && vy > 0.655 && vy < 0.715) col = vec3(0.06, 0.06, 0.07);   // shako peak (front visor)
+	if (vy >= 0.90) col = vec3(0.90, 0.88, 0.84);                             // plume
+	// white CROSSBELTS — an X over the breast (front faces only)
+	if (abs(vx) < 0.215 && vy > -0.05 && vy < 0.42 && vnz > 0.45) {
+		float u = vx / 0.21;
+		float v = (vy - 0.20) / 0.27;
+		if (min(abs(u - v), abs(u + v)) < 0.17) col = vec3(0.90, 0.88, 0.82);
+	}
+	// the sergeant's crimson sash, knotted at the waist (over the belts)
+	if (vy > 0.05 && vy < 0.16 && abs(vx) < 0.205) col = vec3(0.55, 0.05, 0.08);
+	ALBEDO = col;
+	ROUGHNESS = 0.85;
 }
 """
 	var m := ShaderMaterial.new()
@@ -1733,7 +1867,7 @@ func _mount_rider_mesh() -> ArrayMesh:
 	_add_box(st, Vector3(0, 2.27, 0.13), Vector3(0.14, 0.06, 0.02))         # gorget (trim)
 	_add_box(st, Vector3(0.18, 1.96, 0.15), Vector3(0.03, 0.34, 0.03))      # aiguillette cord
 	_add_box(st, Vector3(0.20, 1.74, 0.16), Vector3(0.04, 0.08, 0.04))      # aiguillette tip
-	_add_box(st, Vector3(0, 2.38, 0), Vector3(0.22, 0.22, 0.22))            # head
+	_add_box(st, Vector3(0, 2.38, 0), Vector3(0.25, 0.23, 0.25))            # head (a touch bigger)
 	for sx in [-0.30, 0.30]:
 		_add_box(st, Vector3(sx, 1.92, 0.04), Vector3(0.13, 0.5, 0.14))        # sleeve
 		_add_box(st, Vector3(sx, 1.70, 0.05), Vector3(0.15, 0.10, 0.16))       # cuff (trim)
@@ -1814,7 +1948,7 @@ func _cav_rider_mesh(ctype: int) -> ArrayMesh:
 	_add_box(st, Vector3(0, 1.66, -0.16), Vector3(0.36, 0.30, 0.14))        # coat tails
 	_add_box(st, Vector3(0, 2.20, 0.10), Vector3(0.30, 0.10, 0.10))         # collar (trim)
 	_add_box(st, Vector3(0, 1.92, 0.14), Vector3(0.20, 0.50, 0.04))         # lapel (trim)
-	_add_box(st, Vector3(0, 2.38, 0), Vector3(0.22, 0.22, 0.22))            # head
+	_add_box(st, Vector3(0, 2.38, 0), Vector3(0.25, 0.23, 0.25))            # head (a touch bigger)
 	for sx in [-0.30, 0.30]:
 		_add_box(st, Vector3(sx, 1.92, 0.04), Vector3(0.13, 0.5, 0.14))        # sleeve
 		_add_box(st, Vector3(sx, 1.70, 0.05), Vector3(0.15, 0.10, 0.16))       # cuff (trim)
@@ -5372,23 +5506,98 @@ const OFFICER_HERO := "res://models/officer_hero.glb"
 func _build_officer() -> void:
 	officer = Node3D.new()
 	add_child(officer)
-	# the player's mounted officer — a detailed Blender-built hero (horse + rider).
-	# His coat takes the militia's uniform colour and his lapels/cuffs/collar and
-	# saddlecloth the facing colour the player chose when raising the force.
+	# The player's mounted officer — a detailed PROCEDURAL Colonel (charger + rider), built from
+	# primitives like the soldiers (no Blender import) so he matches the game's low-poly stylised
+	# look. His coat takes the militia's UNIFORM colour; the collar/lapels/cuffs/cockade and the
+	# saddle's shabraque take the FACING colour chosen when the force was raised.
 	var coat_col: Color = GameConfig.UNIFORM_COLS[clampi(GameConfig.militia_uniform, 0, GameConfig.UNIFORM_COLS.size() - 1)]
 	var facing_col: Color = GameConfig.militia_facing
-	if ResourceLoader.exists(OFFICER_HERO):
-		var ps: PackedScene = load(OFFICER_HERO)
-		if ps != null:
-			var vis: Node3D = ps.instantiate()
-			vis.position = Vector3(0, -0.07, 0)        # seat the hooves on the ground
-			_tint_officer(vis, facing_col, coat_col)
-			officer.add_child(vis)
-			_horse_legs.clear()                        # one modelled mesh; no leg pivots
-			sabre = null                               # the hero carries his own sabre & pistol
-			pistol_mesh = null
-			return
-	_build_officer_blocky()    # fall back to the blocky rider if the model is missing
+	_build_horse(officer)                          # the charger (origin at its hooves, faces +Z)
+	_build_officer_colonel(coat_col, facing_col)   # the Colonel in the saddle
+
+# A small StandardMaterial3D helper for the procedural hero's many parts.
+func _hero_mat(col: Color, rough := 0.7, metal := 0.0) -> StandardMaterial3D:
+	var m := StandardMaterial3D.new()
+	m.albedo_color = col
+	m.roughness = rough
+	m.metallic = metal
+	return m
+
+# Add one part of the hero (a MeshInstance3D parented to `officer`), returning it so the
+# caller can keep a handle (sabre / pistol get animated elsewhere).
+func _hero_part(mesh: Mesh, pos: Vector3, mat: Material, rot := Vector3.ZERO, scl := Vector3.ONE) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	mi.mesh = mesh
+	mi.position = pos
+	mi.rotation = rot
+	mi.scale = scl
+	mi.material_override = mat
+	officer.add_child(mi)
+	return mi
+
+func _cap(radius: float, height: float) -> CapsuleMesh:
+	var c := CapsuleMesh.new(); c.radius = radius; c.height = height; c.radial_segments = 10; c.rings = 4; return c
+
+func _sph(radius: float) -> SphereMesh:
+	var s := SphereMesh.new(); s.radius = radius; s.height = radius * 2.0; s.radial_segments = 10; s.rings = 6; return s
+
+# The Colonel in the saddle: built on the mounted-rider layout (seat ≈ y1.35, head ≈ y2.38,
+# bicorne ≈ y2.55), in the player's militia colours, with the full marks of a field officer —
+# gorget, crimson sash, gold fringed epaulettes both shoulders, an aiguillette, and a
+# gold-piped, tall-plumed bicorne. Round volumes (torso/limbs/head) are capsules/spheres for a
+# less box-man silhouette; genuinely flat parts (collar, lapels, sash, tack) stay boxes.
+func _build_officer_colonel(coat_col: Color, facing_col: Color) -> void:
+	var coat := _hero_mat(coat_col.lightened(0.06), 0.6)
+	var facing := _hero_mat(facing_col, 0.6)
+	var gold := _hero_mat(Color(0.86, 0.69, 0.24), 0.35, 0.5)
+	var crim := _hero_mat(Color(0.55, 0.05, 0.08), 0.7)
+	var buff := _hero_mat(Color(0.82, 0.78, 0.66), 0.85)
+	var boot := _hero_mat(Color(0.07, 0.06, 0.07), 0.6)
+	var skin := _hero_mat(Color(0.74, 0.57, 0.44), 0.75)
+	var black := _hero_mat(Color(0.05, 0.05, 0.06), 0.6)
+	var plume := _hero_mat(Color(0.93, 0.91, 0.87), 0.85)
+	var steel := _hero_mat(Color(0.85, 0.85, 0.90), 0.25, 0.85)
+	var leather := _hero_mat(Color(0.27, 0.17, 0.09), 0.85)
+	# --- the tack: a leather saddle and a gold-piped shabraque in the facing colour ---
+	_hero_part(_box(0.30, 0.14, 0.46), Vector3(0, 1.32, -0.02), leather)            # saddle
+	_hero_part(_box(0.50, 0.025, 0.64), Vector3(0, 1.14, -0.46), gold)              # shabraque trim
+	_hero_part(_box(0.46, 0.05, 0.58), Vector3(0, 1.17, -0.46), facing)             # shabraque (facing)
+	# --- legs astride: buff breeches into tall black boots ---
+	for sx in [-0.24, 0.24]:
+		_hero_part(_cap(0.10, 0.62), Vector3(sx, 1.40, 0.06), buff, Vector3(0.30, 0, sx * 0.9))   # thigh
+		_hero_part(_cap(0.095, 0.46), Vector3(sx, 1.02, 0.20), boot)                               # riding boot
+	# --- torso: coat body (capsule) with longer tails behind ---
+	_hero_part(_cap(0.21, 0.64), Vector3(0, 1.95, 0), coat, Vector3.ZERO, Vector3(1, 1, 0.62))     # coat body
+	_hero_part(_box(0.36, 0.32, 0.14), Vector3(0, 1.66, -0.16), coat)                     # coat tails
+	# --- facings: stand collar, lapels down the breast, crimson sash ---
+	_hero_part(_box(0.30, 0.10, 0.10), Vector3(0, 2.20, 0.10), facing)                    # collar
+	_hero_part(_box(0.20, 0.50, 0.04), Vector3(0, 1.92, 0.135), facing)                   # lapels
+	_hero_part(_box(0.45, 0.11, 0.30), Vector3(0, 1.72, 0), crim)                         # waist sash
+	_hero_part(_box(0.07, 0.24, 0.07), Vector3(-0.21, 1.55, 0.06), crim)                  # sash tassel
+	_hero_part(_box(0.13, 0.06, 0.02), Vector3(0, 2.27, 0.135), gold)                     # gorget at the throat
+	# --- arms: sleeves (capsules), faced cuffs, bare hands, gold epaulettes ---
+	for sx in [-0.30, 0.30]:
+		_hero_part(_cap(0.075, 0.50), Vector3(sx, 1.92, 0.04), coat)                               # sleeve
+		_hero_part(_box(0.16, 0.10, 0.17), Vector3(sx, 1.70, 0.05), facing)               # cuff (facing)
+		_hero_part(_sph(0.075), Vector3(sx * 0.85, 1.62, 0.16), skin)                              # hand
+		_hero_part(_box(0.18, 0.05, 0.17), Vector3(sx, 2.18, 0), gold)                    # epaulette
+		_hero_part(_box(0.05, 0.05, 0.17), Vector3(sx * 0.97, 2.20, 0.04), gold)          # epaulette fringe
+	# --- aiguillette: gold cords looped on the right shoulder ---
+	_hero_part(_box(0.03, 0.36, 0.03), Vector3(0.20, 1.97, 0.16), gold, Vector3(0, 0, -0.2))  # cord
+	_hero_part(_box(0.04, 0.09, 0.04), Vector3(0.23, 1.74, 0.17), gold)                   # cord tip
+	# --- head (a touch bigger) ---
+	_hero_part(_sph(0.135), Vector3(0, 2.39, 0), skin)
+	# --- the bicorne: black felt, gold-piped, a facing-coloured cockade and a tall plume ---
+	_hero_part(_box(0.55, 0.12, 0.22), Vector3(0, 2.56, 0), black)                        # bicorne body
+	_hero_part(_box(0.58, 0.03, 0.25), Vector3(0, 2.50, 0), gold)                         # gold piping
+	_hero_part(_box(0.07, 0.08, 0.03), Vector3(0, 2.58, 0.11), facing)                    # cockade (facing)
+	_hero_part(_box(0.04, 0.05, 0.03), Vector3(0, 2.585, 0.115), gold)                    # cockade button
+	_hero_part(_cap(0.04, 0.10), Vector3(0, 2.66, -0.04), gold)                                    # plume base
+	_hero_part(_cap(0.03, 0.36), Vector3(0, 2.88, -0.05), plume)                                   # plume
+	# --- the sabre on the right, a horse-pistol holstered on the left ---
+	sabre = _hero_part(_box(0.05, 0.05, 0.85), Vector3(0.34, 1.90, 0.25), steel)
+	_hero_part(_box(0.08, 0.10, 0.14), Vector3(0.34, 1.90, -0.17), gold)                  # sabre hilt
+	pistol_mesh = _hero_part(_box(0.06, 0.11, 0.26), Vector3(-0.32, 1.90, 0.20), leather) # holstered pistol
 
 # Recolour the hero's facing-coloured parts (lapels, cuffs, collar, saddlecloth) and
 # his coat to the player's militia, by glTF material name. Everything else (gold lace,
