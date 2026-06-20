@@ -33,15 +33,29 @@ const FLANK_REACH := 120.0        # how far around an enemy flank a turning brig
 const BRIG_ENGAGE_RANGE := 72.0   # halt & open fire when the enemy line is in musket range
 const BRIG_ASSAULT_MORALE := 52.0 # press the bayonet home once the enemy is this shaken
 # --- cavalry: the arm of decision ---
-const CAV_PER_TEAM := 6           # regiments of horse a side (massed on the wings)
+const CAV_PER_TEAM := 12          # regiments of horse a side (massed on the wings) — 3 per arm
 const CAV_MEN := 120              # troopers per regiment
 const CAV_SP := 1.5               # knee-to-knee interval (m)
-const CAV_TROT := 3.2             # manoeuvre pace
-const CAV_GALLOP := 6.5           # the charge home
+const CAV_TROT := 3.2             # manoeuvre pace (fallback/base; each type rides its own pace — see CAV_TYPE_DATA)
+const CAV_GALLOP := 6.5           # the charge home (fallback/base)
 const CAV_CHARGE_RANGE := 280.0   # will launch at a target within this
 const CAV_CONTACT := 10.0         # the moment of impact
-const CAV_RALLY_TIME := 32.0      # blown horses must rally before charging again
+const CAV_RALLY_TIME := 32.0      # blown horses must rally before charging again (base; scaled by rally_mult)
 const CAV_DECIDE := 2.0           # how often a regiment looks for an opportunity
+# The four arms of horse a regiment can be raised as. Each rides at its own pace, hits
+# with its own weight of shock, takes losses at its own sturdiness, and scouts an
+# opportunity at its own range — hussars and light dragoons are the fast scouting/
+# screening horse (quick, fragile, best against routs and loose skirmishers); heavy
+# dragoons are the battering-ram reserve (slow, hits hardest, best soaks losses);
+# lancers trade some staying-power for a reach advantage that bites hardest on the
+# first shock home. Indexed by Cav.cav_type (0..3); see _cav_rider_mesh()/_cav_rider_shader()
+# for the matching models.
+const CAV_TYPE_DATA := [
+	{ "name": "Hussars",        "trot": 3.6, "gallop": 7.2, "rally_mult": 0.75, "shock": 0.85, "sturdy": 1.15, "scout": 1.25, "mount_scale": 0.96 },
+	{ "name": "Light Dragoons", "trot": 3.4, "gallop": 6.6, "rally_mult": 0.90, "shock": 1.00, "sturdy": 1.00, "scout": 1.10, "mount_scale": 1.00 },
+	{ "name": "Heavy Dragoons", "trot": 2.9, "gallop": 5.8, "rally_mult": 1.25, "shock": 1.30, "sturdy": 1.25, "scout": 0.85, "mount_scale": 1.14 },
+	{ "name": "Lancers",        "trot": 3.2, "gallop": 6.6, "rally_mult": 1.00, "shock": 1.20, "sturdy": 0.90, "scout": 1.00, "mount_scale": 1.02 },
+]
 const SQUARE_ALERT := 150.0       # infantry forms square when enemy horse is this close
 const SQUARE_RELAX := 230.0       # ...and re-forms line once it is well clear
 # --- command depth: detachments, rallying, resupply ---
@@ -401,6 +415,7 @@ var key_points: Array = []         # future terrain goals: { pos, value, owner }
 class Cav:
 	var team: int
 	var idx: int = 0
+	var cav_type: int = 0          # indexes CAV_TYPE_DATA — hussar/light dragoon/heavy dragoon/lancer
 	var pos: Vector3
 	var facing: float = 0.0
 	var troopers: Array = []       # { slot: Vector2, wpos: Vector3, ph: float }
@@ -415,8 +430,8 @@ class Cav:
 	var hoof_player: AudioStreamPlayer3D   # the thunder of the gallop
 
 var cavalry: Array[Cav] = []
-var cav_horse_mm: Array = [null, null]    # per-team mounts
-var cav_rider_mm: Array = [null, null]    # per-team riders
+var cav_horse_mm: Array = [[], []]    # cav_horse_mm[team][cav_type] — per-team-per-arm mounts
+var cav_rider_mm: Array = [[], []]    # cav_rider_mm[team][cav_type] — per-team-per-arm riders
 var _cav_warn_cd := 0.0                   # throttle on "form square!" warnings to you
 var caissons: Array = []                  # ammunition waggons on the road: {node,pos,target,state,t,origin}
 var _caisson_scan := 0.0                  # AI quartermasters check the line this often
@@ -779,6 +794,7 @@ func _ready() -> void:
 	_build_province_sites()         # forts & depots: a garrison home per brigade, plus roads
 	_build_homesteads()             # farmsteads, fields, fences and stock across the country
 	_build_farmland()               # crop fields in varied colours, hedgerows along roads & fields
+	_build_field_forests()          # province-wide forest stands, pine-biased toward the coast
 	_build_officer()
 	_build_wounded_layer()
 	_spawn_armies()
@@ -1485,20 +1501,21 @@ func _soldier_mesh() -> ArrayMesh:
 	_add_cyl(st, Vector3(0, 1.02, -0.02), 0.035, 0.018, 0.22, 8)             # plume (vy > 0.90)
 	return st.commit()
 
-func _add_box(st: SurfaceTool, c: Vector3, s: Vector3) -> void:
+func _add_box(st: SurfaceTool, c: Vector3, s: Vector3, rot: Basis = Basis()) -> void:
 	var b := BoxMesh.new()
 	b.size = s
-	st.append_from(b, 0, Transform3D(Basis(), c))
+	st.append_from(b, 0, Transform3D(rot, c))
 
-# a tapered cylinder (shako body, plume) — height runs along +Y, centred on c
-func _add_cyl(st: SurfaceTool, c: Vector3, r_bottom: float, r_top: float, h: float, sides: int) -> void:
+# a tapered cylinder (shako body, plume) — height runs along local +Y before `rot`
+# tilts it (e.g. the lancer's couched lance), centred on c
+func _add_cyl(st: SurfaceTool, c: Vector3, r_bottom: float, r_top: float, h: float, sides: int, rot: Basis = Basis()) -> void:
 	var cm := CylinderMesh.new()
 	cm.bottom_radius = r_bottom
 	cm.top_radius = r_top
 	cm.height = h
 	cm.radial_segments = sides
 	cm.rings = 0
-	st.append_from(cm, 0, Transform3D(Basis(), c))
+	st.append_from(cm, 0, Transform3D(rot, c))
 
 # A musket: walnut stock, iron barrel, a steel bayonet at the muzzle. One combined
 # mesh along local Z; a shader paints wood/iron/steel by position.
@@ -1611,6 +1628,273 @@ void fragment() {
 """
 	var m := ShaderMaterial.new()
 	m.shader = sh
+	return m
+
+# ===================================================== mounted commanders (AI)
+# Battalion colonels, brigade commanders and divisional generals share ONE detailed
+# horse mesh and ONE detailed rider mesh (each is a MultiMesh across many instances,
+# so — like the soldiers — it's one mesh + one shader, never per-instance nodes). Rank
+# reads by SIZE (a uniform scale per tier, applied in the instance transform) and by
+# the rider's coat/trim: the colonel rides in his army's colour with gold lace; the
+# brigadier in solid gold with dark trim; the general in white-and-silver — same
+# silhouette logic the bare capsules used, just with an actual horse and officer under
+# it now. The saddle cloth always carries the army's colour, tying every tier visually
+# to its side. Built ground-up (origin at the horse's feet) like `_build_horse()` /
+# `_build_officer_colonel()`, just flattened to axis-aligned boxes for the shader.
+func _mount_horse_mesh() -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	_add_box(st, Vector3(0, 0.98, -0.05), Vector3(0.5, 0.62, 1.42))      # barrel
+	_add_box(st, Vector3(0, 1.02, 0.62), Vector3(0.46, 0.52, 0.42))      # chest
+	_add_box(st, Vector3(0, 1.02, -0.78), Vector3(0.52, 0.6, 0.5))       # hindquarters
+	_add_box(st, Vector3(0, 1.55, 1.05), Vector3(0.26, 0.55, 0.45))      # neck, arched
+	_add_box(st, Vector3(0, 1.58, 0.90), Vector3(0.08, 0.58, 0.18))      # mane
+	_add_box(st, Vector3(0, 1.78, 1.42), Vector3(0.22, 0.26, 0.42))      # head
+	_add_box(st, Vector3(0, 1.86, 1.46), Vector3(0.06, 0.02, 0.30))      # blaze
+	_add_box(st, Vector3(0, 1.68, 1.62), Vector3(0.18, 0.16, 0.16))      # muzzle
+	for ex in [-0.07, 0.07]:
+		_add_box(st, Vector3(ex, 1.95, 1.18), Vector3(0.05, 0.13, 0.05))    # ears
+	_add_box(st, Vector3(0, 0.78, -1.10), Vector3(0.13, 0.62, 0.13))     # tail
+	for lp in [Vector2(0.18, 0.52), Vector2(-0.18, 0.52), Vector2(0.2, -0.58), Vector2(-0.2, -0.58)]:
+		_add_box(st, Vector3(lp.x, 0.36, lp.y), Vector3(0.15, 0.72, 0.17))       # leg
+		_add_box(st, Vector3(lp.x, 0.02, lp.y + 0.02), Vector3(0.17, 0.12, 0.2)) # hoof
+	_add_box(st, Vector3(0, 1.32, -0.02), Vector3(0.30, 0.14, 0.46))     # saddle
+	_add_box(st, Vector3(0, 1.17, -0.46), Vector3(0.42, 0.05, 0.56))     # shabraque (army colour)
+	_add_box(st, Vector3(0, 1.14, -0.46), Vector3(0.46, 0.02, 0.60))     # shabraque trim
+	_add_box(st, Vector3(0, 1.70, 1.34), Vector3(0.24, 0.025, 0.025))    # bit
+	_add_box(st, Vector3(0, 1.62, 1.50), Vector3(0.19, 0.022, 0.022))    # noseband
+	_add_box(st, Vector3(0, 1.16, 0.56), Vector3(0.30, 0.02, 0.02))      # breast strap
+	for sx2 in [-0.26, 0.26]:
+		_add_box(st, Vector3(sx2, 0.96, 0.06), Vector3(0.07, 0.05, 0.10))   # stirrup
+	return st.commit()
+
+func _mount_horse_shader() -> ShaderMaterial:
+	var sh := Shader.new()
+	sh.code = """
+shader_type spatial;
+varying float vx;
+varying float vy;
+varying float vz;
+void vertex() { vx = VERTEX.x; vy = VERTEX.y; vz = VERTEX.z; }
+void fragment() {
+	vec3 hide = vec3(0.17, 0.11, 0.07);
+	vec3 dark = vec3(0.06, 0.04, 0.03);
+	vec3 leather = vec3(0.22, 0.13, 0.07);
+	vec3 brass = vec3(0.80, 0.64, 0.22);
+	vec3 col = hide;
+	if (vy < 0.10) col = dark;                                              // hooves
+	if (vz < -0.75 && vy > 0.40 && vy < 1.15) col = dark;                   // tail
+	if (vz > 0.78 && vz < 1.0 && vy > 1.25 && abs(vx) < 0.08) col = dark;   // mane
+	if (vz > 1.50 && vy < 1.85) col = dark;                                 // muzzle
+	if (vz > 1.30 && vy > 1.83 && abs(vx) < 0.05) col = vec3(0.86, 0.84, 0.80); // blaze
+	if (vy > 0.85 && vy < 1.05 && abs(vx) > 0.20 && vz > -0.05 && vz < 0.20) col = brass; // stirrups
+	if (vy > 1.10 && vy < 1.22 && vz < -0.10) col = COLOR.rgb;              // shabraque: the army's colour
+	if (vy > 1.10 && vy < 1.15 && vz < -0.10) col = brass;                  // its piped edge
+	if (vy > 1.22 && vy < 1.42 && vz > -0.30 && vz < 0.25) col = leather;   // saddle
+	if (vy > 1.55 && vy < 1.75 && vz > 1.20 && vz < 1.55) col = leather;    // bit / noseband
+	if (vy > 1.10 && vy < 1.22 && vz > 0.40 && vz < 0.70) col = leather;    // breast strap
+	ALBEDO = col;
+	ROUGHNESS = 0.85;
+}
+"""
+	var m := ShaderMaterial.new()
+	m.shader = sh
+	return m
+
+func _mount_rider_mesh() -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for sx in [-0.27, 0.27]:
+		_add_box(st, Vector3(sx, 1.35, 0.08), Vector3(0.16, 0.72, 0.18))    # thigh (buff breeches)
+		_add_box(st, Vector3(sx, 1.02, 0.20), Vector3(0.17, 0.40, 0.19))    # riding boot
+	_add_box(st, Vector3(0, 1.95, 0), Vector3(0.42, 0.62, 0.26))            # coat body
+	_add_box(st, Vector3(0, 1.66, -0.16), Vector3(0.36, 0.30, 0.14))        # coat tails
+	_add_box(st, Vector3(0, 2.20, 0.10), Vector3(0.30, 0.10, 0.10))         # collar (trim)
+	_add_box(st, Vector3(0, 1.92, 0.14), Vector3(0.20, 0.50, 0.04))         # lapel (trim)
+	_add_box(st, Vector3(0, 1.72, 0), Vector3(0.46, 0.10, 0.30))            # waist sash
+	_add_box(st, Vector3(-0.20, 1.55, 0.06), Vector3(0.07, 0.22, 0.07))     # sash knot
+	_add_box(st, Vector3(0, 2.27, 0.13), Vector3(0.14, 0.06, 0.02))         # gorget (trim)
+	_add_box(st, Vector3(0.18, 1.96, 0.15), Vector3(0.03, 0.34, 0.03))      # aiguillette cord
+	_add_box(st, Vector3(0.20, 1.74, 0.16), Vector3(0.04, 0.08, 0.04))      # aiguillette tip
+	_add_box(st, Vector3(0, 2.38, 0), Vector3(0.22, 0.22, 0.22))            # head
+	for sx in [-0.30, 0.30]:
+		_add_box(st, Vector3(sx, 1.92, 0.04), Vector3(0.13, 0.5, 0.14))        # sleeve
+		_add_box(st, Vector3(sx, 1.70, 0.05), Vector3(0.15, 0.10, 0.16))       # cuff (trim)
+		_add_box(st, Vector3(sx * 0.85, 1.66, 0.16), Vector3(0.08, 0.08, 0.09)) # hand (skin)
+		_add_box(st, Vector3(sx, 2.18, 0.0), Vector3(0.17, 0.05, 0.17))         # epaulette (trim)
+	_add_box(st, Vector3(0, 2.55, 0), Vector3(0.55, 0.12, 0.22))            # bicorne
+	_add_box(st, Vector3(0, 2.49, 0), Vector3(0.58, 0.025, 0.25))           # hat trim (piping)
+	_add_box(st, Vector3(0, 2.58, 0.11), Vector3(0.06, 0.06, 0.03))         # cockade
+	_add_cyl(st, Vector3(0, 2.65, -0.04), 0.045, 0.04, 0.08, 8)             # plume base
+	_add_cyl(st, Vector3(0, 2.86, -0.05), 0.035, 0.015, 0.34, 8)            # plume
+	_add_box(st, Vector3(0.34, 1.9, 0.25), Vector3(0.05, 0.05, 0.85))       # sabre
+	_add_box(st, Vector3(0.34, 1.9, -0.17), Vector3(0.07, 0.07, 0.14))      # hilt (trim)
+	_add_box(st, Vector3(-0.32, 1.9, 0.2), Vector3(0.05, 0.10, 0.26))       # holstered pistol
+	return st.commit()
+
+# Shared by all three mounted-leadership tiers — only the `trim` uniform differs
+# (gold / dark / silver), painted on by a separate ShaderMaterial per tier. The coat
+# itself reads COLOR.rgb (the colonel's team colour, or a fixed gold/white set per
+# instance for the brigadiers/generals — see `_render_commanders()`).
+func _mount_rider_shader(trim: Color) -> ShaderMaterial:
+	var sh := Shader.new()
+	sh.code = """
+shader_type spatial;
+uniform vec3 trim;
+varying float vx;
+varying float vy;
+varying float vz;
+void vertex() { vx = VERTEX.x; vy = VERTEX.y; vz = VERTEX.z; }
+void fragment() {
+	vec3 buff = vec3(0.82, 0.78, 0.65);
+	vec3 boot = vec3(0.07, 0.06, 0.07);
+	vec3 skin = vec3(0.72, 0.56, 0.43);
+	vec3 sash_col = vec3(0.55, 0.05, 0.08);
+	vec3 col = COLOR.rgb;                                                // coat: the army's colour
+	if (vy < 1.92) col = buff;                                           // buff breeches
+	if (vy < 1.22) col = boot;                                           // riding boots
+	if (vy > 1.67 && vy < 1.77) col = sash_col;                          // waist sash
+	if (vy > 2.15 && vy < 2.25) col = trim;                             // collar
+	if (vz > 0.10 && abs(vx) < 0.12 && vy > 1.65 && vy < 2.15) col = trim;  // lapel
+	if (abs(vx) > 0.22 && vy > 1.63 && vy < 1.78) col = trim;            // cuffs
+	if (abs(vx) > 0.22 && vy > 2.13 && vy < 2.24) col = trim;            // epaulettes
+	if (vy > 2.24 && vy < 2.30 && vz > 0.10) col = trim;                 // gorget
+	if (abs(vx) > 0.22 && vy > 1.60 && vy < 1.71) col = skin;            // bare hands
+	if (vy > 2.27 && vy < 2.49) col = skin;                              // head
+	if (vy > 2.40 && vy < 2.62) col = vec3(0.05, 0.05, 0.06);            // bicorne body
+	if (vy > 2.475 && vy < 2.505) col = trim;                           // hat piping
+	if (vy > 2.55 && vy < 2.61 && vz > 0.08) col = trim;                 // cockade
+	if (vy > 2.62 && vy < 2.70) col = trim;                             // plume base
+	if (vy >= 2.70) col = vec3(0.92, 0.90, 0.86);                        // plume
+	if (abs(vx) > 0.28 && vy > 1.83 && vy < 1.97) col = trim;            // sabre / pistol
+	ALBEDO = col;
+	ROUGHNESS = 0.7;
+}
+"""
+	var m := ShaderMaterial.new()
+	m.shader = sh
+	m.set_shader_parameter("trim", Vector3(trim.r, trim.g, trim.b))
+	return m
+
+# ===================================================== cavalry troopers (the four arms of horse)
+# The regiments of horse themselves (cav_rider_mm/cav_horse_mm, one MultiMesh per
+# team PER ARM — see _spawn_cavalry()) used to ride bare CapsuleMesh primitives, the
+# one corner of the mounted arm never brought up to the soldiers'/commanders' standard.
+# Troopers are enlisted men, not officers, so this mesh is the commander's
+# `_mount_rider_mesh()` body stripped of the marks of rank (no waist sash, gorget,
+# aiguillette or shoulder boards) — collar/lapel/cuffs only — with the headgear and
+# arm swapped per `ctype` (0 hussar, 1 light dragoon, 2 heavy dragoon, 3 lancer) so
+# each regiment of horse reads as its own arm of service at a glance. The shared horse
+# underneath is the commanders' `_mount_horse_mesh()` (scaled per arm — see
+# CAV_TYPE_DATA.mount_scale); only the rider differs.
+func _cav_rider_mesh(ctype: int) -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for sx in [-0.27, 0.27]:
+		_add_box(st, Vector3(sx, 1.35, 0.08), Vector3(0.16, 0.72, 0.18))    # thigh (buff breeches)
+		_add_box(st, Vector3(sx, 1.02, 0.20), Vector3(0.17, 0.40, 0.19))    # riding boot
+	_add_box(st, Vector3(0, 1.95, 0), Vector3(0.42, 0.62, 0.26))            # coat body
+	_add_box(st, Vector3(0, 1.66, -0.16), Vector3(0.36, 0.30, 0.14))        # coat tails
+	_add_box(st, Vector3(0, 2.20, 0.10), Vector3(0.30, 0.10, 0.10))         # collar (trim)
+	_add_box(st, Vector3(0, 1.92, 0.14), Vector3(0.20, 0.50, 0.04))         # lapel (trim)
+	_add_box(st, Vector3(0, 2.38, 0), Vector3(0.22, 0.22, 0.22))            # head
+	for sx in [-0.30, 0.30]:
+		_add_box(st, Vector3(sx, 1.92, 0.04), Vector3(0.13, 0.5, 0.14))        # sleeve
+		_add_box(st, Vector3(sx, 1.70, 0.05), Vector3(0.15, 0.10, 0.16))       # cuff (trim)
+		_add_box(st, Vector3(sx * 0.85, 1.66, 0.16), Vector3(0.08, 0.08, 0.09)) # hand (skin)
+	match ctype:
+		0:   # HUSSAR — fur busby with a cloth bag and a feather plume; sabre and pistol
+			_add_cyl(st, Vector3(0, 2.56, -0.02), 0.20, 0.20, 0.28, 8)            # busby (fur)
+			_add_box(st, Vector3(0.12, 2.50, -0.16), Vector3(0.10, 0.16, 0.07))   # bag (trim)
+			_add_cyl(st, Vector3(0, 2.76, -0.02), 0.025, 0.012, 0.24, 8)          # plume
+			_add_box(st, Vector3(0.34, 1.9, 0.25), Vector3(0.05, 0.05, 0.85))     # sabre
+			_add_box(st, Vector3(0.34, 1.9, -0.17), Vector3(0.07, 0.07, 0.14))    # hilt (trim)
+			_add_box(st, Vector3(-0.32, 1.9, 0.2), Vector3(0.05, 0.10, 0.26))     # holstered pistol
+		1:   # LIGHT DRAGOON — crested leather helmet (Tarleton); sabre, pistol, slung carbine
+			_add_box(st, Vector3(0, 2.50, 0.0), Vector3(0.21, 0.17, 0.22))        # helmet skull
+			_add_box(st, Vector3(0, 2.42, 0.0), Vector3(0.225, 0.05, 0.235))      # turban band (trim)
+			_add_box(st, Vector3(0, 2.62, -0.01), Vector3(0.05, 0.09, 0.32))      # crest comb
+			_add_box(st, Vector3(0, 2.46, 0.21), Vector3(0.15, 0.03, 0.06))       # peak
+			_add_box(st, Vector3(0.34, 1.9, 0.25), Vector3(0.05, 0.05, 0.85))     # sabre
+			_add_box(st, Vector3(0.34, 1.9, -0.17), Vector3(0.07, 0.07, 0.14))    # hilt (trim)
+			_add_box(st, Vector3(-0.32, 1.9, 0.2), Vector3(0.05, 0.10, 0.26))     # holstered pistol
+			_add_box(st, Vector3(0, 1.80, -0.20), Vector3(0.08, 0.34, 0.07))      # slung carbine case
+		2:   # HEAVY DRAGOON — bigger crested helmet with a horsehair tail; a heavier sabre
+			_add_box(st, Vector3(0, 2.53, 0.0), Vector3(0.23, 0.19, 0.24))        # helmet skull (bigger)
+			_add_box(st, Vector3(0, 2.44, 0.0), Vector3(0.245, 0.05, 0.255))      # turban band (trim)
+			_add_box(st, Vector3(0, 2.68, -0.01), Vector3(0.06, 0.12, 0.42))      # crest comb (bigger)
+			_add_box(st, Vector3(0, 2.32, -0.22), Vector3(0.05, 0.32, 0.07))      # horsehair tail
+			_add_box(st, Vector3(0, 2.48, 0.23), Vector3(0.17, 0.035, 0.07))      # peak (bigger)
+			_add_box(st, Vector3(0.34, 1.9, 0.30), Vector3(0.07, 0.07, 0.95))     # heavier sabre
+			_add_box(st, Vector3(0.34, 1.9, -0.20), Vector3(0.08, 0.08, 0.16))    # hilt (trim)
+			_add_box(st, Vector3(-0.32, 1.9, 0.2), Vector3(0.05, 0.10, 0.26))     # holstered pistol
+		3:   # LANCER — square-topped czapka; the lance (couched, diagonal) plus a sabre
+			_add_box(st, Vector3(0, 2.50, 0.0), Vector3(0.19, 0.16, 0.20))        # czapka body
+			_add_box(st, Vector3(0, 2.64, 0.0), Vector3(0.27, 0.07, 0.28))        # flared square top (trim)
+			_add_box(st, Vector3(0, 2.46, 0.20), Vector3(0.14, 0.03, 0.06))       # peak
+			_add_cyl(st, Vector3(0, 2.72, 0.0), 0.03, 0.03, 0.10, 8)              # pompom (trim)
+			_add_box(st, Vector3(0.34, 1.9, 0.25), Vector3(0.05, 0.05, 0.85))     # sabre (secondary)
+			_add_box(st, Vector3(0.34, 1.9, -0.17), Vector3(0.07, 0.07, 0.14))    # hilt (trim)
+			var lance_rot := Basis(Vector3.RIGHT, 1.3)        # tilts +Y forward-and-up across the horse's neck
+			_add_cyl(st, Vector3(0.30, 1.95, 0.55), 0.035, 0.018, 3.2, 6, lance_rot)  # the lance itself
+	return st.commit()
+
+# Shared by all four arms (`ctype` selects the headgear/weapon palette baked into the
+# mesh above); `trim` is the lace colour for that arm (gold/white metal/brass/gold —
+# see _spawn_cavalry()). The coat itself reads COLOR.rgb, set per-instance to the
+# army's colour exactly like the mounted commanders.
+func _cav_rider_shader(trim: Color, ctype: int) -> ShaderMaterial:
+	var sh := Shader.new()
+	sh.code = """
+shader_type spatial;
+uniform vec3 trim;
+uniform int ctype;
+varying float vx;
+varying float vy;
+varying float vz;
+void vertex() { vx = VERTEX.x; vy = VERTEX.y; vz = VERTEX.z; }
+void fragment() {
+	vec3 buff = vec3(0.82, 0.78, 0.65);
+	vec3 boot = vec3(0.07, 0.06, 0.07);
+	vec3 skin = vec3(0.72, 0.56, 0.43);
+	vec3 dark = vec3(0.07, 0.07, 0.08);
+	vec3 wood = vec3(0.35, 0.23, 0.12);
+	vec3 col = COLOR.rgb;                                                // coat: the army's colour
+	if (vy < 1.92) col = buff;                                           // buff breeches
+	if (vy < 1.22) col = boot;                                           // riding boots
+	if (vy > 2.15 && vy < 2.25) col = trim;                              // collar
+	if (vz > 0.10 && abs(vx) < 0.12 && vy > 1.65 && vy < 2.15) col = trim;  // lapel
+	if (abs(vx) > 0.22 && vy > 1.63 && vy < 1.78) col = trim;            // cuffs
+	if (abs(vx) > 0.22 && vy > 1.60 && vy < 1.71) col = skin;            // bare hands
+	if (vy > 2.27 && vy < 2.49) col = skin;                              // head
+	// the arm-specific headgear and weapon, all above the head or out at the saddle:
+	if (ctype == 0) {                                                    // hussar: fur busby
+		if (vy > 2.42 && vy < 2.70) col = dark;                          // fur body
+		if (vy > 2.36 && vy < 2.58 && vz < -0.08) col = trim;            // bag
+		if (vy >= 2.70) col = vec3(0.90, 0.88, 0.84);                    // plume
+	} else if (ctype == 1) {                                             // light dragoon: crested helmet
+		if (vy > 2.37 && vy < 2.67) col = dark;                          // helmet skull / crest
+		if (vy > 2.37 && vy < 2.47) col = trim;                          // turban band
+		if (vy > 1.46 && vy < 2.14 && vz < -0.12) col = wood;            // slung carbine case
+	} else if (ctype == 2) {                                             // heavy dragoon: bigger crested helmet
+		if (vy > 2.34 && vy < 2.80) col = vec3(0.55, 0.56, 0.60);        // steel helmet / crest comb
+		if (vy > 2.39 && vy < 2.49) col = trim;                         // turban band
+		if (vy > 2.00 && vy < 2.64 && vz < -0.14) col = dark;           // horsehair tail
+	} else if (ctype == 3) {                                             // lancer: czapka + the lance
+		if (vy > 2.34 && vy < 2.71 && vz < 0.75) col = dark;             // czapka body
+		if (vy > 2.57 && vy < 2.71 && vz < 0.75) col = trim;             // flared square top
+		if (vy > 2.62 && vz < 0.75) col = trim;                          // pompom
+		if (vz > 0.75) col = (vz > 1.65) ? trim : wood;                  // the lance: haft, pennon near the tip
+	}
+	if (abs(vx) > 0.28 && vy > 1.83 && vy < 1.97 && vz < 0.75) col = trim;  // sabre / pistol / hilt
+	ALBEDO = col;
+	ROUGHNESS = 0.75;
+}
+"""
+	var m := ShaderMaterial.new()
+	m.shader = sh
+	m.set_shader_parameter("trim", Vector3(trim.r, trim.g, trim.b))
+	m.set_shader_parameter("ctype", ctype)
 	return m
 
 # The uniform, painted in bands by height (shako / facing collar / coat / trousers).
@@ -1943,7 +2227,7 @@ func _set_dress_palettes(m: ShaderMaterial) -> void:
 # turf material and computed normals so the light catches the slopes.
 func _build_ground_mesh() -> ArrayMesh:
 	var x0 := -PROVINCE_SIZE * 0.5
-	var x1 := COAST_X + 60.0
+	var x1 := COAST_X + COAST_AMPLITUDE + 60.0   # reach the farthest-out headland, not just the mean shore
 	var z0 := -PROVINCE_SIZE * 0.5
 	var z1 := PROVINCE_SIZE * 0.5
 	var cols := 150
@@ -3509,10 +3793,11 @@ func _build_homesteads() -> void:
 		var x := rng.randf_range(-8600.0, COAST_X - 280.0)
 		var z := rng.randf_range(-8400.0, 8400.0)
 		var p := Vector3(x, 0, z)
-		var ok := true
-		for t in field_towns:
-			if p.distance_to(t["pos"]) < 650.0 + float(t["size"]) * 150.0:
-				ok = false; break
+		var ok := x < _coast_x(z) - 280.0   # the coast bows around COAST_X — stay inland of it
+		if ok:
+			for t in field_towns:
+				if p.distance_to(t["pos"]) < 650.0 + float(t["size"]) * 150.0:
+					ok = false; break
 		if ok:
 			for s in field_sites:
 				if String(s["kind"]) != "town" and p.distance_to(s["pos"]) < 380.0:
@@ -3590,10 +3875,11 @@ func _build_farmland() -> void:
 		var x := rng.randf_range(-8600.0, COAST_X - 300.0)
 		var z := rng.randf_range(-8400.0, 8400.0)
 		var p := Vector3(x, 0, z)
-		var ok := true
-		for t in field_towns:
-			if p.distance_to(t["pos"]) < 500.0 + float(t["size"]) * 150.0:
-				ok = false; break
+		var ok := x < _coast_x(z) - 300.0   # the coast bows around COAST_X — stay inland of it
+		if ok:
+			for t in field_towns:
+				if p.distance_to(t["pos"]) < 500.0 + float(t["size"]) * 150.0:
+					ok = false; break
 		if ok and not river_pts.is_empty() and _in_river(p):
 			ok = false
 		if not ok:
@@ -3640,6 +3926,84 @@ func _build_farmland() -> void:
 		var pt: Vector3 = bushes[i]
 		var sx := rng.randf_range(1.6, 2.6); var sy := rng.randf_range(1.6, 2.4)
 		hedge.set_instance_transform(i, Transform3D(Basis(Vector3.UP, rng.randf_range(0, TAU)).scaled(Vector3(sx, sy, sx)), Vector3(pt.x, _gh(pt.x, pt.z) + sy * 0.5, pt.z)))
+
+# The province's woods: big randomly-placed forest "stands" scattered across the whole
+# map (not just the battle clutter near the firing lines — see _build_forests for that),
+# each a dense disc of trees avoiding the towns, garrison sites, roads and the river.
+# Mixes broadleaf (trunk + round canopy, same palette as the battle-scale woods) with a
+# pine/conifer variant (a simple cone), the pine fraction rising toward the coast — a nod
+# to the real Atlantic seaboard's run from pine barrens at the shore to hardwood inland.
+func _build_field_forests() -> void:
+	if _inflated or hosted:
+		return
+	var rng := RandomNumberGenerator.new()
+	rng.seed = (GameConfig.match_seed if GameConfig.match_seed != 0 else 1) ^ 0x6a09e667
+	var stand_defs: Array = []   # [center, radius]
+	var wanted := 26
+	var tries := 0
+	while stand_defs.size() < wanted and tries < wanted * 20:
+		tries += 1
+		var x := rng.randf_range(-8600.0, COAST_X - 280.0)
+		var z := rng.randf_range(-8400.0, 8400.0)
+		var p := Vector3(x, 0, z)
+		var r := rng.randf_range(350.0, 950.0)
+		var ok := x < _coast_x(z) - r - 100.0   # keep the whole disc clear of the bowed coast
+		if ok:
+			for t in field_towns:
+				if p.distance_to(t["pos"]) < r * 0.4 + 700.0 + float(t["size"]) * 150.0:
+					ok = false; break
+		if ok:
+			for s in field_sites:
+				if p.distance_to(s["pos"]) < r * 0.4 + 420.0:
+					ok = false; break
+		if not ok:
+			continue
+		stand_defs.append([p, r])
+	# size every shared MultiMesh to the worst case (every stand at full budget); unused
+	# slots stay invisible via _zero_xf, same trick _make_scenery_mm already relies on
+	var stand_counts: Array = []
+	var total := 0
+	for d in stand_defs:
+		var r: float = d[1]
+		var n := int(r * r / 1800.0)
+		stand_counts.append(n)
+		total += n
+	var trunk_mm := _make_scenery_mm(_cylinder(0.32, 4.0), Color(0.26, 0.18, 0.10), total)
+	var leaf_mesh := SphereMesh.new()
+	leaf_mesh.radius = 2.6
+	leaf_mesh.height = 5.6
+	leaf_mesh.radial_segments = 12
+	leaf_mesh.rings = 7
+	var broadleaf_mm := _make_scenery_mm(leaf_mesh, Color(0.18, 0.30, 0.15), total)
+	var cone_mesh := CylinderMesh.new()
+	cone_mesh.top_radius = 0.0
+	cone_mesh.bottom_radius = 2.0
+	cone_mesh.height = 7.0
+	cone_mesh.radial_segments = 8
+	var pine_mm := _make_scenery_mm(cone_mesh, Color(0.10, 0.22, 0.14), total)
+	var ti := 0
+	for i in range(stand_defs.size()):
+		var c: Vector3 = stand_defs[i][0]
+		var r: float = stand_defs[i][1]
+		var n: int = stand_counts[i]
+		var coast_t := clampf((c.x + 8600.0) / (COAST_X - 280.0 + 8600.0), 0.0, 1.0)
+		var pine_chance := lerpf(0.12, 0.42, coast_t)
+		for j in range(n):
+			var a := rng.randf() * TAU
+			var rr := sqrt(rng.randf()) * r
+			var p := c + Vector3(cos(a) * rr, 0, sin(a) * rr)
+			if p.x > _coast_x(p.z) - 60.0 or _on_road(p) or (not river_pts.is_empty() and _in_river(p)):
+				continue
+			var s := rng.randf_range(0.8, 1.7)
+			var yaw := rng.randf() * TAU
+			var b := Basis(Vector3.UP, yaw).scaled(Vector3(s, s, s))
+			var tgh := _gh(p.x, p.z)
+			trunk_mm.set_instance_transform(ti, Transform3D(b, Vector3(p.x, 2.0 * s + tgh, p.z)))
+			if rng.randf() < pine_chance:
+				pine_mm.set_instance_transform(ti, Transform3D(b, Vector3(p.x, 3.5 * s + tgh, p.z)))
+			else:
+				broadleaf_mm.set_instance_transform(ti, Transform3D(b, Vector3(p.x, 5.6 * s + tgh, p.z)))
+			ti += 1
 
 # Lay out the strategic furniture of the province: the towns (already built) plus a
 # spread of FORTS and DEPOTS across each side's territory — a distinct garrison home
@@ -3836,7 +4200,7 @@ func _build_river() -> void:
 	var ctrl := [
 		Vector3(-8200, 0, -8400), Vector3(-6400, 0, -5200), Vector3(-4900, 0, -2400),
 		Vector3(-3000, 0, -300), Vector3(-1600, 0, 2200), Vector3(-200, 0, 4400),
-		Vector3(700, 0, 6400), Vector3(COAST_X - 60, 0, 7600),
+		Vector3(700, 0, 6400), Vector3(_coast_x(7600.0) - 60.0, 0, 7600),
 	]
 	# Catmull-Rom subdivision into a smooth polyline
 	river_pts.clear()
@@ -3934,13 +4298,22 @@ func _seg_xz(p1: Vector3, p2: Vector3, p3: Vector3, p4: Vector3):
 		return p1.lerp(p2, t)
 	return null
 
+# The coastline isn't a straight line at COAST_X — it bows into a couple of broad bays and
+# headlands along its length. Two low-frequency sine terms keep it a gentle, natural curve
+# (never wilder than +/-COAST_AMPLITUDE). MUST mirror the ocean shader's copy (_build_ocean)
+# so the surf line tracks the actual shore the ground/ocean meshes draw.
+func _coast_x(z: float) -> float:
+	return COAST_X + sin(z * 0.00045 + 0.6) * 260.0 + sin(z * 0.00112 - 1.3) * 140.0
+
 # ---- TERRAIN HEIGHT: one shared rolling-ground field. Everything in the world drapes onto
 # this (the ground mesh, the men, the scenery), and the GLSL twin in the ground shader MUST
-# match. Faded to sea level near the shore so the beach and coast stay flat. ----
+# match. Faded to sea level near the shore so the beach and coast stay flat; beyond the local
+# coastline it slopes gently down into a shallow seabed so bays sink under the ocean cleanly. ----
 func _gh(x: float, z: float) -> float:
-	var c := clampf((COAST_X - x) / 350.0, 0.0, 1.0)   # flatten only the immediate shore
+	var cx := _coast_x(z)
+	var c := clampf((cx - x) / 350.0, 0.0, 1.0)   # flatten only the immediate shore
 	if c <= 0.0:
-		return 0.0
+		return lerpf(0.0, -6.0, clampf((x - cx) / 600.0, 0.0, 1.0))   # offshore seabed
 	# hills on a BATTLEFIELD scale (wavelengths ~1–2.5 km) so the ground visibly rolls over
 	# the ground a player can see — not a 14 km swell that reads as dead flat up close
 	var h := sin(x * 0.0038 + 1.7) * 13.0 + sin(z * 0.0045 - 0.6) * 11.0
@@ -4328,7 +4701,9 @@ var ocean: MeshInstance3D
 var ocean_mat: ShaderMaterial      # wind-driven Gerstner sea (uniforms updated each frame)
 var cloud_layer: MeshInstance3D    # drifting cloud sheet that follows the camera
 var cloud_mat: ShaderMaterial
-const COAST_X := 1650.0            # the shoreline — land to the west, open sea to the east
+const COAST_X := 1650.0            # the shoreline's mean position — land to the west, open sea
+									# to the east (the actual coast bends around this, see _coast_x)
+const COAST_AMPLITUDE := 400.0     # the most a bay/headland can pull the shore off COAST_X
 const SHIP_SPEED := 2.4            # a ship under sail makes way slowly (an accurate pace)
 const SHIP_TURN := 0.09            # max turn rate (rad/s) — a big, ponderous turning circle
 # the sea's wave model — MUST mirror the ocean shader so ships ride the visible swell.
@@ -4349,7 +4724,7 @@ const SEA_WAVES := [
 func _sea_y(wx: float, wz: float) -> float:
 	var wd := SEA_WIND_DIR.normalized()              # fixed swell heading (not the veering wind)
 	var s := clampf(0.8 + _wind.length() * 0.7, 0.3, 3.0)
-	var depth := clampf((wx - COAST_X) / 1400.0, 0.0, 1.0)
+	var depth := clampf((wx - _coast_x(wz)) / 1400.0, 0.0, 1.0)
 	var damp := lerpf(0.22, 1.0, depth)
 	var p := Vector2(wx, wz)
 	var y := 0.0
@@ -4419,7 +4794,9 @@ void vertex(){
 	gwave(rot2(w, 0.5), 0.70, 88.0,  1.6*s,  1.1,  p, t, disp, nrm, jac);
 	gwave(rot2(w,-0.7), 0.62, 50.0,  0.95*s, 1.25, p, t, disp, nrm, jac);
 	gwave(rot2(w, 1.2), 0.52, 28.0,  0.55*s, 1.5,  p, t, disp, nrm, jac);
-	v_depth = clamp((p.x - coast_x) / 1400.0, 0.0, 1.0);
+	// the shore bows into bays/headlands around coast_x — MUST mirror _coast_x() in GDScript
+	float local_coast = coast_x + sin(p.z * 0.00045 + 0.6) * 260.0 + sin(p.z * 0.00112 - 1.3) * 140.0;
+	v_depth = clamp((p.x - local_coast) / 1400.0, 0.0, 1.0);
 	float damp = mix(0.22, 1.0, v_depth);   // the sea lies calmer in the shallows by the shore
 	VERTEX += disp * damp;
 	NORMAL = normalize(nrm);
@@ -4446,35 +4823,44 @@ void fragment(){
 	# the SEA is two coplanar sheets sharing one material: a dense inshore sheet with the
 	# detailed swell where the ships sail, and a vast low-detail sheet that carries the same
 	# wave shape on to the horizon (set a hair lower so the inshore sheet always sits on top).
+	# Both reach a bit further landward than the mean COAST_X so they fully cover the deepest
+	# bay (the ground's own seabed slope, see _gh, then hides under them with no gap).
+	var ocean_x0 := COAST_X - COAST_AMPLITUDE
 	var near := PlaneMesh.new()
-	near.size = Vector2(6000, 16000)
+	near.size = Vector2(6000.0 + COAST_AMPLITUDE, 16000)
 	near.subdivide_width = 240
 	near.subdivide_depth = 320
 	ocean = MeshInstance3D.new()
 	ocean.mesh = near
-	ocean.position = Vector3(COAST_X + 3000.0, SEA_BASE_Y, 0.0)
+	ocean.position = Vector3(ocean_x0 + near.size.x * 0.5, SEA_BASE_Y, 0.0)
 	ocean.material_override = ocean_mat
 	add_child(ocean)
 	var far := PlaneMesh.new()
-	far.size = Vector2(40000, 40000)
+	far.size = Vector2(40000.0 + COAST_AMPLITUDE, 40000)
 	far.subdivide_width = 80
 	far.subdivide_depth = 80
 	var far_mi := MeshInstance3D.new()
 	far_mi.mesh = far
-	far_mi.position = Vector3(COAST_X + 20000.0, SEA_BASE_Y - 0.3, 0.0)
+	far_mi.position = Vector3(ocean_x0 + far.size.x * 0.5, SEA_BASE_Y - 0.3, 0.0)
 	far_mi.material_override = ocean_mat
 	far_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(far_mi)
-	# a pale ribbon of beach where the sea meets the land
+	# a pale ribbon of beach that follows the actual bowed shoreline, not a straight line
+	var coast_pts: Array = []
+	var cz := -PROVINCE_SIZE * 0.5
+	while cz <= PROVINCE_SIZE * 0.5:
+		coast_pts.append(Vector3(_coast_x(cz), 0.0, cz))
+		cz += 200.0
+	var beach_st := SurfaceTool.new(); beach_st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	_ribbon(beach_st, coast_pts, 100.0, 0.15)
 	var beach := MeshInstance3D.new()
-	var bm := PlaneMesh.new()
-	bm.size = Vector2(200, 16000)
-	beach.mesh = bm
-	beach.position = Vector3(COAST_X - 40.0, 0.15, 0.0)
+	beach.mesh = beach_st.commit()
 	var bmat := StandardMaterial3D.new()
 	bmat.albedo_color = Color(0.80, 0.74, 0.55)
 	bmat.roughness = 1.0
+	bmat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	beach.material_override = bmat
+	beach.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(beach)
 
 # A high sheet of fair-weather cloud that follows the camera and drifts with the wind.
@@ -7306,45 +7692,72 @@ func _update_caissons(delta: float) -> void:
 
 # ================================================================== cavalry
 
+# Gold lace for the hussars and lancers, white metal for the light dragoons, a duller
+# brass for the heavy dragoons — same "trim" idiom the mounted commanders use, just one
+# per arm of service rather than one per rank.
+const CAV_TRIM_PER_TYPE := [
+	Color(0.83, 0.68, 0.21), Color(0.80, 0.80, 0.82), Color(0.74, 0.62, 0.32), Color(0.83, 0.68, 0.21),
+]
+
 func _spawn_cavalry() -> void:
-	# per-team mounts & riders (instanced)
+	var ntypes := CAV_TYPE_DATA.size()
+	# decide each team's regiments and which arm each one rides BEFORE sizing any
+	# MultiMesh — every regiment of a given arm on a team shares that arm's instanced
+	# horse+rider (one MultiMesh per team per arm, never per-regiment: the affordability
+	# keystone still holds, there are just four buckets per team instead of one).
+	var types_per_team: Array = []
 	for team in [0, 1]:
-		var hmi := MultiMeshInstance3D.new()
-		var hmm := MultiMesh.new()
-		hmm.transform_format = MultiMesh.TRANSFORM_3D
-		var hcap2 := CapsuleMesh.new()
-		hcap2.radius = 0.32
-		hcap2.height = 1.85
-		hcap2.radial_segments = 6
-		hcap2.rings = 2
-		hmm.mesh = hcap2
-		hmm.instance_count = CAV_PER_TEAM * CAV_MEN
-		hmi.multimesh = hmm
-		var hmat2 := StandardMaterial3D.new()
-		hmat2.albedo_color = Color(0.22, 0.15, 0.09) if team == 0 else Color(0.13, 0.10, 0.07)
-		hmat2.roughness = 0.9
-		hmi.material_override = hmat2
-		add_child(hmi)
-		cav_horse_mm[team] = hmm
-		var rmi2 := MultiMeshInstance3D.new()
-		var rmm := MultiMesh.new()
-		rmm.transform_format = MultiMesh.TRANSFORM_3D
-		var rcap2 := CapsuleMesh.new()
-		rcap2.radius = 0.22
-		rcap2.height = 1.35
-		rcap2.radial_segments = 6
-		rcap2.rings = 2
-		rmm.mesh = rcap2
-		rmm.instance_count = CAV_PER_TEAM * CAV_MEN
-		rmi2.multimesh = rmm
-		var rmat2 := StandardMaterial3D.new()
-		rmat2.albedo_color = team_color(team).lightened(0.12)
-		rmi2.material_override = rmat2
-		add_child(rmi2)
-		cav_rider_mm[team] = rmm
-		for i in range(CAV_PER_TEAM * CAV_MEN):
-			hmm.set_instance_transform(i, _zero_xf())
-			rmm.set_instance_transform(i, _zero_xf())
+		var ncav: int = 4 if _inflated else CAV_PER_TEAM   # a regiment on each wing
+		var types: Array = []
+		for r in range(ncav):
+			types.append(r % ntypes)
+		types_per_team.append(types)
+	var horse_mesh := _mount_horse_mesh()      # one shared horse, like the commanders ride
+	var horse_mat := _mount_horse_shader()
+	# rider mesh/material depend only on the arm, not the team — build each arm's once
+	# and let both teams' buckets share it (same idiom as horse_mesh/horse_mat above).
+	var rider_meshes: Array = []
+	var rider_mats: Array = []
+	for ct in range(ntypes):
+		rider_meshes.append(_cav_rider_mesh(ct))
+		rider_mats.append(_cav_rider_shader(CAV_TRIM_PER_TYPE[ct], ct))
+	for team in [0, 1]:
+		cav_horse_mm[team].resize(ntypes)
+		cav_rider_mm[team].resize(ntypes)
+		var types: Array = types_per_team[team]
+		var coat := team_color(team).lightened(0.12)
+		for ct in range(ntypes):
+			var nreg: int = types.count(ct)
+			if nreg <= 0:
+				cav_horse_mm[team][ct] = null
+				cav_rider_mm[team][ct] = null
+				continue
+			var n := nreg * CAV_MEN
+			var hmi := MultiMeshInstance3D.new()
+			var hmm := MultiMesh.new()
+			hmm.transform_format = MultiMesh.TRANSFORM_3D
+			hmm.use_colors = true
+			hmm.mesh = horse_mesh
+			hmm.instance_count = n
+			hmi.multimesh = hmm
+			hmi.material_override = horse_mat
+			add_child(hmi)
+			cav_horse_mm[team][ct] = hmm
+			var rmi2 := MultiMeshInstance3D.new()
+			var rmm := MultiMesh.new()
+			rmm.transform_format = MultiMesh.TRANSFORM_3D
+			rmm.use_colors = true
+			rmm.mesh = rider_meshes[ct]
+			rmm.instance_count = n
+			rmi2.multimesh = rmm
+			rmi2.material_override = rider_mats[ct]
+			add_child(rmi2)
+			cav_rider_mm[team][ct] = rmm
+			for i in range(n):
+				hmm.set_instance_transform(i, _zero_xf())
+				rmm.set_instance_transform(i, _zero_xf())
+				hmm.set_instance_color(i, team_color(team))   # shabraque: the army's colour
+				rmm.set_instance_color(i, coat)                # coat: the army's colour
 	# the regiments — massed in two wings on the army's flanks, behind the line
 	var wing: float = 520.0 if _inflated else 1600.0   # on the flanks of the (tighter) line
 	for team in [0, 1]:
@@ -7352,13 +7765,15 @@ func _spawn_cavalry() -> void:
 		var face := 0.0 if team == 0 else PI
 		var fwd := Vector3(sin(face), 0, cos(face))
 		var rightv := Vector3(fwd.z, 0, -fwd.x)
-		var ncav: int = 2 if _inflated else CAV_PER_TEAM   # a regiment on each wing
+		var types: Array = types_per_team[team]
+		var ncav: int = types.size()
 		var half := maxi(1, ncav / 2)
 		var sites: Array = _team_sites[team]
 		for r in range(ncav):
 			var c := Cav.new()
 			c.team = team
 			c.idx = team * CAV_PER_TEAM + r
+			c.cav_type = types[r]
 			var side := -1.0 if r < half else 1.0
 			var rank := r % half
 			if _inflated or sites.is_empty():
@@ -7393,6 +7808,16 @@ func _fill_troopers(c: Cav) -> void:
 		var w := c.pos + right * slot.x + fwd * slot.y
 		c.troopers.append({ "slot": slot, "wpos": Vector3(w.x, 0, w.z), "ph": randf() * TAU })
 
+# Each arm rides at its own pace and rallies on its own clock — see CAV_TYPE_DATA.
+func _cav_trot(c: Cav) -> float:
+	return CAV_TYPE_DATA[c.cav_type]["trot"]
+
+func _cav_gallop(c: Cav) -> float:
+	return CAV_TYPE_DATA[c.cav_type]["gallop"]
+
+func _cav_rally_time(c: Cav) -> float:
+	return CAV_RALLY_TIME * float(CAV_TYPE_DATA[c.cav_type]["rally_mult"])
+
 func _update_cavalry(delta: float) -> void:
 	for c in cavalry:
 		if c.spent:
@@ -7419,7 +7844,7 @@ func _update_cavalry(delta: float) -> void:
 		c.decide_cd -= delta
 		match c.state:
 			"reserve":
-				_cav_move(c, c.reserve_pos, CAV_TROT, delta)
+				_cav_move(c, c.reserve_pos, _cav_trot(c), delta)
 				if _battle_begun and c.decide_cd <= 0.0:
 					c.decide_cd = CAV_DECIDE * randf_range(0.8, 1.2)
 					_cav_decide(c)
@@ -7430,21 +7855,21 @@ func _update_cavalry(delta: float) -> void:
 				elif c.troopers.size() < 45:
 					c.state = "retiring"   # too many saddles emptied — the charge falters
 				else:
-					_cav_move(c, tp, CAV_GALLOP, delta)
+					_cav_move(c, tp, _cav_gallop(c), delta)
 					if Vector2(c.pos.x - tp.x, c.pos.z - tp.z).length() < CAV_CONTACT + 4.0:
 						_cav_resolve(c)
 			"retiring":
-				_cav_move(c, c.reserve_pos, CAV_TROT, delta)
+				_cav_move(c, c.reserve_pos, _cav_trot(c), delta)
 				if Vector2(c.pos.x - c.reserve_pos.x, c.pos.z - c.reserve_pos.z).length() < 8.0:
 					c.state = "rallying"
-					c.rally_t = CAV_RALLY_TIME
+					c.rally_t = _cav_rally_time(c)
 			"rallying":
 				c.rally_t -= delta
 				if c.rally_t <= 0.0:
 					c.state = "reserve"
 			"fled":
 				var away := Vector3(c.pos.x, 0, -900.0 if c.team == 0 else 900.0)
-				_cav_move(c, away, CAV_GALLOP * 0.8, delta)
+				_cav_move(c, away, _cav_gallop(c) * 0.8, delta)
 
 # YOUR squadron: it rallies on you and keeps with you, and when you sound the charge
 # it gallops home at the enemy you pointed it at, then reins in to re-form on you.
@@ -7453,13 +7878,13 @@ func _update_player_cav(c: Cav, delta: float) -> void:
 		var tp := _cav_target_pos(c)
 		if tp == Vector3.INF or c.troopers.size() < 45:
 			c.state = "rallying"
-			c.rally_t = CAV_RALLY_TIME * 0.5
+			c.rally_t = _cav_rally_time(c) * 0.5
 		else:
-			_cav_move(c, tp, CAV_GALLOP, delta)
+			_cav_move(c, tp, _cav_gallop(c), delta)
 			if Vector2(c.pos.x - tp.x, c.pos.z - tp.z).length() < CAV_CONTACT + 4.0:
 				_cav_resolve(c)
 				c.state = "rallying"         # the shock delivered — the horses are blown
-				c.rally_t = CAV_RALLY_TIME
+				c.rally_t = _cav_rally_time(c)
 		return
 	if c.state == "rallying":
 		c.rally_t -= delta
@@ -7468,7 +7893,7 @@ func _update_player_cav(c: Cav, delta: float) -> void:
 	# rallying / reserve / retiring: form on your officer and ride where he rides
 	var anchor := off_pos - Vector3(sin(off_vis), 0, cos(off_vis)) * 9.0
 	var far := off_pos.distance_to(c.pos)
-	var spd := CAV_GALLOP if far > 40.0 else (CAV_TROT if far > 6.0 else 0.0)
+	var spd := _cav_gallop(c) if far > 40.0 else (_cav_trot(c) if far > 6.0 else 0.0)
 	if spd > 0.0:
 		_cav_move(c, anchor, spd, delta)
 	else:
@@ -7481,6 +7906,16 @@ func _cav_move(c: Cav, goal: Vector3, speed: float, delta: float) -> void:
 		return
 	c.facing = atan2(to.x, to.z)
 	c.pos = c.pos.move_toward(Vector3(goal.x, 0, goal.z), speed * delta)
+	# a galloping squadron tears up far more dust than one trotting to its post
+	if cam != null and not c.troopers.is_empty() and cam.position.distance_to(c.pos) < DUST_RANGE \
+			and randf() < delta * 4.0 * (speed / _cav_gallop(c)):
+		var fwd := Vector3(sin(c.facing), 0, cos(c.facing))
+		var right := Vector3(fwd.z, 0, -fwd.x)
+		var width := minf(float(c.troopers.size()) * 1.2, 70.0)
+		for _i in range(clampi(c.troopers.size() / 40, 1, 3)):
+			var p := c.pos - fwd * 1.0 + right * randf_range(-width * 0.5, width * 0.5)
+			p.y = _gh(p.x, p.z) + 0.05
+			_emit_dust(p, fwd)
 
 func _cav_target_pos(c: Cav) -> Vector3:
 	match c.target_kind:
@@ -7502,8 +7937,13 @@ func _cav_target_pos(c: Cav) -> Vector3:
 	return Vector3.INF
 
 # The eye for an opening: enemy horse bearing down on friends, a routing mob, loose
-# skirmishers, a shaken line out of square, an unsupported battery.
+# skirmishers, a shaken line out of square, an unsupported battery. Each arm has its
+# own eye for it: hussars/light dragoons (the fast scouting horse) range further and
+# relish a rout or a loose skirmish screen; heavy dragoons (the battering-ram reserve)
+# look for a real fight — a steady, formed target worth their weight; lancers favour
+# anything not bristling with bayonets in square, where their reach tells.
 func _cav_decide(c: Cav) -> void:
+	var scout: float = CAV_TYPE_DATA[c.cav_type]["scout"]
 	var best = null
 	var best_kind := ""
 	var best_score := 0.0
@@ -7511,7 +7951,7 @@ func _cav_decide(c: Cav) -> void:
 		if e.team == c.team or e.spent or e.state != "charging":
 			continue
 		var d := c.pos.distance_to(e.pos)
-		if d < CAV_CHARGE_RANGE * 1.4:
+		if d < CAV_CHARGE_RANGE * 1.4 * scout:
 			var s := 3.0 - d * 0.004
 			if s > best_score:
 				best_score = s; best = e; best_kind = "cav"
@@ -7519,7 +7959,7 @@ func _cav_decide(c: Cav) -> void:
 		if b.team == c.team or b.figs.size() < 60:
 			continue
 		var d2 := c.pos.distance_to(b.pos)
-		if d2 > CAV_CHARGE_RANGE:
+		if d2 > CAV_CHARGE_RANGE * scout:
 			continue
 		var s2 := 0.0
 		if b.state == "routing":
@@ -7534,6 +7974,16 @@ func _cav_decide(c: Cav) -> void:
 			s2 = 1.4                        # locked fighting — take them in the rear
 		else:
 			s2 = 0.25                       # a steady line: only if nothing better offers
+		match c.cav_type:
+			0, 1:   # hussars / light dragoons: keenest on a rout or a skirmish screen
+				if b.state == "routing" or b.skirmish:
+					s2 *= 1.3
+			2:      # heavy dragoons: the shock arm, happiest pitching into a formed fight
+				if b.formation != "square" and not b.skirmish and b.state != "routing":
+					s2 *= 1.2
+			3:      # lancers: the reach tells against anything not yet in square
+				if b.formation != "square":
+					s2 *= 1.15
 		s2 -= d2 * 0.003
 		if s2 > best_score:
 			best_score = s2; best = b; best_kind = "batt"
@@ -7541,7 +7991,7 @@ func _cav_decide(c: Cav) -> void:
 		if g.team == c.team or g.dead:
 			continue
 		var d3 := c.pos.distance_to(g.pos)
-		if d3 > CAV_CHARGE_RANGE:
+		if d3 > CAV_CHARGE_RANGE * scout:
 			continue
 		var guarded := false
 		for b2 in battalions:
@@ -7557,46 +8007,53 @@ func _cav_decide(c: Cav) -> void:
 		c.target_kind = best_kind
 		c.state = "charging"
 
-# The moment of impact.
+# The moment of impact. `shock` weights the blow each arm delivers (heavy dragoons and
+# a lancer's couched reach hit hardest; hussars lightest); `sturdy` divides the losses
+# the regiment itself takes (heavy dragoons soak it best; lancers, all reach and no
+# armour once the lances are through, take it worst).
 func _cav_resolve(c: Cav) -> void:
 	var near := cam != null and cam.position.distance_to(c.pos) < LOD_VFAR
 	var clash := c.pos + Vector3(0, 1.0, 0)
+	var shock: float = CAV_TYPE_DATA[c.cav_type]["shock"]
+	var sturdy: float = CAV_TYPE_DATA[c.cav_type]["sturdy"]
 	match c.target_kind:
 		"batt":
 			var t: Batt = c.target
 			if t.formation == "square" and t.state != "routing":
 				# the horses refuse the wall of bayonets — the charge breaks on the square
-				_cav_lose(c, int(c.troopers.size() * randf_range(0.14, 0.2)), near)
+				_cav_lose(c, int(c.troopers.size() * randf_range(0.14, 0.2) / sturdy), near)
 				_client_volley(t)                       # the square's face delivers its fire
 				t.morale -= 2.0
 			else:
 				# closing fire from the defenders, then the shock goes home
 				if t.ammo > 0.0 and t.state != "routing" and not t.skirmish:
 					_client_volley(t)
-					_cav_lose(c, int(c.troopers.size() * randf_range(0.06, 0.12)), near)
+					_cav_lose(c, int(c.troopers.size() * randf_range(0.06, 0.12) / sturdy), near)
 				var weak := t.state != "steady" or t.skirmish or t.morale < 48.0
 				var frac := 0.42 if weak else 0.22
-				var inf_kills := mini(int(c.troopers.size() * frac), t.figs.size() - 1)
+				var inf_kills := mini(int(c.troopers.size() * frac * shock), t.figs.size() - 1)
 				t.kills_pending += inf_kills
 				t.shot_from = c.pos
-				t.morale -= 34.0 if weak else 22.0
+				t.morale -= (34.0 if weak else 22.0) * shock
 				t.flinch = minf(t.flinch + 1.4, 1.6)
 				t.calm_t = 0.0
 				if weak:
 					t.morale = minf(t.morale, 22.0)     # broken under the sabres
 				else:
-					_cav_lose(c, int(c.troopers.size() * randf_range(0.05, 0.09)), near)
+					_cav_lose(c, int(c.troopers.size() * randf_range(0.05, 0.09) / sturdy), near)
 		"gun":
 			var g: Gun = c.target
 			while not g.dead:
 				_drop_crewman(g, c.pos)                 # the gunners are sabred at their piece
 		"cav":
 			var e: Cav = c.target
-			var my_p := float(c.troopers.size())
-			var en_p := float(e.troopers.size()) * (1.15 if e.state == "charging" else 0.85)
+			var e_shock: float = CAV_TYPE_DATA[e.cav_type]["shock"]
+			var e_sturdy: float = CAV_TYPE_DATA[e.cav_type]["sturdy"]
+			var my_p := float(c.troopers.size()) * shock
+			var en_p := float(e.troopers.size()) * e_shock * (1.15 if e.state == "charging" else 0.85)
 			var i_win := my_p * randf_range(0.85, 1.15) > en_p
-			_cav_lose(c, int(c.troopers.size() * (0.10 if i_win else 0.22)), near)
-			_cav_lose(e, int(e.troopers.size() * (0.22 if i_win else 0.10)), near)
+			_cav_lose(c, int(c.troopers.size() * (0.10 if i_win else 0.22) / sturdy), near)
+			_cav_lose(e, int(e.troopers.size() * (0.22 if i_win else 0.10) / e_sturdy), near)
 			e.state = "retiring"
 	if near:
 		_play_melee(clash)
@@ -7615,19 +8072,30 @@ func _cav_lose(c: Cav, n: int, seen: bool) -> void:
 			_add_dead_horse(w + Vector3(randf_range(-0.8, 0.8), 0, randf_range(-0.8, 0.8)), randf() * TAU, c.team)
 		c.troopers.remove_at(ti)
 
+# Both horse and rider are now the commanders' ground-origin mesh (built feet-at-y=0,
+# like _build_horse()/_build_officer_colonel()), not bare capsules, so the seat is
+# placed straight at (x, _gh(x,z), z) exactly as _render_commanders() does — no more
+# manual capsule-centre y-offsets, and the same scaled basis drives both meshes so the
+# rider always sits exactly on his horse. mount_scale (CAV_TYPE_DATA) makes the heavy
+# dragoons' mounts visibly the biggest on the field, the hussars' the lightest.
 func _render_cavalry(delta: float) -> void:
 	for team in [0, 1]:
-		var hmm: MultiMesh = cav_horse_mm[team]
-		var rmm: MultiMesh = cav_rider_mm[team]
-		if hmm == null:
-			continue
-		var i := 0
+		var counts := []
+		counts.resize(CAV_TYPE_DATA.size())
+		counts.fill(0)
 		for c in cavalry:
 			if c.team != team or c.spent:
 				continue
+			var hmm: MultiMesh = cav_horse_mm[team][c.cav_type]
+			var rmm: MultiMesh = cav_rider_mm[team][c.cav_type]
+			if hmm == null:
+				continue
+			var i: int = counts[c.cav_type]
 			var fwd := Vector3(sin(c.facing), 0, cos(c.facing))
 			var right := Vector3(fwd.z, 0, -fwd.x)
-			var spd := CAV_GALLOP if c.state == "charging" or c.state == "fled" else CAV_TROT
+			var galloping := c.state == "charging" or c.state == "fled"
+			var spd := _cav_gallop(c) if galloping else _cav_trot(c)
+			var mscale: float = CAV_TYPE_DATA[c.cav_type]["mount_scale"]
 			for tr in c.troopers:
 				if i >= hmm.instance_count:
 					break
@@ -7638,15 +8106,22 @@ func _render_cavalry(delta: float) -> void:
 				var mv := tgt - w
 				var yaw := atan2(mv.x, mv.z) if mv.length() > 0.2 else c.facing
 				var ph := float(tr["ph"])
-				var bob := absf(sin(_t * (9.0 if spd > CAV_TROT else 5.0) + ph)) * (0.14 if spd > CAV_TROT else 0.06)
-				var hb := Basis(Vector3.UP, yaw) * Basis(Vector3.RIGHT, PI * 0.5)
-				var cgh := _gh(w.x, w.z)
-				hmm.set_instance_transform(i, Transform3D(hb, Vector3(w.x, 0.92 + bob + cgh, w.z)))
-				rmm.set_instance_transform(i, Transform3D(Basis(Vector3.UP, yaw), Vector3(w.x, 1.72 + bob + cgh, w.z)))
+				var bob := absf(sin(_t * (9.0 if galloping else 5.0) + ph)) * (0.14 if galloping else 0.06)
+				var basis := Basis(Vector3.UP, yaw).scaled(Vector3(mscale, mscale, mscale))
+				var seat := Vector3(w.x, _gh(w.x, w.z) + bob, w.z)
+				var xf := Transform3D(basis, seat)
+				hmm.set_instance_transform(i, xf)
+				rmm.set_instance_transform(i, xf)
 				i += 1
-		for j in range(i, hmm.instance_count):
-			hmm.set_instance_transform(j, _zero_xf())
-			rmm.set_instance_transform(j, _zero_xf())
+			counts[c.cav_type] = i
+		for ct in range(CAV_TYPE_DATA.size()):
+			var hmm: MultiMesh = cav_horse_mm[team][ct]
+			var rmm: MultiMesh = cav_rider_mm[team][ct]
+			if hmm == null:
+				continue
+			for j in range(counts[ct], hmm.instance_count):
+				hmm.set_instance_transform(j, _zero_xf())
+				rmm.set_instance_transform(j, _zero_xf())
 
 # Your sergeants sing out when enemy horse bears down on YOUR battalion — forming
 # square is your call to make, and yours to make in time.
@@ -9666,7 +10141,7 @@ func _show_bill() -> void:
 	var pcol := "9fe0a0" if prestige >= 0 else "ff9a8a"
 	var txt := "[center][b]%s[/b]\n" % title
 	txt += "[color=#6f7888]——————————————————————[/color]\n"
-	var cav_start := (2 if _inflated else CAV_PER_TEAM) * CAV_MEN
+	var cav_start := (4 if _inflated else CAV_PER_TEAM) * CAV_MEN
 	txt += "[color=#cdd6e6]Our losses[/color]  [color=#ffe9a8]%d[/color] of %d men · %d horse · %d guns silenced\n" \
 		% [_start_strength[pt] - men_now[pt], _start_strength[pt], cav_start - horse_now[pt], guns_lost[pt]]
 	txt += "[color=#cdd6e6]Theirs[/color]  [color=#ffe9a8]%d[/color] of %d men · %d horse · %d guns silenced\n" \
@@ -9944,6 +10419,8 @@ func _choose_arm(arm: String) -> void:
 		_:
 			player.human = true            # you lead your battalion in person again
 	var nm: String = { "infantry": "the foot", "artillery": "the guns", "cavalry": "the horse" }.get(arm, arm)
+	if arm == "cavalry" and player_cav != null:
+		nm = String(CAV_TYPE_DATA[player_cav.cav_type]["name"])   # name the actual arm, e.g. "the Lancers"
 	_send_player_despatch("[color=#ffd773]You take command of %s.[/color]" % nm, {})
 
 func _release_player_arm() -> void:
@@ -10205,7 +10682,8 @@ func _charge_cavalry() -> void:
 	player_cav.target_kind = best_kind
 	player_cav.state = "charging"
 	_play_voice(snd_v_charge, off_pos)
-	_send_player_despatch("[color=#ffd773]CHARGE![/color] Sabres out — ride them down!", {})
+	var cry := "Lances down" if player_cav.cav_type == 3 else "Sabres out"
+	_send_player_despatch("[color=#ffd773]CHARGE![/color] %s — ride them down!" % cry, {})
 
 # Favour what lies ahead of your horse and close by (a forward cone, nearer is better).
 func _charge_score(p: Vector3, heading: Vector3) -> float:
