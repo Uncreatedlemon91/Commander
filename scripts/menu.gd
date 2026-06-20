@@ -45,13 +45,28 @@ func _ready() -> void:
 	scrim.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(scrim)
 
+	# a dark, bordered card behind ALL the menu text so it reads cleanly over the painted
+	# backdrop on every screen (main / lobby / intro / OOB), rather than loose labels floating
+	# on the busy art behind only a faint scrim
+	var card := PanelContainer.new()
+	card.set_anchors_preset(Control.PRESET_CENTER)
+	card.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	card.grow_vertical = Control.GROW_DIRECTION_BOTH
+	var cardsb := StyleBoxFlat.new()
+	cardsb.bg_color = Color(0.04, 0.05, 0.08, 0.88)
+	cardsb.set_corner_radius_all(14)
+	cardsb.border_color = Color(1.0, 0.84, 0.42, 0.35)
+	cardsb.set_border_width_all(1)
+	cardsb.set_content_margin_all(30)
+	cardsb.shadow_color = Color(0, 0, 0, 0.55)
+	cardsb.shadow_size = 20
+	card.add_theme_stylebox_override("panel", cardsb)
+	add_child(card)
+
 	root = VBoxContainer.new()
-	root.set_anchors_preset(Control.PRESET_CENTER)
-	root.grow_horizontal = Control.GROW_DIRECTION_BOTH
-	root.grow_vertical = Control.GROW_DIRECTION_BOTH
 	root.custom_minimum_size = Vector2(440, 0)
 	root.add_theme_constant_override("separation", 12)
-	add_child(root)
+	card.add_child(root)
 
 	var title := Label.new()
 	title.text = "COMMANDER"

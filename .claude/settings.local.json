@@ -83,7 +83,10 @@
       "Bash(\"C:/Users/Felix/Downloads/Godot_v4.6.3-stable_win64.exe/Godot_v4.6.3-stable_win64_console.exe\" --headless --script _cmp2.gd)",
       "Bash(\"C:/Users/Felix/Downloads/Godot_v4.6.3-stable_win64.exe/Godot_v4.6.3-stable_win64_console.exe\" --headless --script _st.gd)",
       "Bash(timeout 90 \"C:/Users/Felix/Downloads/Godot_v4.6.3-stable_win64.exe/Godot_v4.6.3-stable_win64_console.exe\" --headless --quit-after 650 -- --auto-host)",
-      "Bash(timeout 90 \"C:/Users/Felix/Downloads/Godot_v4.6.3-stable_win64.exe/Godot_v4.6.3-stable_win64_console.exe\" --headless --quit-after 600 -- --auto-host)"
+      "Bash(timeout 90 \"C:/Users/Felix/Downloads/Godot_v4.6.3-stable_win64.exe/Godot_v4.6.3-stable_win64_console.exe\" --headless --quit-after 600 -- --auto-host)",
+      "Bash(~/Downloads/Godot_v4.6.3-stable_win64.exe --headless --editor --quit)",
+      "Bash(\"/c/Users/Felix/Downloads/Godot_v4.6.3-stable_win64.exe/Godot_v4.6.3-stable_win64_console.exe\" --headless --editor --quit)",
+      "Bash(\"/c/Users/Felix/Downloads/Godot_v4.6.3-stable_win64.exe/Godot_v4.6.3-stable_win64_console.exe\" --headless --quit-after 650 -- --auto-host)"
     ]
   }
 }

@@ -4795,7 +4795,7 @@ void vertex(){
 	gwave(rot2(w,-0.7), 0.62, 50.0,  0.95*s, 1.25, p, t, disp, nrm, jac);
 	gwave(rot2(w, 1.2), 0.52, 28.0,  0.55*s, 1.5,  p, t, disp, nrm, jac);
 	// the shore bows into bays/headlands around coast_x — MUST mirror _coast_x() in GDScript
-	float local_coast = coast_x + sin(p.z * 0.00045 + 0.6) * 260.0 + sin(p.z * 0.00112 - 1.3) * 140.0;
+	float local_coast = coast_x + sin(p.y * 0.00045 + 0.6) * 260.0 + sin(p.y * 0.00112 - 1.3) * 140.0;
 	v_depth = clamp((p.x - local_coast) / 1400.0, 0.0, 1.0);
 	float damp = mix(0.22, 1.0, v_depth);   // the sea lies calmer in the shallows by the shore
 	VERTEX += disp * damp;
@@ -11111,7 +11111,14 @@ func _make_emitter(life: float, amount: int, mat: Material, quad: Vector2, kind:
 	p.one_shot = false
 	p.emitting = false
 	p.local_coords = false
-	p.visibility_aabb = AABB(Vector3(-1500, -50, -1500), Vector3(3000, 300, 3000))
+	# These emitters live at the world origin but throw world-space particles ALL OVER the
+	# province (x ≈ -8700..2100, z ≈ ±8500 — see _MAP_WMIN/_MAP_WMAX). The visibility AABB is
+	# in the node's local space, so it must span the whole roamable world (+ the offshore strip
+	# where ship-broadside smoke blooms, + headroom for rising smoke). A box only around origin
+	# made Godot frustum-cull the ENTIRE emitter whenever the camera looked away from origin —
+	# so smoke vanished unless you happened to face world centre. This box always covers wherever
+	# the camera can be, so the node never wrongly culls.
+	p.visibility_aabb = AABB(Vector3(-9200, -200, -9200), Vector3(12400, 800, 18400))
 	var qm := QuadMesh.new()
 	qm.size = quad
 	qm.material = mat
@@ -11129,7 +11136,7 @@ func _make_emitter(life: float, amount: int, mat: Material, quad: Vector2, kind:
 func _musket_smoke_process() -> ParticleProcessMaterial:
 	var m := ParticleProcessMaterial.new()
 	m.gravity = Vector3(0, 0.012, 0)          # barely rises — powder smoke hangs at the line,
-	                                          # not lofting metres into the sky over its lifetime
+											  # not lofting metres into the sky over its lifetime
 	m.damping_min = 0.22
 	m.damping_max = 0.45
 	m.scale_min = 0.9
@@ -11320,6 +11327,16 @@ func _emit_gun_smoke(pos: Vector3, fwd: Vector3) -> void:
 	var vel := fwd * randf_range(4.0, 9.0) + lateral + Vector3(0, randf_range(0.2, 0.9), 0) + _wind
 	smoke_p.emit_particle(Transform3D(Basis(), pos), vel,
 		Color(0.9, 0.9, 0.9), Color.WHITE, EMIT_FLAGS)
+
+# Dust torn up by a galloping squadron — a low, earthy puff kicked up and back off the
+# hooves, then carried on the wind. Reuses the musket-smoke emitter (rolls forward and
+# thins out the same way) tinted to a dry-earth tan, so no extra emitter is needed.
+const DUST_RANGE := 220.0        # don't spend particles on dust the camera can't see
+func _emit_dust(pos: Vector3, fwd: Vector3) -> void:
+	var kick := -fwd * randf_range(0.4, 1.2) + Vector3(0, randf_range(0.3, 0.8), 0) + _wind
+	var jitter := Vector3(randf_range(-0.4, 0.4), 0.0, randf_range(-0.4, 0.4))
+	musket_smoke_p.emit_particle(Transform3D(Basis(), pos + jitter), kick,
+		Color(0.60, 0.50, 0.36), Color.WHITE, EMIT_FLAGS)
 
 # A burst of fine blood mist the instant a man is struck — it puffs out away from the
 # shot, hangs for a moment, then sinks and leaves a splatter on the ground.
