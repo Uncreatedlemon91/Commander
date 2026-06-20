@@ -15,6 +15,8 @@ const CAP_RADIUS := 0.22
 const CAP_HEIGHT := 1.7           # a properly-proportioned man (with shako ~1.8)
 const CAP_HALF := CAP_HEIGHT * 0.5
 const MEN := 700                  # men per battalion, drawn 1:1
+const MILITIA_START_MEN := 60     # the founded militia steps off small, and grows by recruiting
+const MILITIA_MAX_MEN := 900      # a recruited militia caps out around one full battalion's strength
 # --- the full order of battle: battalion -> brigade -> division -> corps -> army ---
 const BATTS_PER_BRIGADE := 5      # 3,500 men to a brigade
 const BRIGADES_PER_DIVISION := 5  # 17,500 men to a division
@@ -121,6 +123,8 @@ const FATIGUE_FIRE := 0.9         # standing under arms, loading and firing
 const REST_RATE := 1.7            # weariness shed/sec when standing easy out of danger
 const CAMP_REST_RATE := 7.0       # ...and far faster once properly encamped
 const TRAIN_RATE := 0.7           # skill points/sec gained drilling a chosen skill in camp
+const PRESTIGE_TRAIN_RATE := 0.12 # prestige/sec earned by an independent battalion drilling in camp
+const PRESTIGE_PATROL_RATE := 0.015  # prestige per yard earned patrolling the country, clear of the enemy
 const CAMP_SAFE_RANGE := 240.0    # no enemy may stand within this to make camp
 const XP_PER_BLOOD := 45.0        # enemies felled before the men's fighting skills harden a notch
 # fire discipline: a massed volley SHOCKS far beyond its casualties; independent
@@ -155,7 +159,7 @@ const SHAKE_MAX := 0.55
 const COURIER_SPEED := 9.0        # an aide's canter (m/s)
 const COURIER_MAX := 16
 const AUDIO_POOL := 128           # the whole front is audible now — more voices at once
-const MAX_PER_TEAM := BATT_PER_TEAM * MEN
+const MAX_PER_TEAM := BATT_PER_TEAM * MEN + MILITIA_MAX_MEN   # headroom for an independent militia on top of the standing OOB
 const CORPSE_MAX := 24000          # per team, rolling (the oldest dead are re-used)
 # --- artillery (the great killer of the age) ---
 const BATTERIES_PER_TEAM := 8      # two batteries to a division, massed not strung out
@@ -178,12 +182,14 @@ const LOD_NEAR := 70.0
 const LOD_MID := 160.0
 const LOD_FAR := 340.0            # full per-man simulation out to here...
 const LOD_VFAR := 1400.0          # ...then a static formation IMPRESSION to here
+const DUST_RANGE := 260.0         # beyond this, marching/galloping dust isn't worth spawning
 
 enum Order { IDLE, FOLLOW }
 
 class Batt:
 	var team: int
 	var is_player: bool = false
+	var independent: bool = false   # founded militia: never joins the brigade/division/corps OOB
 	var pos: Vector3
 	var facing: float = 0.0
 	var formation: String = "line"
@@ -309,6 +315,7 @@ class Gun:
 	var limber_state: String = "deployed"   # deployed | limbering | moving | unlimbering
 	var limber_t: float = 0.0   # timer for the current limber/unlimber transition
 	var limber_group: Node3D    # the limber cart + horse team (shown only while limbered)
+	var limber_horses: Array = []   # the team's MeshInstance3D nodes, bobbed on the move
 
 # A brigade: several battalions and a battery under one commander, manoeuvring as a
 # body to 18th-century doctrine — advance in line, soften with artillery, assault a
@@ -529,6 +536,7 @@ var _off_respawn := 0.0
 # under your command (or your own hand), -1 for every man of yours lost. Later the
 # currency for upgrades: items, skills, better officers.
 var prestige := 0
+var _prestige_acc := 0.0   # fractional prestige (e.g. from drilling), banked until it rounds to a point
 var _player_figs_prev := -1        # last known strength, for counting losses centrally
 
 # --- battle flow: deployment, army collapse, victory & the butcher's bill ---
@@ -564,11 +572,18 @@ var _rts_cam := false
 var _rts_focus := Vector3.ZERO
 var _rts_dist := 320.0
 
-var smoke_p: GPUParticles3D                # cannon smoke: jets hard, then hangs
-var musket_smoke_p: GPUParticles3D         # musket smoke: rolls forward, thins downrange
+var smoke_p: GPUParticles3D                # cannon smoke: jets hard, blooms, then drifts downwind
+var musket_smoke_p: GPUParticles3D         # musket smoke: rolls forward, then drifts downwind, thinning
+var _smoke_proc: ParticleProcessMaterial    # cannon smoke's process material (wind pushes its gravity)
+var _musket_smoke_proc: ParticleProcessMaterial  # musket smoke's process material (same)
 var flash_p: GPUParticles3D
 var fire_p: GPUParticles3D
 var blood_p: GPUParticles3D                # red spray when a man is hit
+var dirt_p: GPUParticles3D                 # earth thrown up by a roundshot striking the ground
+var dust_p: GPUParticles3D                 # the haze kicked up by marching feet and hooves
+var _dust_proc: ParticleProcessMaterial     # dust's process material (wind pushes its gravity)
+var wake_p: GPUParticles3D                 # the foam a ship's bow turns over under way
+var splash_p: GPUParticles3D               # waterspouts where roundshot pitches into the sea
 var blood_mm: MultiMesh                    # ground blood pools under the fallen
 var blood_idx := 0
 const BLOOD_MAX := 16000
@@ -659,7 +674,7 @@ var ground_mat: StandardMaterial3D
 # --- time of day & weather ---
 var _time_of_day := 8.5                   # hours, 0..24
 var _weather := "clear"                   # clear | overcast | rain | fog
-var _weather_timer := 75.0                # seconds until the weather shifts on its own
+var _weather_timer := 200.0               # seconds until the weather shifts on its own
 var _night := 0.0                         # 0 broad day .. 1 deep night (muzzle flashes glow)
 var _cloud := 0.0                         # smoothed cloud cover 0..1
 var _fogw := 0.0                          # smoothed extra fog 0..1
@@ -667,12 +682,24 @@ var _rainw := 0.0                         # smoothed rain intensity 0..1
 var _wind := Vector3.ZERO                 # gentle wind (drifts smoke, stirs the colours)
 var _wet := 0.0                           # how damp the powder is (misfires in rain)
 var rain_p: GPUParticles3D
+var _rain_proc: ParticleProcessMaterial   # rain's process material (wind lays the streaks over)
 var _grad_skytop: Gradient
 var _grad_skyhorizon: Gradient
 var _grad_sun: Gradient
 var _grad_fog: Gradient
 const DAY_RATE := 24.0 / 3600.0           # a full day cycles in ~60 minutes (N to skip ahead)
 const WEATHERS := ["clear", "overcast", "rain", "fog"]
+# which way the weather plausibly turns next — a clear sky builds to overcast before it can
+# rain, and rain clears back through overcast rather than snapping straight to blue sky
+const WEATHER_NEXT := {
+	"clear": ["overcast"],
+	"overcast": ["clear", "clear", "rain", "rain", "fog"],
+	"rain": ["overcast"],
+	"fog": ["overcast", "clear"],
+}
+const WEATHER_CLOUD_RATE := 0.018         # clouds build/break over roughly a minute, not seconds
+const WEATHER_FOG_RATE := 0.02
+const WEATHER_RAIN_RATE := 0.06           # once the sky's heavy enough, rain can pick up quicker
 var _t := 0.0
 
 # multiplayer
@@ -726,6 +753,9 @@ var _roster_list: VBoxContainer    # the soldier rows for the open company
 var _roster_detail: VBoxContainer  # the selected soldier's card + action buttons
 var _camp_btn_rest: Button
 var _camp_btn_drill: Button
+var _camp_btn_recruit: Button   # an independent militia's hand: take on men at a friendly town
+var _camp_btn_hire: Button      # commission a Lieutenant over a company that lacks one
+var _camp_btn_equip: Button     # spend prestige on better muskets and kit
 var _scoped := false
 var _scope_amt := 0.0
 var _scope_rect: TextureRect
@@ -1158,14 +1188,25 @@ func _build_world() -> void:
 
 	smoke_p = _make_emitter(24.0, 60000, _smoke_material(), Vector2(2.2, 2.2), 0)
 	musket_smoke_p = _make_emitter(20.0, 140000, _smoke_material(), Vector2(2.0, 2.0), 5)
+	_smoke_proc = smoke_p.process_material
+	_musket_smoke_proc = musket_smoke_p.process_material
 	flash_p = _make_emitter(0.16, 20000, _flash_material(), Vector2(1.0, 1.0), 1)
 	fire_p = _make_emitter(0.4, 20000, _flash_material(), Vector2(0.8, 0.8), 2)
 	blood_p = _make_emitter(0.85, 24000, _blood_material(), Vector2(0.5, 0.5), 4)
+	dirt_p = _make_emitter(1.4, 24000, _smoke_material(), Vector2(1.3, 1.3), 6)
+	dust_p = _make_emitter(7.0, 50000, _smoke_material(), Vector2(2.0, 2.0), 7)
+	_dust_proc = dust_p.process_material
+	wake_p = _make_emitter(2.6, 20000, _smoke_material(), Vector2(1.1, 1.1), 8)
+	splash_p = _make_emitter(1.8, 12000, _smoke_material(), Vector2(1.4, 1.4), 9)
 	add_child(smoke_p)
 	add_child(musket_smoke_p)
 	add_child(flash_p)
 	add_child(fire_p)
 	add_child(blood_p)
+	add_child(dirt_p)
+	add_child(dust_p)
+	add_child(wake_p)
+	add_child(splash_p)
 
 	# ground blood pools, baked under the fallen (paired with the corpse layer)
 	var blmi := MultiMeshInstance3D.new()
@@ -2135,14 +2176,16 @@ func _build_rain() -> GPUParticles3D:
 	var pm := ParticleProcessMaterial.new()
 	pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
 	pm.emission_box_extents = Vector3(55, 0.5, 55)
-	pm.direction = Vector3(0.12, -1.0, 0.0)
+	pm.direction = Vector3(0, -1.0, 0)
 	pm.spread = 2.0
 	pm.initial_velocity_min = 26.0
 	pm.initial_velocity_max = 32.0
-	pm.gravity = Vector3(0, -12.0, 0)
+	pm.gravity = Vector3(0, -12.0, 0)         # wind adds a sideways pull on top of this, live
 	pm.scale_min = 1.0
 	pm.scale_max = 1.0
+	pm.set_particle_flag(ParticleProcessMaterial.PARTICLE_FLAG_ALIGN_Y_TO_VELOCITY, true)   # streaks rake to match how they're actually falling
 	p.process_material = pm
+	_rain_proc = pm
 	var mesh := QuadMesh.new()
 	mesh.size = Vector2(0.018, 0.55)         # a thin streak
 	var mat := StandardMaterial3D.new()
@@ -2189,9 +2232,12 @@ func _update_environment(delta: float) -> void:
 	var h := sin((t - 6.0) / 12.0 * PI)          # sun height: -1..1 (0 at 6 & 18)
 	var day := clampf(h, 0.0, 1.0)
 	_night = clampf(-h * 2.2 + 0.25, 0.0, 1.0)   # deep dark after dusk -> muzzle flashes blaze
-	# weather is DISABLED for now — the field stays clear (M is the map, not the weather)
-	_weather = "clear"
-	# ease the weather toward the chosen state
+	# the weather turns over on its own, slowly, only to a state the current one plausibly leads to
+	_weather_timer -= delta
+	if _weather_timer <= 0.0:
+		_cycle_weather()
+	# ease the weather toward the chosen state — clouds and fog build over roughly a minute,
+	# never snap, so nothing changes from clear to foul in the space of a few seconds
 	var tc := 0.0
 	var tf := 0.0
 	var tr := 0.0
@@ -2199,10 +2245,13 @@ func _update_environment(delta: float) -> void:
 		"overcast": tc = 0.85; tf = 0.22
 		"rain": tc = 1.0; tf = 0.45; tr = 1.0
 		"fog": tc = 0.55; tf = 1.0
-	var k := clampf(delta * 0.5, 0.0, 1.0)
-	_cloud = lerpf(_cloud, tc, k)
-	_fogw = lerpf(_fogw, tf, k)
-	_rainw = lerpf(_rainw, tr, k)
+	_cloud = lerpf(_cloud, tc, clampf(delta * WEATHER_CLOUD_RATE, 0.0, 1.0))
+	_fogw = lerpf(_fogw, tf, clampf(delta * WEATHER_FOG_RATE, 0.0, 1.0))
+	# rain can't break until the sky is actually heavy enough to carry it — a storm announces
+	# itself in the clouds well before the first drop falls, and tails off the same way as
+	# they thin, so "clear" never tips straight into "raining"
+	var rain_target := tr * smoothstep(0.55, 0.85, _cloud)
+	_rainw = lerpf(_rainw, rain_target, clampf(delta * WEATHER_RAIN_RATE, 0.0, 1.0))
 	_wet = _rainw
 	# the sun arcs across the sky; stays just above the horizon so shadows always cast
 	var pitch := -clampf(h * 70.0, 4.0, 76.0)
@@ -2237,6 +2286,19 @@ func _update_environment(delta: float) -> void:
 		ground_mat.albedo_color = Color(1, 1, 1).lerp(Color(0.66, 0.69, 0.72), _rainw)
 	# a slowly veering wind that drifts the smoke and stirs the colours
 	_wind = Vector3(cos(_t * 0.05), 0.0, sin(_t * 0.05)) * (0.4 + _rainw * 2.2 + _cloud * 0.7)
+	# the wind is a continuous force on every puff already aloft, not just a kick at the
+	# muzzle — banks of smoke keep drifting downwind for their whole life, same as the real
+	# thing, while still buoying gently upward as they thin
+	if _smoke_proc:
+		_smoke_proc.gravity = Vector3(_wind.x, 0.10, _wind.z)
+	if _musket_smoke_proc:
+		_musket_smoke_proc.gravity = Vector3(_wind.x, 0.012, _wind.z)
+	if _dust_proc:
+		_dust_proc.gravity = Vector3(_wind.x, 0.02, _wind.z)
+	if _rain_proc:
+		# the same wind that drifts the smoke lays the rain over — the harder it blows,
+		# the harder the streaks rake as they fall, instead of always dropping dead straight
+		_rain_proc.gravity = Vector3(_wind.x * 2.6, -12.0, _wind.z * 2.6)
 	# the sea and the clouds answer to that same wind
 	var wdir := Vector2(_wind.x, _wind.z)
 	wdir = wdir.normalized() if wdir.length() > 0.01 else Vector2(1, 0)
@@ -2260,10 +2322,13 @@ func _update_environment(delta: float) -> void:
 		cloud_mat.set_shader_parameter("shade", horizon.lerp(Color(0.60, 0.64, 0.72), 0.5) * dcl)
 
 func _cycle_weather() -> void:
-	var i := WEATHERS.find(_weather)
-	_weather = WEATHERS[(i + 1) % WEATHERS.size()]
-	_weather_timer = randf_range(90.0, 220.0)        # hold the chosen weather a while
-	_send_player_despatch("[color=#bcd] Weather: %s.[/color]" % _weather, {})
+	# only turn toward a state the current weather plausibly leads to — clear builds to
+	# overcast before anything else, rain settles back to overcast rather than blue sky
+	var options: Array = WEATHER_NEXT.get(_weather, WEATHERS)
+	_weather = options[randi() % options.size()]
+	_weather_timer = randf_range(180.0, 360.0)       # hold the chosen weather a good while —
+													   # the change itself already takes a minute or so
+	_send_player_despatch("[color=#bcd] Weather turning %s.[/color]" % _weather, {})
 
 # ============================================================= THE FIELD MAP (M)
 # A top-down read of the whole action: every battalion plotted as a small counter,
@@ -2758,6 +2823,18 @@ func _build_camp(cl: CanvasLayer) -> void:
 	bsup.text = "Resupply"
 	bsup.pressed.connect(_camp_resupply)
 	bar.add_child(bsup)
+	_camp_btn_recruit = Button.new()
+	_camp_btn_recruit.text = "Recruit"
+	_camp_btn_recruit.pressed.connect(_camp_recruit)
+	bar.add_child(_camp_btn_recruit)
+	_camp_btn_hire = Button.new()
+	_camp_btn_hire.text = "Hire Officer"
+	_camp_btn_hire.pressed.connect(_camp_hire_officer)
+	bar.add_child(_camp_btn_hire)
+	_camp_btn_equip = Button.new()
+	_camp_btn_equip.text = "Buy Muskets"
+	_camp_btn_equip.pressed.connect(_camp_equip)
+	bar.add_child(_camp_btn_equip)
 	var bins := Button.new()
 	bins.text = "Inspect Companies ›"
 	bins.pressed.connect(_open_roster)
@@ -2814,6 +2891,8 @@ func _refresh_camp() -> void:
 	var t := "[center][b][color=#ffd773]CAMP & COMMAND[/color][/b]%s[/center]\n" % seat
 	t += "[b][color=#ffe9a8]%s[/color][/b]   [color=#9fb0c8](%s)[/color]\n" % [_unit_name(b), b.quality]
 	t += "[color=#cdd6e6]%d / %d effectives · %d companies · %d rounds a man[/color]\n" % [b.figs.size(), b.start_men, b.companies, int(round(b.ammo))]
+	if b.independent:
+		t += "[color=#ffe9a8]Prestige: %d[/color]\n" % prestige
 	t += dash
 	t += "[b][color=#bcd6ff]SKILLS[/color][/b]\n"
 	for key in SKILL_KEYS:
@@ -2841,6 +2920,12 @@ func _refresh_camp() -> void:
 		_camp_btn_rest.text = "Break Camp" if b.encamped else "Make Camp"
 	if _camp_btn_drill != null:
 		_camp_btn_drill.text = "Drill: %s" % tw
+	if _camp_btn_recruit != null:
+		_camp_btn_recruit.visible = b.independent
+	if _camp_btn_hire != null:
+		_camp_btn_hire.visible = b.independent
+	if _camp_btn_equip != null:
+		_camp_btn_equip.visible = b.independent
 
 # One line per company: its strength and the senior man standing with it.
 func _company_lines(b: Batt) -> String:
@@ -3248,6 +3333,118 @@ func _camp_resupply() -> void:
 	prestige -= cost
 	player.ammo = START_ROUNDS
 	_send_player_despatch("[color=#9fe0a0]Cartridge boxes filled at the depot[/color] — %d prestige to the quartermaster." % cost, {})
+	_refresh_camp()
+
+# Recruiting (Phase 1): an independent militia takes on men only at a town in its own
+# country — not a fort or depot, and not enemy ground. The price rises as the
+# battalion grows, so a small militia stays a real choice, not a free snowball.
+const RECRUIT_BATCH := 10           # men taken on at a time
+const RECRUIT_COST_PER_MAN := 3     # prestige per recruit, before the size surcharge
+func _camp_recruit() -> void:
+	if player == null or not player.independent:
+		return
+	var town := _player_town()
+	if town.is_empty() or town.has("kind"):
+		_send_player_despatch("[color=#ff9a8a]Recruiting needs a town, not a garrison.[/color]", {})
+		return
+	if player.figs.size() >= MILITIA_MAX_MEN:
+		_send_player_despatch("[color=#9fb0c8]The battalion is at full strength — there's no more room in the ranks.[/color]", {})
+		return
+	var n := mini(RECRUIT_BATCH, MILITIA_MAX_MEN - player.figs.size())
+	var surcharge := 1.0 + float(player.figs.size()) / 200.0
+	var cost := int(ceil(float(n) * float(RECRUIT_COST_PER_MAN) * surcharge))
+	if prestige < cost:
+		_send_player_despatch("[color=#ff9a8a]Recruiting %d more would cost %d prestige — you have %d.[/color]" % [n, cost, prestige], {})
+		return
+	prestige -= cost
+	_recruit_men(player, n)
+	_send_player_despatch("[color=#9fe0a0]%d men enlist at %s[/color] — %d prestige spent." % [n, String(town.get("name", "the town")), cost], {})
+	_refresh_camp()
+
+# Fold n green recruits into a battalion: new figures fall in behind the colours and
+# walk up into their slot, new named men join the roster well below the veterans'
+# polish, and the living profile is re-derived so the new hands drag the average down
+# a touch — exactly as drilling and blooding will bring them up over time.
+func _recruit_men(b: Batt, n: int) -> void:
+	var fwd := Vector3(sin(b.facing), 0, cos(b.facing))
+	for i in range(n):
+		var w := b.pos - fwd * 6.0
+		b.figs.append({ "slot": Vector2.ZERO, "wpos": Vector3(w.x, 0, w.z), "ph": randf() * TAU,
+			"spd": randf_range(0.85, 1.18), "reload": randf_range(0.0, RELOAD_TIME),
+			"company": 0, "face": 0.0,
+			"bw": randf_range(0.92, 1.07), "bh": randf_range(0.90, 1.10),
+			"wear": randf_range(0.82, 1.07), "march": 0.0,
+			"flinch": 0.0, "nerve": randf_range(0.0, 1.0) })
+	_reslot(b)
+	if not b.roster.is_empty():
+		for i in range(n):
+			var coy := b.roster.size() % b.companies
+			var man := { "name": _rand_name(), "rank": "Pte.", "coy": coy,
+				"xp": 0.0, "kills": 0, "alive": true, "focus": "" }
+			for key in SKILL_KEYS:
+				man[key] = clampf(_sk(b, key) - 14.0 + randf_range(-8.0, 8.0), 6.0, 90.0)
+			b.roster.append(man)
+		_reprofile(b)
+	b.start_men = maxi(b.start_men, b.figs.size())
+
+# Hire an officer (Phase 1): commission a Lieutenant over the first company that lacks
+# one, raised from its most promising NCO/man. A separate mechanic from the NCO ladder
+# (promote/demote) — this is a commission, bought with prestige, not earned in the ranks.
+const HIRE_OFFICER_COST := 80
+func _camp_hire_officer() -> void:
+	if player == null or not player.independent or player.roster.is_empty():
+		return
+	var b := player
+	var has_off := {}
+	for m in b.roster:
+		if m["alive"] and String(m["rank"]) in ["Lt.", "Capt."]:
+			has_off[int(m["coy"])] = true
+	var coy := -1
+	for c in range(b.companies):
+		if not has_off.has(c):
+			coy = c
+			break
+	if coy == -1:
+		_send_player_despatch("[color=#9fb0c8]Every company already has its officer.[/color]", {})
+		return
+	if prestige < HIRE_OFFICER_COST:
+		_send_player_despatch("[color=#ff9a8a]Commissioning an officer costs %d prestige — you have %d.[/color]" % [HIRE_OFFICER_COST, prestige], {})
+		return
+	var pool: Array = []
+	for m in b.roster:
+		if m["alive"] and int(m["coy"]) == coy and String(m["rank"]) != "Capt.":
+			pool.append(m)
+	if pool.is_empty():
+		return
+	var man = _best_by_discipline(pool)
+	prestige -= HIRE_OFFICER_COST
+	man["rank"] = "Lt."
+	for key in SKILL_KEYS:
+		man[key] = clampf(float(man[key]) + 9.0, 6.0, 99.0)
+	_send_player_despatch("[color=#9fe0a0]%s commissioned Lieutenant of No. %d Company.[/color]" % [man["name"], coy + 1], {})
+	_refresh_camp()
+
+# Buy gear (Phase 1): better muskets and kit from the town armourer, a flat prestige
+# spend that lifts marksmanship and loading a notch for every man, veteran and recruit
+# alike — instant, unlike drill, but with no ceiling-breaking effect on its own.
+const EQUIP_COST := 60
+const EQUIP_AIM_GAIN := 6.0
+func _camp_equip() -> void:
+	if player == null or not player.independent:
+		return
+	if prestige < EQUIP_COST:
+		_send_player_despatch("[color=#ff9a8a]Better muskets cost %d prestige — you have %d.[/color]" % [EQUIP_COST, prestige], {})
+		return
+	prestige -= EQUIP_COST
+	var b := player
+	b.skill["aim"] = clampf(_sk(b, "aim") + EQUIP_AIM_GAIN, 6.0, 99.0)
+	b.skill["reload"] = clampf(_sk(b, "reload") + EQUIP_AIM_GAIN * 0.6, 6.0, 99.0)
+	b.exp_mul = _reload_factor(b)
+	for m in b.roster:
+		if m["alive"]:
+			m["aim"] = clampf(float(m["aim"]) + EQUIP_AIM_GAIN, 6.0, 99.0)
+			m["reload"] = clampf(float(m["reload"]) + EQUIP_AIM_GAIN * 0.6, 6.0, 99.0)
+	_send_player_despatch("[color=#9fe0a0]New muskets issued from store[/color] — %d prestige spent." % EQUIP_COST, {})
 	_refresh_camp()
 
 # ---------------------------------------------------------------- terrain & scenery
@@ -4359,6 +4556,10 @@ const COAST_X := 1650.0            # the shoreline's mean position — land to t
 const COAST_AMPLITUDE := 400.0     # the most a bay/headland can pull the shore off COAST_X
 const SHIP_SPEED := 2.4            # a ship under sail makes way slowly (an accurate pace)
 const SHIP_TURN := 0.09            # max turn rate (rad/s) — a big, ponderous turning circle
+const SHIP_HP_MAX := 60.0          # round shot needed to take a frigate out of the fight
+const SHIP_HULL_HALFLEN := 21.0    # hull oriented-box half-length, bow to stern (local +Z is the bow)
+const SHIP_HULL_HALFWIDTH := 6.5   # hull oriented-box half-width at the wale
+const SHIP_SINK_TIME := 7.0        # how long a struck ship takes to founder and go under
 # the sea's wave model — MUST mirror the ocean shader so ships ride the visible swell.
 # each wave: [angle offset from wind, steepness, wavelength, amplitude factor, speed]
 const SEA_BASE_Y := -1.0
@@ -4642,7 +4843,8 @@ func _ship_node(team: int) -> Node3D:
 	# ---- the beak: a carved, gilt figurehead, cathead beams and anchors stowed each side ----
 	_smesh(n, _box(0.9, 2.0, 1.4), Vector3(0, 4.6, 32.0), trim)               # figurehead
 	_smesh(n, _box(0.5, 0.9, 0.8), Vector3(0, 5.7, 32.2), gold)               # figurehead's gilt crest
-	for side in [-1.0, 1.0]:
+	var cathead_sides: Array[float] = [-1.0, 1.0]
+	for side in cathead_sides:
 		var ax := side * 5.6
 		_smesh(n, _box(0.45, 0.45, 2.6), Vector3(side * 5.6, 9.0, 26.5), deckwood)        # cathead beam
 		_smesh(n, _box(0.18, 3.4, 0.18), Vector3(ax, 5.4, 26.0), dark)                     # anchor shank
@@ -4700,23 +4902,63 @@ func _spawn_ships() -> void:
 			var z := randf_range(-1300.0, 1300.0) + (-700.0 if team == 0 else 700.0)
 			var ph := 0.0 if team == 0 else PI
 			ships.append({ "node": node, "pos": Vector3(x, 0, z), "heading": ph, "patrol_h": ph,
-				"speed": SHIP_SPEED * randf_range(0.9, 1.1), "team": team, "fire_cd": randf_range(2.0, 6.0) })
+				"speed": SHIP_SPEED * randf_range(0.9, 1.1), "team": team, "fire_cd": randf_range(2.0, 6.0),
+				"hp": SHIP_HP_MAX, "sinking": false })
 
 func _nearest_enemy_ship(s: Dictionary):
 	var best = null
 	var bd := 1.0e18
 	for o in ships:
-		if o["team"] == s["team"]:
+		if o["team"] == s["team"] or o.get("sinking", false):
 			continue
 		var d: float = (o["pos"] as Vector3).distance_to(s["pos"])
 		if d < bd:
 			bd = d; best = o
 	return best
 
+# is this point inside the ship's hull — an oriented box, local +Z toward the bow
+func _ship_hit_test(ship: Dictionary, point: Vector3) -> bool:
+	var hd := Vector3(sin(ship["heading"]), 0, cos(ship["heading"]))
+	var right := Vector3(hd.z, 0, -hd.x)
+	var rel: Vector3 = point - (ship["pos"] as Vector3)
+	rel.y = 0.0
+	return absf(rel.dot(hd)) <= SHIP_HULL_HALFLEN and absf(rel.dot(right)) <= SHIP_HULL_HALFWIDTH
+
+func _sink_ship(s: Dictionary) -> void:
+	if s.get("sinking", false):
+		return
+	s["sinking"] = true
+	s["sink_t"] = 0.0
+
+func _update_sinking_ship(s: Dictionary, delta: float) -> void:
+	s["sink_t"] = float(s.get("sink_t", 0.0)) + delta
+	var t: float = s["sink_t"]
+	var node: Node3D = s["node"]
+	var sx: float = s["pos"].x
+	var sz: float = s["pos"].z
+	var wy := _sea_y(sx, sz)
+	var hd := Vector3(sin(s["heading"]), 0, cos(s["heading"]))
+	var up := _sea_normal(sx, sz)
+	var fwd := (hd - up * hd.dot(up)).normalized()
+	var right := up.cross(fwd).normalized()
+	var settle := clampf(t / SHIP_SINK_TIME, 0.0, 1.0)
+	var basis := Basis(right, up, fwd).rotated(fwd, settle * 0.55)   # she rolls onto her beam-ends
+	node.transform = Transform3D(basis, Vector3(sx, wy + 0.2 - settle * 6.0, sz))
+	if randf() < delta * 6.0:
+		_emit_wake(Vector3(sx, wy + 0.3, sz) + fwd * randf_range(-20.0, 20.0), fwd)
+	if randf() < delta * 3.0:
+		_emit_splash(Vector3(sx, wy + 0.3, sz))
+
 func _update_ships(delta: float) -> void:
 	if ships.is_empty():
 		return
+	var sunk: Array = []
 	for s in ships:
+		if s.get("sinking", false):
+			_update_sinking_ship(s, delta)
+			if float(s["sink_t"]) > SHIP_SINK_TIME:
+				sunk.append(s)
+			continue
 		# --- decide where to steer ---
 		var foe = _nearest_enemy_ship(s)
 		var fdist := 1.0e9
@@ -4760,6 +5002,11 @@ func _update_ships(delta: float) -> void:
 		var fwd := (hd - up * hd.dot(up)).normalized()   # keep the bow level with the surface
 		var right := up.cross(fwd).normalized()
 		node.transform = Transform3D(Basis(right, up, fwd), Vector3(sx, wy + 0.2, sz))
+		# the bow turns the sea over white as the ship makes way — more foam the faster she sails
+		if way > 0.3 and cam != null and cam.position.distance_to(s["pos"]) < 700.0:
+			var bow := Vector3(sx, wy + 0.3, sz) + fwd * 29.0
+			if randf() < delta * 5.0 * (way / SHIP_SPEED):
+				_emit_wake(bow, fwd)
 		# --- gunnery: a ship can ONLY fire broadsides — the enemy must lie abeam and in range ---
 		s["fire_cd"] -= delta
 		if s["fire_cd"] <= 0.0:
@@ -4771,6 +5018,10 @@ func _update_ships(delta: float) -> void:
 				_ship_broadside(s, foe)
 			else:
 				s["fire_cd"] = 1.0                       # not yet bearing — check again shortly
+	for s in sunk:
+		var node: Node3D = s["node"]
+		node.queue_free()
+		ships.erase(s)
 
 func _ship_broadside(s: Dictionary, foe) -> void:
 	var hd := Vector3(sin(s["heading"]), 0, cos(s["heading"]))
@@ -4786,6 +5037,9 @@ func _ship_broadside(s: Dictionary, foe) -> void:
 		_emit_muzzle_bloom(muzzle, side)
 		_emit_gun_smoke(muzzle + side * randf_range(0.0, 4.0), side)
 		_emit_gun_smoke(muzzle + side * randf_range(2.0, 6.0), side)
+		# every other gun actually sends iron downrange — a tracked ball, not a cosmetic guess
+		if k % 2 == 0:
+			_spawn_naval_shot(muzzle + side * 3.0, foe, int(s["team"]))
 	if cam != null:
 		_play_cannon(base + hd * 12.5 + side * 7.3)
 		_play_cannon(base - hd * 12.5 + side * 7.3)   # the report rolls down the ship's length
@@ -5438,6 +5692,10 @@ func _spawn_armies() -> void:
 	var humans: Array = [GameConfig.local_slot]
 	if GameConfig.mode == "host":
 		humans = Net.human_slots()
+	# a founded militia rides INDEPENDENT of the order of battle (see _spawn_independent_militia) —
+	# no slot in the standard 100-per-team OOB is the player's, so none should be marked human/player
+	if GameConfig.has_militia:
+		humans = []
 	for team in [0, 1]:
 		var z := -360.0 if team == 0 else 360.0   # deploy further apart: a deeper field, a real march
 		var face := 0.0 if team == 0 else PI    # team 0 faces +Z, team 1 faces -Z
@@ -5467,14 +5725,14 @@ func _spawn_armies() -> void:
 			var fpal: Array = FACINGS_0 if team == 0 else FACINGS_1
 			var fc: Color = fpal[brig % fpal.size()]
 			var coat_idx := 1 if kb == BATTS_PER_BRIGADE - 1 else 0
-			b.inst_col = Color(fc.r, fc.g, fc.b, _dress_packed(coat_idx, gidx, gidx == GameConfig.local_slot))
+			b.inst_col = Color(fc.r, fc.g, fc.b, _dress_packed(coat_idx, gidx, gidx == GameConfig.local_slot and not GameConfig.has_militia))
 			b.spawn = b.pos
 			b.facing = face
 			b.formation = "column"               # advance in column, deploy on contact
 			b.off_facing = face
 			b.off_pos = b.pos + Vector3(sin(face), 0, cos(face)) * 14.0
 			b.human = gidx in humans
-			b.is_player = (gidx == GameConfig.local_slot)
+			b.is_player = (gidx == GameConfig.local_slot) and not GameConfig.has_militia
 			b.companies = 6 if team == 0 else 10  # French 6-coy, Allied 10-coy
 			b.ammo = START_ROUNDS
 			b.last_pos = b.pos
@@ -5495,15 +5753,10 @@ func _spawn_armies() -> void:
 				b.ammo = u.ammo
 				b.morale = u.morale
 				_apply_seam_skills(b, u)
-				b.inst_col = Color(u.facing_col.r, u.facing_col.g, u.facing_col.b, _dress_packed(int(u.coat_idx), gidx, gidx == GameConfig.local_slot))
+				b.inst_col = Color(u.facing_col.r, u.facing_col.g, u.facing_col.b, _dress_packed(int(u.coat_idx), gidx, gidx == GameConfig.local_slot and not GameConfig.has_militia))
 				while b.figs.size() > u.men and b.figs.size() > 0:
 					b.figs.pop_back()          # losses are forever
 			b.start_men = b.figs.size()
-			if b.is_player and GameConfig.has_militia:
-				# the militia you raised on the intro screen rides as your own battalion
-				b.rname = "%s (yours)" % GameConfig.militia_name
-				var mf: Color = GameConfig.militia_facing
-				b.inst_col = Color(mf.r, mf.g, mf.b, b.inst_col.a)
 			if b.is_player:
 				_build_roster(b)               # name the men under your hand
 			_start_strength[team] += b.figs.size()
@@ -5518,8 +5771,62 @@ func _spawn_armies() -> void:
 				off_vis = face
 				_cam_yaw = face + PI                                       # look toward the enemy
 				_reslot(player)
-	if player == null:
+	if GameConfig.has_militia:
+		_spawn_independent_militia()
+	elif player == null:
 		player = battalions[clampi(GameConfig.local_slot, 0, battalions.size() - 1)]
+
+# THE FOUNDED MILITIA (Phase 0): the player's own battalion, raised on the intro
+# screen, never enters the brigade/division/corps order of battle — it rides as an
+# extra unit outside the fixed 100-per-team OOB, so the AI commanders can request it
+# (a courier, not a command) but never absorb it. See _assign_brigades, which skips
+# `independent` battalions when chunking each team into brigades.
+func _spawn_independent_militia() -> void:
+	var team := 0   # rides with the Crown until a side-choice exists at founding
+	var face := 0.0 if team == 0 else PI
+	var spawn_pos := Vector3(_sector_x(0), 0, -360.0)
+	for t in field_towns:
+		if int(t.get("owner", -1)) == team:
+			spawn_pos = (t["pos"] as Vector3) + Vector3(60.0, 0, 0)
+			break
+	var gidx: int = BATT_PER_TEAM * 2   # synthetic index, outside the standard OOB
+	var b := Batt.new()
+	b.team = team
+	b.idx = gidx
+	b.independent = true
+	b.pos = spawn_pos
+	b.spawn = b.pos
+	b.facing = face
+	b.formation = "line"
+	b.off_facing = face
+	b.off_pos = b.pos + Vector3(sin(face), 0, cos(face)) * 14.0
+	b.human = true
+	b.is_player = true
+	b.companies = 6 if team == 0 else 10
+	b.ammo = START_ROUNDS
+	b.last_pos = b.pos
+	var mp := AudioStreamPlayer3D.new()        # the drummer's marching cadence
+	mp.max_distance = 700.0
+	mp.unit_size = 14.0
+	mp.volume_db = 4.0
+	add_child(mp)
+	b.march_player = mp
+	_fill_figs(b, MILITIA_START_MEN)           # a small band, not a full battalion
+	_assign_battalion_skills(b)
+	b.rname = "%s (yours)" % GameConfig.militia_name
+	var mf: Color = GameConfig.militia_facing
+	b.inst_col = Color(mf.r, mf.g, mf.b, _dress_packed(0, gidx, true))
+	b.start_men = b.figs.size()
+	_build_roster(b)                           # name the men under your hand
+	_start_strength[team] += b.figs.size()
+	_make_flag(b, team)
+	battalions.append(b)
+	player = b
+	off_pos = b.pos - Vector3(sin(face), 0, cos(face)) * 8.0   # just behind your line
+	off_facing = face
+	off_vis = face
+	_cam_yaw = face + PI                                       # look toward the enemy
+	_reslot(player)
 
 # INFLATION (Phase 2): spawn exactly the battalions the campaign engagement
 # involves, each carrying its real history. Positions come authored from the
@@ -5678,11 +5985,11 @@ func _make_flag(b: Batt, team: int) -> void:
 
 	b.flag.visible = false
 
-func _fill_figs(b: Batt) -> void:
+func _fill_figs(b: Batt, n: int = MEN) -> void:
 	b.figs.clear()
 	var fwd := Vector3(sin(b.facing), 0, cos(b.facing))
 	var right := Vector3(fwd.z, 0, -fwd.x)
-	for e in _layout(MEN, b.formation, b.companies):
+	for e in _layout(n, b.formation, b.companies):
 		var slot: Vector2 = e["p"]
 		var w := b.pos + right * slot.x + fwd * slot.y
 		# every man is an individual: his own build, the wear on his coat, his nerve
@@ -6363,6 +6670,7 @@ func _make_gun(g: Gun) -> void:
 			horse.material_override = dmats[hi % dmats.size()]
 			horse.position = Vector3(sx3, 0, hz)       # the mesh already faces +Z, the direction of travel
 			g.limber_group.add_child(horse)
+			g.limber_horses.append(horse)
 			hi += 1
 
 # Pick a gun's target. It obeys its brigade's fire mission when one is set and in
@@ -6477,6 +6785,10 @@ func _update_guns(delta: float) -> void:
 					if g.node:
 						g.node.position = Vector3(g.pos.x, _gh(g.pos.x, g.pos.z), g.pos.z)
 						g.node.rotation.y = g.facing
+					# the team plods, not glides — each horse gets its own little trudge
+					for hi2 in range(g.limber_horses.size()):
+						var dh: MeshInstance3D = g.limber_horses[hi2]
+						dh.position.y = absf(sin(_t * 4.0 + float(hi2) * 1.7)) * 0.05
 			"unlimbering":
 				g.limber_t -= delta
 				if g.limber_t <= 0.0:
@@ -6660,6 +6972,42 @@ func _spawn_shot(from: Vector3, to: Vector3, team: int) -> void:
 	_shots[slot] = { "active": true, "pos": from, "vel": vel, "from": from,
 		"dir": dir, "dist": L, "team": team }
 
+# A naval gun aims at the target ship's current position with range-scaled scatter, then
+# the ball flies the real arc — whether it strikes home is resolved against the ship's hull
+# where she actually lies when the ball arrives (she may have sailed clear of where she was).
+func _spawn_naval_shot(from: Vector3, target_ship: Dictionary, team: int) -> void:
+	var aim: Vector3 = target_ship["pos"]
+	var flat := aim - from
+	flat.y = 0.0
+	var L := flat.length()
+	if L < 1.0:
+		return
+	var dir := flat / L
+	var perp := Vector3(dir.z, 0, -dir.x)
+	var spread := L * 0.05      # a long shot across a rolling sea is as likely to miss as hit
+	var to: Vector3 = aim + perp * randf_range(-spread, spread) + dir * randf_range(-spread, spread)
+	flat = to - from
+	flat.y = 0.0
+	L = flat.length()
+	if L < 1.0:
+		return
+	dir = flat / L
+	var slot := -1
+	for i in range(_shots.size()):
+		if not _shots[i]["active"]:
+			slot = i
+			break
+	if slot == -1:
+		if _shots.size() >= SHOT_POOL:
+			return                                  # the gun-deck's iron is all in the air already
+		_shots.append({ "active": false })
+		slot = _shots.size() - 1
+	var tof := L / SHOT_SPEED
+	var vy := (to.y - from.y) / tof + 0.5 * GUN_GRAVITY * tof
+	var vel := dir * SHOT_SPEED + Vector3(0, vy, 0)
+	_shots[slot] = { "active": true, "pos": from, "vel": vel, "from": from,
+		"dir": dir, "dist": L, "team": team, "naval": true, "target_ship": target_ship }
+
 func _update_shots(delta: float) -> void:
 	for i in range(_shots.size()):
 		var s: Dictionary = _shots[i]
@@ -6678,14 +7026,28 @@ func _update_shots(delta: float) -> void:
 				s["whooshed"] = true
 		var flat_trav := Vector2(p.x - from.x, p.z - from.z).length()
 		if flat_trav >= float(s["dist"]):
-			# arrival — plough a lane through whatever stands here
 			var dir: Vector3 = s["dir"]
 			var impact := Vector3(p.x, 0, p.z)
-			_add_scar(impact - dir * 2.0, dir)        # the furrow starts just short of impact
-			_plough(impact, dir, int(s["team"]))
-			for k in range(3):
-				_emit_smoke(Vector3(p.x, 0.3, p.z), Vector3.UP)   # dirt kicked up
-			_play_ball_land(impact)                   # the roundshot strikes the ground
+			if s.get("naval", false):
+				# resolve against the target ship's hull where she lies NOW — she may have
+				# sailed clear of the spot the gun was aimed at when the ball left the muzzle
+				var ship_t: Dictionary = s["target_ship"]
+				if not ship_t.is_empty() and not ship_t.get("sinking", false) and _ship_hit_test(ship_t, impact):
+					ship_t["hp"] = float(ship_t.get("hp", SHIP_HP_MAX)) - 1.0
+					_emit_dirt(Vector3(p.x, _sea_y(p.x, p.z) + 1.0, p.z), dir)   # splinters where she's struck
+					_play_ball_land(impact)
+					if ship_t["hp"] <= 0.0:
+						_sink_ship(ship_t)
+				else:
+					var sp := Vector3(p.x, 0, p.z)
+					sp.y = _sea_y(sp.x, sp.z)
+					_emit_splash(sp)
+			else:
+				# arrival — plough a lane through whatever stands here
+				_add_scar(impact - dir * 2.0, dir)        # the furrow starts just short of impact
+				_plough(impact, dir, int(s["team"]))
+				_emit_dirt(Vector3(p.x, 0.1, p.z), dir)   # earth thrown up along the ball's line
+				_play_ball_land(impact)                   # the roundshot strikes the ground
 			s["active"] = false
 	# render the balls in flight
 	for i in range(SHOT_POOL):
@@ -6850,30 +7212,48 @@ func _process(delta: float) -> void:
 	_update_hud()
 
 # Each battalion's drummer beats the march while the unit is on the move: a random
-# cadence is struck up when it starts moving and falls silent the moment it halts.
-func _update_marching_drums(_delta: float) -> void:
-	if snd_marchdrum.is_empty() or cam == null:
+# cadence is struck up when it starts moving and falls silent the moment it halts. Also
+# the place a battalion's own movement is already tracked frame to frame, so the dust
+# its feet throw up underfoot piggybacks on the same moved/last_pos bookkeeping.
+func _update_marching_drums(delta: float) -> void:
+	if cam == null:
 		return
+	var have_drums := not snd_marchdrum.is_empty()
 	for b in battalions:
-		var mp: AudioStreamPlayer3D = b.march_player
-		if mp == null:
-			continue
 		var moved := b.pos.distance_to(b.last_pos)
 		b.last_pos = b.pos
-		var moving := moved > 0.004 and not b.spent and b.state != "routing" and not b.drummer_down
-		var near := cam.position.distance_to(b.pos) < 950.0   # drums carry down the line
-		if moving and near:
-			if not b.marching:
-				b.marching = true                                  # struck up on the move
-				mp.stream = snd_marchdrum[randi() % snd_marchdrum.size()]
-				mp.pitch_scale = randf_range(0.97, 1.03)
-				mp.play()
-			elif not mp.playing:
-				mp.play()                                          # keep it going while marching
-			mp.global_position = to_global(b.pos + Vector3(0, 1.0, 0))
-		elif b.marching or mp.playing:
-			b.marching = false
-			mp.stop()                                              # halted — the drum stops
+		var mp: AudioStreamPlayer3D = b.march_player
+		if have_drums and mp != null:
+			var moving := moved > 0.004 and not b.spent and b.state != "routing" and not b.drummer_down
+			var near := cam.position.distance_to(b.pos) < 950.0   # drums carry down the line
+			if moving and near:
+				if not b.marching:
+					b.marching = true                                  # struck up on the move
+					mp.stream = snd_marchdrum[randi() % snd_marchdrum.size()]
+					mp.pitch_scale = randf_range(0.97, 1.03)
+					mp.play()
+				elif not mp.playing:
+					mp.play()                                          # keep it going while marching
+				mp.global_position = to_global(b.pos + Vector3(0, 1.0, 0))
+			elif b.marching or mp.playing:
+				b.marching = false
+				mp.stop()                                              # halted — the drum stops
+		# the haze a body of marching (or routing) men kicks up underfoot
+		if moved > 0.01 and not b.figs.is_empty() and cam.position.distance_to(b.pos) < DUST_RANGE \
+				and randf() < delta * 5.0:
+			_emit_march_dust(b)
+
+# A few low puffs spread along a battalion's front, scaled to its strength — bigger
+# units throw up more dust, small remnants barely any.
+func _emit_march_dust(b: Batt) -> void:
+	var fwd := Vector3(sin(b.facing), 0, cos(b.facing))
+	var right := Vector3(fwd.z, 0, -fwd.x)
+	var width := minf(float(b.figs.size()) * 0.9, 90.0)
+	var n := clampi(b.figs.size() / 50, 1, 3)
+	for _i in range(n):
+		var p := b.pos - fwd * 1.5 + right * randf_range(-width * 0.5, width * 0.5)
+		p.y = _gh(p.x, p.z) + 0.05
+		_emit_dust(p, fwd)
 
 # The drum carries the unit's nerve: a steady confident cadence, faltering and
 # quiet when shaken, silent when broken. (Needs a Drum.mp3 in sounds/.)
@@ -7344,6 +7724,13 @@ func _update_battalion_meta(b: Batt, delta: float) -> void:
 	elif b.has_target:
 		drain = FATIGUE_FIRE
 	var safe := b.melee_foe == null and not b.charging and b.state == "steady" and not b.has_target
+	# PATROLLING: an independent militia earns its keep just by riding the country clear
+	# of the enemy — no camp, no drill, just showing the flag and watching the roads.
+	if b.independent and b.is_player and not b.encamped and safe and moved > 0.02:
+		_prestige_acc += moved * PRESTIGE_PATROL_RATE
+		while _prestige_acc >= 1.0:
+			_prestige_acc -= 1.0
+			prestige += 1
 	if b.encamped and _camp_safe(b):
 		b.fatigue = maxf(0.0, b.fatigue - CAMP_REST_RATE * delta)
 		b.morale = minf(100.0, b.morale + CAMP_REST_RATE * 0.5 * delta)
@@ -7380,6 +7767,11 @@ func _train_tick(b: Batt, delta: float) -> void:
 			b.skill[b.train_skill] = minf(95.0, cur + TRAIN_RATE * delta)
 			if b.train_skill == "reload":
 				b.exp_mul = _reload_factor(b)
+			if b.independent and b.is_player:
+				_prestige_acc += PRESTIGE_TRAIN_RATE * delta   # drilling your own men earns standing
+				while _prestige_acc >= 1.0:
+					_prestige_acc -= 1.0
+					prestige += 1
 	if b.roster.is_empty():
 		return
 	var bump := TRAIN_RATE * delta * 1.05
@@ -7687,12 +8079,15 @@ func _make_caisson_node(team: int) -> Node3D:
 	var dassets := _draft_horse_assets()
 	var dmesh: ArrayMesh = dassets[0]
 	var dmats: Array = dassets[1]
+	var horses: Array = []
 	for sx2 in [-0.4, 0.4]:
 		var horse := MeshInstance3D.new()
 		horse.mesh = dmesh
 		horse.material_override = dmats[(0 if sx2 < 0 else 1) % dmats.size()]
 		horse.position = Vector3(sx2, 0, 1.7)   # the mesh already faces +Z, the direction of travel
 		n.add_child(horse)
+		horses.append(horse)
+	n.set_meta("horses", horses)
 	return n
 
 func _update_caissons(delta: float) -> void:
@@ -7711,6 +8106,7 @@ func _update_caissons(delta: float) -> void:
 		var b: Batt = cs["target"]
 		var pos: Vector3 = cs["pos"]
 		var done := false
+		var trudging := false
 		match String(cs["state"]):
 			"out":
 				if b == null or b.spent or b.state == "routing":
@@ -7724,6 +8120,7 @@ func _update_caissons(delta: float) -> void:
 					else:
 						pos = pos.move_toward(Vector3(b.pos.x, 0, b.pos.z), CAISSON_SPEED * delta)
 						node.rotation.y = atan2(to.x, to.z)
+						trudging = true
 			"unload":
 				cs["t"] = float(cs["t"]) - delta
 				if float(cs["t"]) <= 0.0:
@@ -7743,8 +8140,12 @@ func _update_caissons(delta: float) -> void:
 				else:
 					pos = pos.move_toward(orig, CAISSON_SPEED * delta)
 					node.rotation.y = atan2(tb.x, tb.z)
+					trudging = true
 		cs["pos"] = pos
 		node.position = pos
+		if trudging:
+			for dh in (node.get_meta("horses", []) as Array):
+				(dh as MeshInstance3D).position.y = absf(sin(_t * 4.0 + (dh as MeshInstance3D).position.x * 1.7)) * 0.05
 		if done:
 			caissons.remove_at(i)
 		else:
@@ -7927,6 +8328,16 @@ func _cav_move(c: Cav, goal: Vector3, speed: float, delta: float) -> void:
 		return
 	c.facing = atan2(to.x, to.z)
 	c.pos = c.pos.move_toward(Vector3(goal.x, 0, goal.z), speed * delta)
+	# a galloping squadron tears up far more dust than one trotting to its post
+	if cam != null and not c.troopers.is_empty() and cam.position.distance_to(c.pos) < DUST_RANGE \
+			and randf() < delta * 4.0 * (speed / CAV_GALLOP):
+		var fwd := Vector3(sin(c.facing), 0, cos(c.facing))
+		var right := Vector3(fwd.z, 0, -fwd.x)
+		var width := minf(float(c.troopers.size()) * 1.2, 70.0)
+		for _i in range(clampi(c.troopers.size() / 40, 1, 3)):
+			var p := c.pos - fwd * 1.0 + right * randf_range(-width * 0.5, width * 0.5)
+			p.y = _gh(p.x, p.z) + 0.05
+			_emit_dust(p, fwd)
 
 func _cav_target_pos(c: Cav) -> Vector3:
 	match c.target_kind:
@@ -8172,7 +8583,7 @@ func _assign_brigades() -> void:
 	for team in [0, 1]:
 		var mine: Array = []
 		for b in battalions:
-			if b.team == team:
+			if b.team == team and not b.independent:
 				mine.append(b)
 		var nbri: int = int(ceil(float(mine.size()) / float(BATTS_PER_BRIGADE)))
 		for bri in range(nbri):
@@ -9441,13 +9852,19 @@ func _render(delta: float) -> void:
 				fgun.set_instance_transform(fi6, _zero_xf())
 				fi6 += 1
 			idx[b.team] = fi6
-			_place_flag(b, b.pos, b.facing)   # the colours still mark him on the horizon
+			_place_flag(b, Vector3(b.pos.x, _gh(b.pos.x, b.pos.z), b.pos.z), b.facing)   # the colours still mark him on the horizon
 			continue
 		var run := 1.0
 		if b.state == "routing":
 			run = 1.7
 		elif b.charging:
 			run = 1.6
+		elif b.formation == "march":
+			# a road march column moves at up to BATT_SPEED * MARCH_MUL * (road bonus), which
+			# can outrun MAN_SPEED's plain walking gait — without this the rank-and-file can
+			# never close on their slot, so they perpetually trail and stutter instead of
+			# settling into a smooth marching stride
+			run = maxf(1.0, _move_speed(b) / MAN_SPEED)
 		# each man levels his own musket once he's loaded (front two ranks, enemy present)
 		var maxy := -1e9
 		for f0 in b.figs:
@@ -9563,7 +9980,7 @@ func _render(delta: float) -> void:
 				bearer_mm.set_instance_transform(bearer_i, Transform3D(Basis(Vector3.UP, byaw), Vector3(bw.x, 0.85 + bbob + _gh(bw.x, bw.z), bw.z)))
 				_cg_dress(bearer_mm, bearer_i, b.team, bw.distance_to(bp) > 0.1, false)
 				bearer_i += 1
-			_place_flag(b, Vector3(bw.x, 0, bw.z), fyaw)   # lays low when the colours are down
+			_place_flag(b, Vector3(bw.x, _gh(bw.x, bw.z), bw.z), fyaw)   # lays low when the colours are down
 			# the COLOUR PARTY: a guard of two with half-pikes, posted at the colours
 			for esc in range(2):
 				if nco_i >= nco_mm.instance_count:
@@ -9601,7 +10018,11 @@ func _render(delta: float) -> void:
 				var sbob := absf(sin(_t * 2.8 + float(c) * 1.3)) * 0.05
 				nco_mm.set_instance_transform(nco_i, Transform3D(Basis(Vector3.UP, syaw), Vector3(sw.x, CAP_HALF + sbob + _gh(sw.x, sw.z), sw.z)))
 				_cg_dress(nco_mm, nco_i, b.team, sw.distance_to(cp) > 0.1, true)
-				spontoon_mm.set_instance_transform(nco_i, Transform3D(Basis(Vector3.UP, syaw), Vector3(sw.x + right.x * 0.2, _gh(sw.x, sw.z), sw.z + right.z * 0.2)))
+				# the spontoon isn't just carried — it periodically levels and presses
+				# forward, the sergeant using it to true up a man who's fallen out of line
+				var sjab := pow(maxf(0.0, sin(_t * 1.1 + float(c) * 2.3 + idn)), 8.0)
+				var sspos := Vector3(sw.x + right.x * 0.2 + fwd.x * sjab * 0.5, _gh(sw.x, sw.z), sw.z + right.z * 0.2 + fwd.z * sjab * 0.5)
+				spontoon_mm.set_instance_transform(nco_i, Transform3D(Basis(Vector3.UP, syaw) * Basis(Vector3.RIGHT, sjab * 1.1), sspos))
 				nco_i += 1
 		# ...and file-closers walking the rear, herding stragglers back into their files
 		var rearY := -maxy - 0.9
@@ -9621,7 +10042,10 @@ func _render(delta: float) -> void:
 			var rbob := absf(sin(_t * 2.8 + float(fc))) * 0.05
 			nco_mm.set_instance_transform(nco_i, Transform3D(Basis(Vector3.UP, ryaw), Vector3(rw.x, CAP_HALF + rbob + _gh(rw.x, rw.z), rw.z)))
 			_cg_dress(nco_mm, nco_i, b.team, rw.distance_to(rp) > 0.1, true)
-			spontoon_mm.set_instance_transform(nco_i, Transform3D(Basis(Vector3.UP, ryaw), Vector3(rw.x + right.x * 0.2, _gh(rw.x, rw.z), rw.z + right.z * 0.2)))
+			# the same press-forward gesture, this time prodding a straggler back into his file
+			var rjab := pow(maxf(0.0, sin(_t * 1.3 + float(fc) * 2.7 + idn)), 8.0)
+			var rspos := Vector3(rw.x + right.x * 0.2 + fwd.x * rjab * 0.5, _gh(rw.x, rw.z), rw.z + right.z * 0.2 + fwd.z * rjab * 0.5)
+			spontoon_mm.set_instance_transform(nco_i, Transform3D(Basis(Vector3.UP, ryaw) * Basis(Vector3.RIGHT, rjab * 1.1), rspos))
 			nco_i += 1
 	for team in [0, 1]:
 		var mm: MultiMesh = team_mm[team]
@@ -9663,7 +10087,8 @@ func _render_commanders() -> void:
 		var pos := _brigade_center(br) - bf * 18.0    # rides behind the line centre
 		var s := MOUNT_SCALE_COMMANDER
 		var basis := Basis(Vector3.UP, yaw).scaled(Vector3(s, s, s))
-		var seat := Vector3(pos.x, _gh(pos.x, pos.z), pos.z)
+		var cbob := absf(sin(_t * 4.5 + float(i))) * 0.05   # the charger's own gait, not a statue
+		var seat := Vector3(pos.x, _gh(pos.x, pos.z) + cbob, pos.z)
 		cmd_horse_mm.set_instance_transform(i, Transform3D(basis, seat))
 		cmd_rider_mm.set_instance_transform(i, Transform3D(basis, seat))
 		cmd_horse_mm.set_instance_color(i, team_color(br.team))   # shabraque: the army's colour
@@ -9681,7 +10106,8 @@ func _render_commanders() -> void:
 		var gyaw: float = 0.0 if dv.team == 0 else PI
 		var gs := MOUNT_SCALE_GENERAL
 		var gbasis := Basis(Vector3.UP, gyaw).scaled(Vector3(gs, gs, gs))
-		var gseat := Vector3(gp.x, _gh(gp.x, gp.z), gp.z)
+		var gbob := absf(sin(_t * 4.0 + float(gi))) * 0.06   # the heaviest charger, the slowest gait
+		var gseat := Vector3(gp.x, _gh(gp.x, gp.z) + gbob, gp.z)
 		gen_horse_mm.set_instance_transform(gi, Transform3D(gbasis, gseat))
 		gen_rider_mm.set_instance_transform(gi, Transform3D(gbasis, gseat))
 		gen_horse_mm.set_instance_color(gi, team_color(dv.team))   # shabraque: the army's colour
@@ -9699,7 +10125,8 @@ func _render_commanders() -> void:
 		var cfwd := Vector3(sin(cyaw), 0, cos(cyaw))
 		var cpos: Vector3 = b.pos - cfwd * 13.0   # rides behind his battalion's colours
 		var cbasis := Basis(Vector3.UP, cyaw)
-		var cseat := Vector3(cpos.x, _gh(cpos.x, cpos.z), cpos.z)
+		var clbob := absf(sin(_t * 5.0 + float(ci))) * 0.05   # he rides, he doesn't hover
+		var cseat := Vector3(cpos.x, _gh(cpos.x, cpos.z) + clbob, cpos.z)
 		colonel_horse_mm.set_instance_transform(ci, Transform3D(cbasis, cseat))
 		colonel_rider_mm.set_instance_transform(ci, Transform3D(cbasis, cseat))
 		colonel_horse_mm.set_instance_color(ci, team_color(b.team))   # shabraque: the army's colour
@@ -9735,8 +10162,12 @@ func _place_flag(b: Batt, footpos: Vector3, yaw: float) -> void:
 	var lean := (1.0 - m) * 0.6 + b.flinch * 0.3        # pole tips back as morale falls
 	b.flag.rotation = Vector3(lean, yaw, 0.0)
 	if b.flag_cloth:
-		var wave := lerpf(0.3, 1.1, 1.0 - m)            # frantic flapping when shaken
-		b.flag_cloth.rotation.y = sin(_t * (3.0 + (1.0 - m) * 6.0) + float(b.team)) * wave
+		# the colours actually answer the wind, not just morale: a stiff breeze streams
+		# them out faster and further, and a crosswind reads as a steady push to one side
+		var wspd := _wind.length()
+		var crosswind := sin(atan2(_wind.x, _wind.z) - yaw) * wspd
+		var wave := lerpf(0.3, 1.1, 1.0 - m) + wspd * 0.4   # frantic flapping when shaken or gusty
+		b.flag_cloth.rotation.y = sin(_t * (3.0 + (1.0 - m) * 6.0 + wspd * 1.2) + float(b.team)) * wave + crosswind * 0.5
 
 func team_color(team: int) -> Color:
 	return ARMY_BLUE if team == 0 else ARMY_RED
@@ -10853,6 +11284,12 @@ func _unhandled_input(event: InputEvent) -> void:
 					_camp_resupply()
 				KEY_V:
 					_open_roster()
+				KEY_N:
+					_camp_recruit()
+				KEY_H:
+					_camp_hire_officer()
+				KEY_M:
+					_camp_equip()
 			return
 		match event.keycode:
 			KEY_ENTER:
@@ -11079,6 +11516,11 @@ func _make_emitter(life: float, amount: int, mat: Material, quad: Vector2, kind:
 	p.emitting = false
 	p.local_coords = false
 	p.visibility_aabb = AABB(Vector3(-1500, -50, -1500), Vector3(3000, 300, 3000))
+	# sort back-to-front by depth, not emission index — without this, alpha-blended
+	# quads in a dense, overlapping bank (a big smoke cloud especially) draw in the
+	# wrong order from most angles, so the bank looks solid from the one direction
+	# that happens to match index order and patchy/half-invisible from any other
+	p.draw_order = GPUParticles3D.DRAW_ORDER_VIEW_DEPTH
 	var qm := QuadMesh.new()
 	qm.size = quad
 	qm.material = mat
@@ -11088,19 +11530,36 @@ func _make_emitter(life: float, amount: int, mat: Material, quad: Vector2, kind:
 		2: p.process_material = _fire_process()
 		4: p.process_material = _blood_process()
 		5: p.process_material = _musket_smoke_process()
+		6: p.process_material = _dirt_process()
+		7: p.process_material = _dust_process()
+		8: p.process_material = _wake_process()
+		9: p.process_material = _splash_process()
 		_: p.process_material = _flash_process()
 	return p
 
-# Musket smoke: barely damped, so the discharge ROLLS forward off the muzzles and
-# thins out over six to ten metres downrange instead of stagnating at the line.
+# Musket smoke: barely damped, so the discharge ROLLS forward off the muzzles and rides
+# the wind once aloft — a real firing line's haze drifts steadily downwind rather than
+# stagnating in place. gravity here is rewritten every frame in _update_environment() to
+# track the live wind vector (see _wind), so the y component is just the powder's own
+# slight buoyancy.
 func _musket_smoke_process() -> ParticleProcessMaterial:
 	var m := ParticleProcessMaterial.new()
-	m.gravity = Vector3(0, 0.012, 0)          # barely rises — powder smoke hangs at the line,
-	                                          # not lofting metres into the sky over its lifetime
+	m.gravity = Vector3(0, 0.012, 0)
 	m.damping_min = 0.22
 	m.damping_max = 0.45
 	m.scale_min = 0.9
 	m.scale_max = 1.8
+	m.angle_min = -180.0
+	m.angle_max = 180.0
+	m.angular_velocity_min = -8.0
+	m.angular_velocity_max = 8.0
+	# small-scale curling so the haze billows organically instead of scaling as a flat disc
+	m.turbulence_enabled = true
+	m.turbulence_noise_strength = 1.6
+	m.turbulence_noise_scale = 1.4
+	m.turbulence_noise_speed = Vector3(0.06, 0.05, 0.04)
+	m.turbulence_influence_min = 0.08
+	m.turbulence_influence_max = 0.22
 	var sc := Curve.new()
 	sc.add_point(Vector2(0.0, 0.4))
 	sc.add_point(Vector2(0.3, 2.2))
@@ -11164,11 +11623,25 @@ func _fire_process() -> ParticleProcessMaterial:
 
 func _smoke_process() -> ParticleProcessMaterial:
 	var m := ParticleProcessMaterial.new()
-	m.gravity = Vector3(0, 0.10, 0)            # barely drifts upward — the bank just hangs
+	# gravity is rewritten every frame in _update_environment() to carry the live wind
+	# vector, so a cannon's smoke bank jets out, blooms, then drifts downwind as one mass
+	# instead of just hanging in place; the y component below is its own slight buoyancy.
+	m.gravity = Vector3(0, 0.10, 0)
 	m.damping_min = 1.6                        # initial puff velocity bleeds off fast
 	m.damping_max = 3.2
 	m.scale_min = 1.0
 	m.scale_max = 2.2
+	m.angle_min = -180.0
+	m.angle_max = 180.0
+	m.angular_velocity_min = -5.0
+	m.angular_velocity_max = 5.0
+	# big, slow-rolling curls — a far heavier billow than the musket's haze
+	m.turbulence_enabled = true
+	m.turbulence_noise_strength = 2.4
+	m.turbulence_noise_scale = 1.0
+	m.turbulence_noise_speed = Vector3(0.05, 0.04, 0.03)
+	m.turbulence_influence_min = 0.10
+	m.turbulence_influence_max = 0.28
 	var sc := Curve.new()
 	sc.add_point(Vector2(0.0, 0.4))
 	sc.add_point(Vector2(0.35, 2.6))
@@ -11180,6 +11653,101 @@ func _smoke_process() -> ParticleProcessMaterial:
 	m.color_ramp = _ramp([0.0, 0.08, 0.55, 1.0], [
 		Color(0.84, 0.84, 0.85, 0.0), Color(0.84, 0.84, 0.85, 0.60),
 		Color(0.80, 0.80, 0.82, 0.40), Color(0.78, 0.78, 0.80, 0.0)])
+	return m
+
+# A roundshot pitching into the ground: a hard, fast gout of earth and stones thrown
+# along its line of travel, falling back almost as quickly as it went up.
+func _dirt_process() -> ParticleProcessMaterial:
+	var m := ParticleProcessMaterial.new()
+	m.gravity = Vector3(0, -9.0, 0)            # the clods fall back hard — this isn't smoke
+	m.damping_min = 1.0
+	m.damping_max = 2.2
+	m.scale_min = 0.6
+	m.scale_max = 1.4
+	m.angle_min = -180.0
+	m.angle_max = 180.0
+	m.angular_velocity_min = -25.0
+	m.angular_velocity_max = 25.0              # tumbling clods, not drifting puffs
+	var sc := Curve.new()
+	sc.add_point(Vector2(0.0, 0.5))
+	sc.add_point(Vector2(0.25, 1.6))
+	sc.add_point(Vector2(1.0, 1.0))            # the burst settles rather than keeps ballooning
+	var sct := CurveTexture.new()
+	sct.curve = sc
+	m.scale_curve = sct
+	# a hard brown burst of earth, hazing to a thin dust before it's gone
+	m.color_ramp = _ramp([0.0, 0.1, 0.5, 1.0], [
+		Color(0.30, 0.22, 0.14, 0.0), Color(0.34, 0.25, 0.16, 0.85),
+		Color(0.40, 0.32, 0.22, 0.5), Color(0.45, 0.40, 0.32, 0.0)])
+	return m
+
+# The pale haze kicked up by marching boots and galloping hooves. gravity is rewritten
+# every frame in _update_environment() to carry the live wind, same as the smoke, so a
+# column's dust trails away downwind instead of just hanging over the road.
+func _dust_process() -> ParticleProcessMaterial:
+	var m := ParticleProcessMaterial.new()
+	m.gravity = Vector3(0, 0.02, 0)
+	m.damping_min = 0.5
+	m.damping_max = 1.1
+	m.scale_min = 0.8
+	m.scale_max = 1.6
+	m.turbulence_enabled = true
+	m.turbulence_noise_strength = 1.2
+	m.turbulence_noise_scale = 1.6
+	m.turbulence_noise_speed = Vector3(0.05, 0.04, 0.03)
+	m.turbulence_influence_min = 0.10
+	m.turbulence_influence_max = 0.25
+	var sc := Curve.new()
+	sc.add_point(Vector2(0.0, 0.5))
+	sc.add_point(Vector2(0.4, 1.8))
+	sc.add_point(Vector2(1.0, 2.6))
+	var sct := CurveTexture.new()
+	sct.curve = sc
+	m.scale_curve = sct
+	# thin and pale — a haze over the ranks' feet, not a smoke bank
+	m.color_ramp = _ramp([0.0, 0.15, 0.6, 1.0], [
+		Color(0.62, 0.56, 0.44, 0.0), Color(0.66, 0.60, 0.48, 0.30),
+		Color(0.68, 0.62, 0.50, 0.16), Color(0.70, 0.64, 0.52, 0.0)])
+	return m
+
+# Foam turned over at a ship's bow as it makes way — flattens out and dissolves fast.
+func _wake_process() -> ParticleProcessMaterial:
+	var m := ParticleProcessMaterial.new()
+	m.gravity = Vector3.ZERO                   # rides the surface, doesn't fall or rise
+	m.damping_min = 0.8
+	m.damping_max = 1.6
+	m.scale_min = 0.7
+	m.scale_max = 1.3
+	var sc := Curve.new()
+	sc.add_point(Vector2(0.0, 0.5))
+	sc.add_point(Vector2(0.3, 1.6))
+	sc.add_point(Vector2(1.0, 2.4))            # spreads into the wake astern
+	var sct := CurveTexture.new()
+	sct.curve = sc
+	m.scale_curve = sct
+	m.color_ramp = _ramp([0.0, 0.15, 1.0], [
+		Color(0.92, 0.95, 0.96, 0.0), Color(0.95, 0.97, 0.98, 0.55), Color(0.90, 0.93, 0.95, 0.0)])
+	return m
+
+# A roundshot pitching short or long in the sea — a hard white spout thrown up, then
+# falling back under its own gravity (much harder than the bow's gentle wake).
+func _splash_process() -> ParticleProcessMaterial:
+	var m := ParticleProcessMaterial.new()
+	m.gravity = Vector3(0, -14.0, 0)
+	m.damping_min = 0.6
+	m.damping_max = 1.4
+	m.scale_min = 0.7
+	m.scale_max = 1.5
+	var sc := Curve.new()
+	sc.add_point(Vector2(0.0, 0.6))
+	sc.add_point(Vector2(0.3, 1.8))
+	sc.add_point(Vector2(1.0, 1.0))
+	var sct := CurveTexture.new()
+	sct.curve = sc
+	m.scale_curve = sct
+	m.color_ramp = _ramp([0.0, 0.12, 0.6, 1.0], [
+		Color(0.85, 0.90, 0.93, 0.0), Color(0.93, 0.96, 0.97, 0.9),
+		Color(0.80, 0.86, 0.90, 0.4), Color(0.75, 0.82, 0.87, 0.0)])
 	return m
 
 func _flash_process() -> ParticleProcessMaterial:
@@ -11227,8 +11795,7 @@ func _smoke_material() -> StandardMaterial3D:
 	m.cull_mode = BaseMaterial3D.CULL_DISABLED
 	m.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
 	m.billboard_keep_scale = true
-	# a Blender-baked billowy smoke puff instead of a flat radial gradient (falls back cleanly)
-	m.albedo_texture = (load("res://images/smoke_puff.png") if ResourceLoader.exists("res://images/smoke_puff.png") else _radial_tex())
+	m.albedo_texture = _radial_tex()
 	m.vertex_color_use_as_albedo = true
 	return m
 
@@ -11287,6 +11854,34 @@ func _emit_gun_smoke(pos: Vector3, fwd: Vector3) -> void:
 	var vel := fwd * randf_range(4.0, 9.0) + lateral + Vector3(0, randf_range(0.2, 0.9), 0) + _wind
 	smoke_p.emit_particle(Transform3D(Basis(), pos), vel,
 		Color(0.9, 0.9, 0.9), Color.WHITE, EMIT_FLAGS)
+
+# A roundshot striking the ground: a hard gout of earth thrown forward along its line
+# of travel, with a thinner trail of dust hanging a moment after the clods fall back.
+func _emit_dirt(pos: Vector3, dir: Vector3) -> void:
+	for _i in range(10):
+		var jitter := Vector3(randf_range(-0.6, 0.6), 0.0, randf_range(-0.6, 0.6))
+		var vel := dir * randf_range(2.0, 7.0) + Vector3(0, randf_range(2.0, 6.0), 0)
+		dirt_p.emit_particle(Transform3D(Basis(), pos + jitter), vel,
+			Color(0.85, 0.8, 0.7), Color.WHITE, EMIT_FLAGS)
+
+# The haze a body of men or horses kicks up underfoot — thrown up gently behind the
+# line of march, then left to drift downwind by the wind-driven process material.
+func _emit_dust(pos: Vector3, fwd: Vector3) -> void:
+	var vel := -fwd * randf_range(0.2, 0.6) + Vector3(0, randf_range(0.1, 0.4), 0) + _wind * 0.3
+	dust_p.emit_particle(Transform3D(Basis(), pos), vel, Color(0.7, 0.64, 0.52), Color.WHITE, EMIT_FLAGS)
+
+# The foam turned over at a ship's bow as it cuts through the water under way.
+func _emit_wake(pos: Vector3, fwd: Vector3) -> void:
+	var vel := -fwd * randf_range(0.3, 0.8) + Vector3(randf_range(-0.3, 0.3), 0, randf_range(-0.3, 0.3))
+	wake_p.emit_particle(Transform3D(Basis(), pos), vel, Color(0.95, 0.97, 0.98), Color.WHITE, EMIT_FLAGS)
+
+# A roundshot pitching into the sea: a hard white spout thrown up where it strikes.
+func _emit_splash(pos: Vector3) -> void:
+	for _i in range(8):
+		var jitter := Vector3(randf_range(-0.4, 0.4), 0.0, randf_range(-0.4, 0.4))
+		var vel := Vector3(randf_range(-1.0, 1.0), randf_range(5.0, 10.0), randf_range(-1.0, 1.0))
+		splash_p.emit_particle(Transform3D(Basis(), pos + jitter), vel,
+			Color(0.92, 0.95, 0.97), Color.WHITE, EMIT_FLAGS)
 
 # A burst of fine blood mist the instant a man is struck — it puffs out away from the
 # shot, hangs for a moment, then sinks and leaves a splatter on the ground.
