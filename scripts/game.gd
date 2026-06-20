@@ -1602,14 +1602,31 @@ void vertex() {
 	vy = VERTEX.y; vx = VERTEX.x; vnz = NORMAL.z;
 	float march = INSTANCE_CUSTOM.b;
 	float phase = INSTANCE_CUSTOM.g;
+	// per-man cadence/stride jitter so officers & file-closers don't keep clockwork time either
+	float gait = 6.0 + (phase - 0.5) * 1.6;
+	float t6 = TIME * gait + phase * 6.28318;
+	float stride = 0.5 + (phase - 0.5) * 0.14;
 	float hip = -0.05;
 	if (VERTEX.y < hip && march > 0.001) {
 		float legside = (VERTEX.x < 0.0) ? 1.0 : -1.0;
-		float ang = sin(TIME * 6.0 + phase * 6.28318) * march * 0.5 * legside;
+		float ang = sin(t6) * march * stride * legside;
 		float yy = VERTEX.y - hip;
 		float cs = cos(ang); float sn = sin(ang);
 		VERTEX.y = yy * cs - VERTEX.z * sn + hip;
 		VERTEX.z = yy * sn + VERTEX.z * cs;
+	}
+	// torso rocks its weight foot-to-foot and leans into the march, carrying the head/hat
+	if (VERTEX.y > hip && march > 0.001) {
+		float yy = VERTEX.y - hip;
+		float roll = sin(t6) * march * 0.05;
+		float cr = cos(roll); float sr = sin(roll);
+		float nx = VERTEX.x * cr - yy * sr;
+		yy = VERTEX.x * sr + yy * cr;
+		VERTEX.x = nx;
+		float lean = march * (0.05 + sin(t6 * 2.0) * 0.018);
+		float cl = cos(lean); float sl = sin(lean);
+		VERTEX.y = yy * cl - VERTEX.z * sl + hip;
+		VERTEX.z = yy * sl + VERTEX.z * cl;
 	}
 }
 void fragment() {
@@ -2146,16 +2163,36 @@ void vertex() {
 	float phase = INSTANCE_CUSTOM.g;
 	float march = INSTANCE_CUSTOM.b;
 	float armp = INSTANCE_CUSTOM.a;      // 0 at rest .. ~0.6 reloading .. 1 presenting/firing
-	float t6 = TIME * 6.5 + phase * 6.28318;
+	// IMPERFECTION: no two men keep identical time. Each man's stride CADENCE and LENGTH are
+	// jittered off his phase seed (so legs no longer all swing at one clockwork frequency) —
+	// the ranks ripple and break lockstep like real marching men instead of a metronome.
+	float gait = 6.5 + (phase - 0.5) * 1.7;                  // per-man pace, rad/s
+	float t6 = TIME * gait + phase * 6.28318;
+	float stride = 0.55 + (phase - 0.5) * 0.16;             // per-man stride length
 	// LEGS swing fore-and-aft as he marches
 	float hip = -0.05;
 	if (VERTEX.y < hip && march > 0.001) {
 		float legside = (VERTEX.x < 0.0) ? 1.0 : -1.0;          // left & right out of phase
-		float ang = sin(t6) * march * 0.55 * legside;
+		float ang = sin(t6) * march * stride * legside;
 		float yy = VERTEX.y - hip;
 		float cs = cos(ang); float sn = sin(ang);
 		VERTEX.y = yy * cs - VERTEX.z * sn + hip;
 		VERTEX.z = yy * sn + VERTEX.z * cs;
+	}
+	// TORSO: a marching man rocks his weight foot-to-foot and leans into the step. Everything
+	// above the hip (chest, pack, head, shako AND the arms) rolls side-to-side with the stride
+	// and pitches forward — so the upper body has life, not a rigid plank over swinging legs.
+	if (VERTEX.y > hip && march > 0.001) {
+		float yy = VERTEX.y - hip;
+		float roll = sin(t6) * march * 0.05;                    // weight-shift roll (about the forward axis)
+		float cr = cos(roll); float sr = sin(roll);
+		float nx = VERTEX.x * cr - yy * sr;
+		yy = VERTEX.x * sr + yy * cr;
+		VERTEX.x = nx;
+		float lean = march * (0.05 + sin(t6 * 2.0) * 0.018);    // forward lean + a faint per-stride trudge nod
+		float cl = cos(lean); float sl = sin(lean);
+		VERTEX.y = yy * cl - VERTEX.z * sl + hip;
+		VERTEX.z = yy * sl + VERTEX.z * cl;
 	}
 	// ARMS: raise to present the musket, work the ramrod while reloading, swing on the march
 	if (abs(VERTEX.x) > 0.215) {
@@ -2166,7 +2203,7 @@ void vertex() {
 		float ram = sin(TIME * 8.0 + phase * 6.28318);
 		ram = ram * abs(ram);                                                         // sharper push than draw
 		float ramrod = (armp > 0.4 && armp < 0.85) ? (ram * 0.6 * (armside < 0.0 ? 1.0 : 0.3)) : 0.0;
-		float swing = (march > 0.001 && armp < 0.15) ? (sin(t6) * march * 0.35 * -armside) : 0.0;
+		float swing = (march > 0.001 && armp < 0.15) ? (sin(t6) * march * (0.35 + (phase - 0.5) * 0.12) * -armside) : 0.0;
 		float ang = raise + ramrod + swing;
 		float sh = 0.45;                                                              // shoulder pivot
 		float yy = VERTEX.y - sh;
@@ -9524,8 +9561,11 @@ func _render(delta: float) -> void:
 			# in square, each man faces his own outward direction (carried in "face");
 			# in a fighting withdrawal he steps BACKWARD, musket still toward the enemy
 			var yaw := (atan2(to.x, to.z) if (moving and not b.fall_back) else b.facing + float(f.get("face", 0.0)))
+			var mval := float(f["march"])
 			var bob := (absf(sin(_t * 8.5 * float(f["spd"]) + ph)) * 0.05 if moving else 0.0)
-			var swx := sin(_t * 3.4 + ph) * sway_amp     # men fidget/waver as morale drops
+			# men don't keep a ruler-straight line on the move — a faint individual weave (gated to
+			# the march, so a halted firing line still dresses cleanly), plus morale fidget/waver
+			var swx := sin(_t * 3.4 + ph) * sway_amp + sin(_t * 1.6 * float(f["spd"]) + ph * 1.7) * 0.035 * mval
 			var bh := float(f["bh"])
 			var bw := float(f["bw"])
 			var rec := recoil - fwd * (mfl * 0.35)        # he flinches back from the crash of fire
