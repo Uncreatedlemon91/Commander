@@ -412,9 +412,11 @@ func _enter_select() -> void:
 					slot += 1
 				col.add_child(row)
 	_oob_header(col, "CAVALRY WINGS — under the army's hand", Color(1.0, 0.84, 0.42))
+	var cav_types: int = GS.CAV_TYPE_DATA.size()
 	for r in range(GS.CAV_PER_TEAM):
+		var arm: String = GS.CAV_TYPE_DATA[r % cav_types]["name"]
 		var cb := Button.new()
-		cb.text = "  %d%s Regiment of Horse   (AI — not yet playable)" % [r + 1, _ord(r + 1)]
+		cb.text = "  %d%s Regiment of Horse — %s   (AI — not yet playable)" % [r + 1, _ord(r + 1), arm]
 		cb.disabled = true
 		col.add_child(cb)
 	status.text = "Pick the battalion you will command — its place in the line is its fate."

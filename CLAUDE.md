@@ -259,6 +259,12 @@ rider) — the old code carried capsule-era manual y-offsets and a 90°-tilt `Ba
 longer apply now the rider is a real built-up figure, not a bare capsule. Despatch text now
 names the actual arm (`"You take command of the Lancers."`) and the charge order reads
 `"Lances down"` instead of `"Sabres out"` when you're riding with the lancers.
+`CAV_PER_TEAM` was raised from 6 to **12** (the small-engagement count from 2 to 4) so a
+full-strength army fields 3 regiments of each arm rather than the old uneven 2/2/1/1 split
+from round-robin over 4 types — every arm now actually shows up at the same strength. The
+menu's order-of-battle screen (`menu.gd`, `CAVALRY WINGS`) now labels each numbered regiment
+with the arm it'll actually be assigned (same `r % cav_types` round-robin as `_spawn_cavalry()`)
+instead of a generic "Regiment of Horse".
 
 ## Player controls
 `WASD` move · `Shift` run · `R` autorun · mouse look · `RMB` spyglass · `E` hail · `Q` courier orders ·

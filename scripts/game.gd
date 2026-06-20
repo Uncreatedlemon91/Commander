@@ -33,7 +33,7 @@ const FLANK_REACH := 120.0        # how far around an enemy flank a turning brig
 const BRIG_ENGAGE_RANGE := 72.0   # halt & open fire when the enemy line is in musket range
 const BRIG_ASSAULT_MORALE := 52.0 # press the bayonet home once the enemy is this shaken
 # --- cavalry: the arm of decision ---
-const CAV_PER_TEAM := 6           # regiments of horse a side (massed on the wings)
+const CAV_PER_TEAM := 12          # regiments of horse a side (massed on the wings) — 3 per arm
 const CAV_MEN := 120              # troopers per regiment
 const CAV_SP := 1.5               # knee-to-knee interval (m)
 const CAV_TROT := 3.2             # manoeuvre pace (fallback/base; each type rides its own pace — see CAV_TYPE_DATA)
@@ -8546,7 +8546,7 @@ func _spawn_cavalry() -> void:
 	# keystone still holds, there are just four buckets per team instead of one).
 	var types_per_team: Array = []
 	for team in [0, 1]:
-		var ncav: int = 2 if _inflated else CAV_PER_TEAM   # a regiment on each wing
+		var ncav: int = 4 if _inflated else CAV_PER_TEAM   # a regiment on each wing
 		var types: Array = []
 		for r in range(ncav):
 			types.append(r % ntypes)
@@ -11010,7 +11010,7 @@ func _show_bill() -> void:
 	var pcol := "9fe0a0" if prestige >= 0 else "ff9a8a"
 	var txt := "[center][b]%s[/b]\n" % title
 	txt += "[color=#6f7888]——————————————————————[/color]\n"
-	var cav_start := (2 if _inflated else CAV_PER_TEAM) * CAV_MEN
+	var cav_start := (4 if _inflated else CAV_PER_TEAM) * CAV_MEN
 	txt += "[color=#cdd6e6]Our losses[/color]  [color=#ffe9a8]%d[/color] of %d men · %d horse · %d guns silenced\n" \
 		% [_start_strength[pt] - men_now[pt], _start_strength[pt], cav_start - horse_now[pt], guns_lost[pt]]
 	txt += "[color=#cdd6e6]Theirs[/color]  [color=#ffe9a8]%d[/color] of %d men · %d horse · %d guns silenced\n" \
