@@ -18,7 +18,7 @@ const MEN := 700                  # men per battalion, drawn 1:1
 const MILITIA_START_MEN := 60     # the founded militia steps off small, and grows by recruiting
 const MILITIA_MAX_MEN := 900      # a recruited militia caps out around one full battalion's strength
 # --- the full order of battle: battalion -> brigade -> division -> corps -> army ---
-const BATTS_PER_BRIGADE := 5      # 3,500 men to a brigade
+const BATTS_PER_BRIGADE := 10     # EXPERIMENT: doubled — 7,000 men to a brigade (200 battalions/side)
 const BRIGADES_PER_DIVISION := 5  # 17,500 men to a division
 const DIVISIONS_PER_CORPS := 2    # 35,000 men to a corps (1st line + 2nd line)
 const CORPS_PER_TEAM := 2         # 70,000 men to an army
@@ -31,9 +31,12 @@ const BRIG_DECIDE := 0.9          # a brigade re-reads the field this often (s)
 const ARMY_DECIDE := 3.5          # the army commander re-plans this often (s)
 const FLANK_REACH := 120.0        # how far around an enemy flank a turning brigade swings
 const BRIG_ENGAGE_RANGE := 72.0   # halt & open fire when the enemy line is in musket range
+const OPERATIONAL_CONTACT := 800.0 # a brigade gives battle to an enemy brigade within this; beyond it, it pursues its strategic task
+const TOWN_HOLD_RADIUS := 180.0    # how near its town a brigade must be to count as holding/garrisoning it
 const BRIG_ASSAULT_MORALE := 52.0 # press the bayonet home once the enemy is this shaken
 # --- cavalry: the arm of decision ---
-const CAV_PER_TEAM := 12          # regiments of horse a side (massed on the wings) — 3 per arm
+const CAV_PER_TEAM := 24          # EXPERIMENT: doubled — regiments of horse a side (6 per arm)
+const CAV_REINFORCE_HEADROOM := 3 # spare per-arm MultiMesh slots so a Stables can raise new regiments
 const CAV_MEN := 120              # troopers per regiment
 const CAV_SP := 1.5               # knee-to-knee interval (m)
 const CAV_TROT := 3.2             # manoeuvre pace (fallback/base; each type rides its own pace — see CAV_TYPE_DATA)
@@ -173,11 +176,15 @@ const SHAKE_MAX := 0.55
 const COURIER_SPEED := 9.0        # an aide's canter (m/s)
 const COURIER_MAX := 16
 const AUDIO_POOL := 128           # the whole front is audible now — more voices at once
+# Every firing musket gets its own report, but a shared per-frame budget caps how many distinct
+# shot-voices spawn each frame so a mass volley can't starve the pool of voices/cannon/orders.
+const MUSKET_SND_BUDGET := 64
+var _musket_snd_left := 0
 const MAX_PER_TEAM := BATT_PER_TEAM * MEN + MILITIA_MAX_MEN   # headroom for an independent militia on top of the standing OOB
 const CORPSE_MAX := 24000          # per team, rolling (the oldest dead are re-used)
 const RAID_CAP := 480              # team 2's render headroom — raiding parties are small war-bands, not armies
 # --- artillery (the great killer of the age) ---
-const BATTERIES_PER_TEAM := 8      # two batteries to a division, massed not strung out
+const BATTERIES_PER_TEAM := 16     # EXPERIMENT: doubled — 64 guns a side
 const GUNS_PER_BATTERY := 4
 const GUN_SPACING := 9.0           # interval between pieces in a battery (m)
 const ARTY_RANGE := 540.0          # roundshot reaches far beyond musketry
@@ -217,6 +224,12 @@ class Batt:
 	var xp: float = 0.0            # blooding: combat hones the fighting skills over time
 	# --- the MANAGEMENT roster (the player's battalion only): named men under your hand ---
 	var roster: Array = []         # [{ name, rank, coy, reload..stamina, xp, kills, alive }]
+	# LEADERSHIP: the living NCO/officer cadre steadies the men. A full cadre = 1.0 (no change);
+	# as sergeants and officers fall, this sinks and the battalion grows brittle (breaks at a
+	# higher nerve, loses its order faster, rallies slower, holds less). Player battalion only.
+	var _leadership: float = 1.0
+	var _leaders0: int = 0          # leaders at full establishment — the denominator for the ratio
+	var _lead_warned: bool = false  # one-shot "your sergeants are falling" warning
 	var encamped: bool = false     # resting out of danger: fatigue & nerve recover fast, drill progresses
 	var train_skill: String = ""   # the skill the battalion is drilling while encamped ("" = none)
 	var _fat_pos: Vector3          # last position, to measure marching for fatigue (own tracker)
@@ -247,6 +260,7 @@ class Batt:
 	var rolling: bool = false      # fire-by-company sweep active
 	var roll_company: int = -1     # company whose turn is next (right -> left)
 	var roll_cd: float = 0.0
+	var volley_cd: float = 0.0     # the line reloading between commanded full volleys (the player's "Fire!")
 	var companies: int = 6         # French 6, British/Allied 10
 	var has_target: bool = false
 	var kills_pending: int = 0     # casualties to apply this frame
@@ -369,6 +383,10 @@ class Brigade:
 	var flank_side: int = 0        # for a flank mission: which way to swing (-1 / +1)
 	var objective: Vector3         # the ground the brigade is moving its line onto
 	var seize: Vector3 = Vector3.INF   # a TOWN the army has directed this brigade to take (INF = none)
+	# --- the OPERATIONAL task: this brigade's PRIMARY directive on the dispersed map. It marches
+	# to and works around a place; it only drops into the tactical battle (above) on CONTACT ---
+	var task_kind: String = "screen"   # assault | defend | screen
+	var task_town = null               # the field_towns entry the task concerns (or null)
 
 # A DIVISION: 3-5 brigades under a General. The army hands the division a directive
 # (make the main effort / fix the enemy / stand in reserve) and an objective; the
@@ -435,6 +453,10 @@ var cav_rider_mm: Array = [[], []]    # cav_rider_mm[team][cav_type] — per-tea
 var _cav_warn_cd := 0.0                   # throttle on "form square!" warnings to you
 var caissons: Array = []                  # ammunition waggons on the road: {node,pos,target,state,t,origin}
 var _caisson_scan := 0.0                  # AI quartermasters check the line this often
+var _gunner_mesh_cache: ArrayMesh         # shared detailed gun-crew figure (built once, lazily)
+var _gunner_mats: Array = [null, null, null]  # per-team gunner ShaderMaterial, built once each
+var _draft_horse_mesh_cache: ArrayMesh    # shared limber/caisson draft-horse mesh (built once)
+var _draft_horse_mats: Array = []         # a couple of coat-colour variants, built once
 var _rally_cd := 0.0                      # throttle on the rallying despatch
 
 var armies: Array = []
@@ -567,6 +589,8 @@ var _deploy_t := DEPLOY_TIME
 var _battle_begun := false
 var battle_over := false
 var _night_end := false             # the battle was closed by nightfall (not a rout)
+var _campaign_over := false         # TRUE only when the province is decided (a town sweep) — then it ends
+var _day_count := 1                 # which day of the campaign we are on (persists across nights)
 var _town_winner := -1              # >=0 if the day was decided by a clean sweep of the towns
 const NIGHTFALL_HOUR := 20.0        # when dusk deepens to this hour, the day's fighting ends
 var _army_broken := [false, false, false]
@@ -744,6 +768,31 @@ var map_legend: RichTextLabel
 var _camp_on := false
 var _camp_town := ""               # the town whose camp is presently open (for the header)
 var _at_town_prev := ""            # last town the rider was standing in (edge-detect entry)
+var _camp_node: Node3D = null      # the pitched bivouac (tents/fires/figures) — null when struck
+var _camp_fires: Array = []        # { flame, light, seed } for the firelight flicker
+var _camp_actors: Array = []       # the living men: { node, head, armL, armR, kind, ... } animated each frame
+var _camp_scene_at := Vector3.ZERO # where the present camp is pitched (re-pitch if you move off)
+# --- hands-on VOLLEY DRILL: present (V) then fire (F) at the butts; crisp synchronised volleys
+# fired on the beat harden reload/aim/discipline. A live, scored exercise, not a menu toggle.
+var _drill_on := false
+var _drill_node: Node3D = null
+var _drill_targets: Array = []     # { node, alive, down_t, pos } straw men at the butts
+var _drill_present_t := -10.0      # _t of the last "Present!" (for cadence scoring)
+var _drill_score := 50.0           # smoothed volley quality 0..100 (a running read-out)
+var _drill_volleys := 0
+var _drill_gain := 0.0             # total skill points earned this session (for the summary)
+# --- hands-on MANOEUVRE DRILL: the drill-master calls a formation (form line/column/square);
+# you must pass the order (Q ▸ Formation) and get the battalion dressed in it quickly. Smart,
+# fast manoeuvres harden discipline & stamina (and the named men with them). ---
+var _mdrill_on := false
+var _mdrill_target := ""           # the called formation the battalion must reach
+var _mdrill_call_t := 0.0          # _t when it was called (for timing the manoeuvre)
+var _mdrill_await := false         # waiting for the battalion to complete the called manoeuvre
+var _mdrill_next_t := 0.0          # _t at which to call the next manoeuvre (the pause between)
+var _mdrill_count := 0
+var _mdrill_score := 50.0
+var _mdrill_gain := 0.0
+var _mdrill_cycle := 0
 var camp_panel: Control
 var camp_label: RichTextLabel
 var _train_idx := -1               # which skill is being drilled (-1 = none), index into SKILL_KEYS
@@ -761,12 +810,15 @@ var _camp_btn_hire: Button      # commission a Lieutenant over a company that la
 var _camp_btn_equip: Button     # spend prestige on better muskets and kit
 var _scoped := false
 var _scope_amt := 0.0
-var _scope_rect: TextureRect
+var _scope_rect: ColorRect
+var _scope_mat: ShaderMaterial
+var _scope_zoom := 0.45             # spyglass magnification: 0 wide .. 1 drawn fully out (mouse wheel)
 var drummer_mm: MultiMesh
 var snd_drum: AudioStream
 var _drum_cd := 0.0
 const FOV_NORMAL := 60.0
-const FOV_SCOPE := 16.0
+const FOV_SCOPE_WIDE := 24.0        # glass barely drawn — a wide, low-power field
+const FOV_SCOPE_NARROW := 8.0       # glass drawn fully out — high magnification, a narrow field
 
 var _setup: BattleSetup            # the seam: the world this battle was handed
 var _inflated: bool = false        # this battle was inflated from a campaign engagement
@@ -783,6 +835,14 @@ func _ready() -> void:
 	_inflated = _setup.units.size() > 0    # a campaign engagement, not the 70k set-piece
 	_weather = _setup.weather
 	_time_of_day = _setup.time_of_day
+	# CONTINUE CAMPAIGN: read the save BEFORE the world is built, so the map regenerates from the
+	# saved seed (towns/roads in the same places) and the hero wears the saved militia's colours.
+	if GameConfig.load_requested:
+		GameConfig.load_requested = false
+		_loaded_save = _load_save_file()
+		if _loaded_save != null:
+			GameConfig.match_seed = int(_loaded_save.get("seed", GameConfig.match_seed))
+			_restore_militia_config(_loaded_save)
 	_build_world()
 	if not hosted:
 		_build_scenery()            # host uses the province's own woods & fields
@@ -801,6 +861,11 @@ func _ready() -> void:
 	_build_guns()
 	_spawn_cavalry()
 	_assign_brigades()
+	# CONTINUE CAMPAIGN: now the meshes/pools exist, replace the fresh spawn with the saved state
+	if _loaded_save != null:
+		_apply_save(_loaded_save)
+		_send_player_despatch("[color=#9fe0a0]Campaign restored — day %d.[/color]" % _day_count, {})
+		_loaded_save = null
 	_set_objective()                  # your personal charge for the day
 	# AI-vs-AI batch (--ai-batch): no human commander, step off at once, run flat out and
 	# quit with the [RESULT] line so a script can run hundreds of matches and score the AI
@@ -810,7 +875,16 @@ func _ready() -> void:
 			player.human = false          # the player's battalion fights under the AI too
 		Engine.time_scale = 12.0          # run the day fast
 		_begin_battle()
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED   # the battle owns the mouse once joined
+	# a dedicated server has no operator at the keyboard — it just simulates and serves,
+	# so it never grabs the mouse and never drives its observer anchor. The battle still steps
+	# off on its own (the authoritative deploy timer in _update_battle_flow), runs at real time
+	# (clients sync live), and stays up after a result instead of quitting like the AI batch.
+	if GameConfig.dedicated:
+		if player != null:
+			player.human = false          # the whole field fights under the AI; clients drive their own
+		print("[NET] dedicated server: simulating the field headless, serving clients")
+	else:
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED   # the battle owns the mouse once joined
 
 # ------------------------------------------------------------------ world
 
@@ -1163,19 +1237,17 @@ func _build_world() -> void:
 		colonel_horse_mm.set_instance_transform(i, _zero_xf())
 		colonel_rider_mm.set_instance_transform(i, _zero_xf())
 
-	# colour-bearers (one per battalion, dark coat — the cloth carries the colour)
+	# colour-bearers (one per battalion) — built to the company-officer standard (the same
+	# mesh/shader as officer_mm), coat painted per-frame by _cg_dress; the cloth carries the colour
 	var bmi := MultiMeshInstance3D.new()
 	bearer_mm = MultiMesh.new()
 	bearer_mm.transform_format = MultiMesh.TRANSFORM_3D
-	var bcap := CapsuleMesh.new()
-	bcap.radius = 0.22
-	bcap.height = 1.7
-	bearer_mm.mesh = bcap
+	bearer_mm.mesh = officer_mesh
+	bearer_mm.use_colors = true
+	bearer_mm.use_custom_data = true
 	bearer_mm.instance_count = BATT_PER_TEAM * 2
 	bmi.multimesh = bearer_mm
-	var bmat := StandardMaterial3D.new()
-	bmat.albedo_color = Color(0.16, 0.16, 0.20)
-	bmi.material_override = bmat
+	bmi.material_override = _officer_shader()
 	add_child(bmi)
 	for i in range(BATT_PER_TEAM * 2):
 		bearer_mm.set_instance_transform(i, _zero_xf())
@@ -1364,12 +1436,17 @@ func _build_world() -> void:
 	_dmg_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	cl.add_child(_dmg_rect)
 
-	# spyglass tube — a circular mask that fades in when you raise the glass
-	_scope_rect = TextureRect.new()
+	# spyglass eyepiece — an aspect-correct circular field with a thin brass rim and a soft
+	# lens vignette, drawn over the scene by a canvas shader when you raise the glass (RMB)
+	_scope_rect = ColorRect.new()
 	_scope_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_scope_rect.texture = _scope_tex()
 	_scope_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_scope_rect.modulate = Color(1, 1, 1, 0.0)
+	_scope_mat = ShaderMaterial.new()
+	_scope_mat.shader = _scope_shader()
+	_scope_mat.set_shader_parameter("amt", 0.0)
+	_scope_mat.set_shader_parameter("zoom", _scope_zoom)
+	_scope_rect.material = _scope_mat
+	_scope_rect.visible = false
 	cl.add_child(_scope_rect)
 
 	_build_help(cl)
@@ -2858,10 +2935,13 @@ func _update_map() -> void:
 	var drawn := wsize * scl
 	var origin := plot.position + (plot.size - drawn) * 0.5
 	var flip: bool = player != null and player.team == 0   # keep your own country toward the bottom
+	# a 180° ROTATION (flip BOTH axes), not a vertical mirror — a mirror reverses handedness, which
+	# put east on the wrong side and made the map's turn sense run OPPOSITE to the compass.
 	var P := func(w: Vector3) -> Vector2:
 		var nx := (w.x - wmin.x) / wsize.x
 		var nz := (w.z - wmin.y) / wsize.y
 		if flip:
+			nx = 1.0 - nx
 			nz = 1.0 - nz
 		return origin + Vector2(nx * drawn.x, nz * drawn.y)
 	var field := map_panel.get_node("field") as ColorRect
@@ -2933,7 +3013,7 @@ func _update_map() -> void:
 		box.visible = true
 		# name towns always; name your own (or revealed) forts/depots — keeps the map legible
 		if kind == "town" or mine or reveal:
-			lbl.text = String(s["name"])
+			lbl.text = String(s["name"]) + (_town_econ_suffix(String(s["name"])) if kind == "town" else "")
 			lbl.add_theme_color_override("font_color", col.lightened(0.3) if kind == "town" else col.darkened(0.05))
 			lbl.add_theme_font_size_override("font_size", 13 if kind == "town" else 11)
 			lbl.position = bp + Vector2(9, -8)
@@ -2962,7 +3042,7 @@ func _update_map() -> void:
 		dot.size = sz
 		dot.pivot_offset = sz * 0.5
 		dot.position = sp - sz * 0.5
-		dot.rotation = atan2(sin(b.facing), cos(b.facing) * (-1.0 if flip else 1.0))
+		dot.rotation = b.facing + (PI if flip else 0.0)   # 180° rotated map -> arrow turns 180° too (not mirrored)
 		dot.visible = true
 	# a bright marker for where YOU ride
 	if player != null:
@@ -2977,6 +3057,28 @@ func _update_map() -> void:
 		me.visible = true
 	for j in range(di, _map_dots.size()):
 		(_map_dots[j] as ColorRect).visible = false
+	# supply convoys — civilian wagon trains (yours always; the enemy's only under dev reveal).
+	# A tan diamond; GOLD if it's the escort you took (Y); RED if threatened and unguarded.
+	var ci := 0
+	for cv in supply_convoys:
+		if not reveal and player != null and int(cv["team"]) != player.team:
+			continue
+		var cp: Vector2 = P.call(cv["pos"] as Vector3)
+		var cm: ColorRect = _map_convoy(ci); ci += 1
+		var ccol := Color(0.80, 0.64, 0.38)
+		if int(cv["id"]) == _escort_id:
+			ccol = Color(1.0, 0.86, 0.30)
+		elif _convoy_threat(cv) and not _convoy_escorted(cv):
+			ccol = Color(1.0, 0.42, 0.34)
+		cm.color = ccol
+		var csz := Vector2(8, 8)
+		cm.size = csz
+		cm.pivot_offset = csz * 0.5
+		cm.rotation = PI * 0.25
+		cm.position = cp - csz * 0.5
+		cm.visible = true
+	for j2 in range(ci, _map_convoys.size()):
+		(_map_convoys[j2] as ColorRect).visible = false
 	# the legend / readout
 	var fr_live := 0
 	var fr_broke := 0
@@ -2994,7 +3096,14 @@ func _update_map() -> void:
 		var clk := int(_time_of_day)
 		var mins := int((_time_of_day - float(clk)) * 60.0)
 		var rev := "   [color=#ff9a8a](dev: enemy revealed)[/color]" if reveal else ""
-		map_legend.text = "[color=#9fb0c8]Your army: [/color][color=#bcd6ff]%d steady[/color] · [color=#ff9a8a]%d broken[/color]   [color=#9fb0c8]Towns held: [/color][color=#ffe9a8]%d / %d[/color]   [color=#9fb0c8]·  %02d:%02d[/color]   [color=#ffe9a8](M to close)[/color]%s" % [fr_live, fr_broke, towns_mine, field_towns.size(), clk, mins, rev]
+		var stores := ""
+		if player != null and player.team >= 0 and player.team <= 1 and _econ_ready:
+			var ms: Array = _mat_pool[player.team]
+			var parts: Array = []
+			for mi in range(N_MATS):
+				parts.append("%s %d" % [MAT_NAMES[mi], int(ms[mi])])
+			stores = "\n[color=#9fb0c8]Stores:[/color] [color=#cdd6e6]%s[/color]   [color=#9fb0c8]Units raised:[/color] [color=#ffe9a8]%d[/color]" % ["  ·  ".join(parts), _reinforced[player.team]]
+		map_legend.text = "[color=#9fb0c8]Your army: [/color][color=#bcd6ff]%d steady[/color] · [color=#ff9a8a]%d broken[/color]   [color=#9fb0c8]Towns held: [/color][color=#ffe9a8]%d / %d[/color]   [color=#9fb0c8]·  %02d:%02d[/color]   [color=#ffe9a8](M to close)[/color]%s%s" % [fr_live, fr_broke, towns_mine, field_towns.size(), clk, mins, rev, stores]
 
 func _map_bridge(i: int) -> ColorRect:
 	while i >= _map_bridges.size():
@@ -3012,6 +3121,15 @@ func _map_dot(i: int) -> ColorRect:
 		map_panel.add_child(d)
 		_map_dots.append(d)
 	return _map_dots[i]
+
+var _map_convoys: Array = []        # pooled supply-convoy markers on the map
+func _map_convoy(i: int) -> ColorRect:
+	while i >= _map_convoys.size():
+		var d := ColorRect.new()
+		d.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		map_panel.add_child(d)
+		_map_convoys.append(d)
+	return _map_convoys[i]
 
 func _map_road(i: int) -> Line2D:
 	while i >= _map_roads.size():
@@ -3089,6 +3207,14 @@ func _build_camp(cl: CanvasLayer) -> void:
 	_camp_btn_drill.text = "Drill"
 	_camp_btn_drill.pressed.connect(_camp_train)
 	bar.add_child(_camp_btn_drill)
+	var bvol := Button.new()
+	bvol.text = "Volley Drill ▸"
+	bvol.pressed.connect(_begin_drill)
+	bar.add_child(bvol)
+	var bman := Button.new()
+	bman.text = "Manoeuvre Drill ▸"
+	bman.pressed.connect(_begin_maneuver_drill)
+	bar.add_child(bman)
 	var bsup := Button.new()
 	bsup.text = "Resupply"
 	bsup.pressed.connect(_camp_resupply)
@@ -3115,6 +3241,12 @@ func _build_camp(cl: CanvasLayer) -> void:
 	bar.add_child(bcl)
 
 func _toggle_camp() -> void:
+	if _drill_on:
+		_end_drill()                       # C dismisses the drill back to ordinary command
+		return
+	if _mdrill_on:
+		_end_maneuver_drill()
+		return
 	if _camp_on:
 		_close_camp()
 		return
@@ -3174,6 +3306,11 @@ func _refresh_camp() -> void:
 	t += "[color=#cdd6e6]Fatigue[/color]  %s  %s\n" % [_bar(b.fatigue, 14), _fatigue_word(b.fatigue)]
 	var mword := "BROKEN" if b.broken else ("running" if b.state == "routing" else ("shaken" if b.state == "shaken" else "steady"))
 	t += "[color=#cdd6e6]Nerve[/color] %d · [color=#cdd6e6]order[/color] %d (%s)\n" % [int(round(b.morale)), int(round(b.cohesion)), mword]
+	var nlead := 0
+	for m in b.roster:
+		if m["alive"] and String(m["rank"]) in LEADER_RANKS:
+			nlead += 1
+	t += "[color=#cdd6e6]Leadership[/color]  %s  [color=#9fb0c8]%d officers & NCOs steady the line[/color]\n" % [_bar(b._leadership * 100.0, 14), nlead]
 	if b.encamped:
 		if _camp_safe(b):
 			t += "[color=#9fe0a0]● ENCAMPED — the men rest and drill[/color]\n"
@@ -3647,6 +3784,7 @@ func _recruit_men(b: Batt, n: int) -> void:
 			"flinch": 0.0, "nerve": randf_range(0.0, 1.0) })
 	_reslot(b)
 	if not b.roster.is_empty():
+		var fig_base := b.figs.size() - n     # the new recruits sit at the tail of b.figs
 		for i in range(n):
 			var coy := b.roster.size() % b.companies
 			var man := { "name": _rand_name(), "rank": "Pte.", "coy": coy,
@@ -3654,6 +3792,8 @@ func _recruit_men(b: Batt, n: int) -> void:
 			for key in SKILL_KEYS:
 				man[key] = clampf(_sk(b, key) - 14.0 + randf_range(-8.0, 8.0), 6.0, 90.0)
 			b.roster.append(man)
+			if fig_base + i < b.figs.size():
+				b.figs[fig_base + i]["man"] = man   # link the green hand to his man on the field
 		_reprofile(b)
 	b.start_men = maxi(b.start_men, b.figs.size())
 
@@ -4072,17 +4212,8 @@ func _build_farmland() -> void:
 				var perp: Vector3 = rot * (Vector3(0, 0, 1) if absf(side.x) > 0.5 else Vector3(1, 0, 0))
 				var hl: float = (d * 0.5) if absf(side.x) > 0.5 else (w * 0.5)
 				hedge_lines.append([a - perp * hl, a + perp * hl])
-	# --- hedgerows: rows of low bushes along the field edges and both sides of the roads ---
-	for s in road_segs:
-		var a: Vector3 = s[0]; var b: Vector3 = s[1]
-		var dir := (b - a); dir.y = 0.0
-		if dir.length() < 1.0:
-			continue
-		dir = dir.normalized()
-		var perp := Vector3(dir.z, 0, -dir.x)
-		hedge_lines.append([a + perp * 9.0, b + perp * 9.0])
-		hedge_lines.append([a - perp * 9.0, b - perp * 9.0])
 	var bushes: Array = []
+	# --- field-edge hedgerows (straight) ---
 	for hl in hedge_lines:
 		var a: Vector3 = hl[0]; var b: Vector3 = hl[1]
 		var ln := a.distance_to(b)
@@ -4092,6 +4223,28 @@ func _build_farmland() -> void:
 			if not river_pts.is_empty() and _in_river(pt):
 				continue
 			bushes.append(pt)
+	# --- roadside hedgerows: low bushes lining BOTH sides of the winding lane. Sampled along
+	# the shared road curve and offset by the local-tangent normal, so they hug the bends of
+	# the worn track you actually see rather than a straight chord beside it. ---
+	for s in road_segs:
+		var ra: Vector3 = s[0]; var rb: Vector3 = s[1]
+		var rln := ra.distance_to(rb)
+		if rln < 1.0:
+			continue
+		var curve := _road_curve(ra, rb, maxi(8, int(rln / 9.0)))
+		for c in range(curve.size()):
+			var ctr: Vector3 = curve[c]
+			var tan: Vector3 = (curve[1] - curve[0]) if c == 0 else ((curve[c] - curve[c - 1]) if c == curve.size() - 1 else (curve[c + 1] - curve[c - 1]))
+			tan.y = 0.0
+			if tan.length() < 1.0e-5:
+				continue
+			tan = tan.normalized()
+			var perp := Vector3(tan.z, 0, -tan.x)
+			for sidesign in [-1.0, 1.0]:
+				var pt: Vector3 = ctr + perp * (9.0 * sidesign)
+				if not river_pts.is_empty() and _in_river(pt):
+					continue
+				bushes.append(pt)
 	var hedge := _make_scenery_mm(_box(1, 1, 1), Color(0.16, 0.28, 0.15), bushes.size())
 	for i in range(bushes.size()):
 		var pt: Vector3 = bushes[i]
@@ -4301,9 +4454,41 @@ func _build_town_roads() -> void:
 		rest.erase(best_b)
 	_build_road_meshes()
 
+# ---- ONE shared road centreline, so the worn track, its hedgerows, its bridges and the
+# march-speed corridor (_on_road) all follow the SAME rustic, winding curve (rather than the
+# ribbon meandering off on its own as it used to). The wander is a perpendicular offset from
+# the straight a->b line, anchored at 0 at both ends so segments meet the towns cleanly.
+const ROAD_MEANDER_AMP := 19.0     # how far the lane wanders off the straight line, at most
+
+func _road_seed(a: Vector3, b: Vector3) -> float:
+	return a.x * 0.011 + a.z * 0.017 + b.x * 0.013 + b.z * 0.007   # deterministic per segment
+
+# Perpendicular offset of the lane from the straight a->b centreline at parameter t (0..1).
+func _road_meander(t: float, ln: float, seed: float) -> float:
+	var env := sin(t * PI)                                      # 0 at both ends, 1 in the middle
+	var bends := maxf(1.0, ln / 300.0)                          # roughly one bend per ~300 units
+	var w := sin(t * TAU * bends + seed) * 0.66 + sin(t * TAU * bends * 0.45 + seed * 1.7) * 0.34
+	return env * w * ROAD_MEANDER_AMP
+
+# The lane's winding centreline a->b as a polyline of `steps`+1 points (y left flat at 0).
+func _road_curve(a: Vector3, b: Vector3, steps: int) -> Array:
+	var ab := b - a; ab.y = 0.0
+	var ln := ab.length()
+	if ln < 0.001:
+		return [a, b]
+	var dir := ab / ln
+	var perp := Vector3(dir.z, 0.0, -dir.x)
+	var seed := _road_seed(a, b)
+	var pts: Array = []
+	for i in range(steps + 1):
+		var t := float(i) / float(steps)
+		var c := a.lerp(b, t) + perp * _road_meander(t, ln, seed)
+		pts.append(Vector3(c.x, 0.0, c.z))
+	return pts
+
 # Lay the road network into the WORLD as worn dirt tracks: the town highways (field_roads),
-# plus a short access track from every fort and depot to its nearest town. Built as one
-# flat ribbon mesh on the ground — a gentle meander, so it reads as a real country road.
+# plus a short access track from every fort and depot to its nearest town. Built as one flat
+# ribbon mesh that winds along the shared road curve, so it reads as a rustic country lane.
 func _build_road_meshes() -> void:
 	var segs: Array = field_roads.duplicate()
 	# garrison access tracks (3D only — these are NOT added to field_roads, so the strategic
@@ -4331,14 +4516,22 @@ func _build_road_meshes() -> void:
 		var ln := a.distance_to(b)
 		if ln < 2.0:
 			continue
-		var dir := (b - a) / ln
-		var perp := Vector3(dir.z, 0.0, -dir.x)
-		var steps: int = maxi(2, int(ln / 110.0))
+		# The track WINDS along the shared road curve (the same one its hedgerows, bridges and
+		# the march-speed corridor follow), drapes over the rolling ground, and banks its edges
+		# to the local tangent so it reads as a real meandering country lane. Stepped finely
+		# enough to follow both the bends and the terrain.
+		var steps: int = maxi(8, int(ln / 28.0))
+		var pts := _road_curve(a, b, steps)
 		var pl := Vector3.ZERO
 		var pr := Vector3.ZERO
-		for i in range(steps + 1):
-			var tt := float(i) / float(steps)
-			var ctr := a.lerp(b, tt) + perp * (sin(tt * PI * 2.0 + a.x * 0.0007) * 22.0)
+		for i in range(pts.size()):
+			var ctr: Vector3 = pts[i]
+			var tan: Vector3 = (pts[1] - pts[0]) if i == 0 else ((pts[i] - pts[i - 1]) if i == pts.size() - 1 else (pts[i + 1] - pts[i - 1]))
+			tan.y = 0.0
+			if tan.length() < 1.0e-5:
+				tan = Vector3(0, 0, 1)
+			tan = tan.normalized()
+			var perp := Vector3(tan.z, 0.0, -tan.x)
 			var cgy := _gh(ctr.x, ctr.z) + 0.16        # drape the track over the rolling ground
 			var l := ctr + perp * hw + Vector3(0, cgy, 0)
 			var r := ctr - perp * hw + Vector3(0, cgy, 0)
@@ -4409,15 +4602,21 @@ func _build_river() -> void:
 	bmi.material_override = bmat
 	bmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(bmi)
-	# drop a bridge wherever a road crosses the river
+	# drop a bridge wherever the WINDING lane crosses the river — walk the curved centreline and
+	# test each little sub-segment, so the bridge lands under the road you actually see
 	for rseg in road_segs:
-		for i in range(river_pts.size() - 1):
-			var hit = _seg_xz(rseg[0], rseg[1], river_pts[i], river_pts[i + 1])
-			if hit != null:
-				var along: Vector3 = (rseg[1] - rseg[0])
-				along.y = 0.0
-				_build_bridge(hit, atan2(along.x, along.z))
-				bridges.append(hit)
+		var ln: float = (rseg[1] - rseg[0]).length()
+		var curve := _road_curve(rseg[0], rseg[1], maxi(8, int(ln / 28.0)))
+		for c in range(curve.size() - 1):
+			var ca: Vector3 = curve[c]
+			var cb: Vector3 = curve[c + 1]
+			for i in range(river_pts.size() - 1):
+				var hit = _seg_xz(ca, cb, river_pts[i], river_pts[i + 1])
+				if hit != null:
+					var along: Vector3 = (cb - ca)
+					along.y = 0.0
+					_build_bridge(hit, atan2(along.x, along.z))
+					bridges.append(hit)
 
 # Lay a flat ribbon (forced up-normals) down a polyline at height y, into SurfaceTool st.
 func _ribbon(st: SurfaceTool, pts: Array, hw: float, y: float) -> void:
@@ -4505,8 +4704,24 @@ func _dist_point_seg(p: Vector3, a: Vector3, b: Vector3) -> float:
 	return (ap - ab * t).length()
 
 func _on_road(p: Vector3) -> bool:
+	# Distance to the WINDING lane (not the straight chord): project p onto the chord to get how
+	# far along (t) and how far to the side (d_perp) it lies, then subtract the lane's sideways
+	# wander at that point. Cheap and accurate enough for the march-speed corridor & avoidance.
 	for s in road_segs:
-		if _dist_point_seg(p, s[0], s[1]) < ROAD_WIDTH:
+		var a: Vector3 = s[0]
+		var b: Vector3 = s[1]
+		var ab := b - a; ab.y = 0.0
+		var ln := ab.length()
+		if ln < 1.0:
+			continue
+		var dir := ab / ln
+		var ap := p - a; ap.y = 0.0
+		var along := ap.dot(dir)
+		var t := clampf(along / ln, 0.0, 1.0)
+		var perp := Vector3(dir.z, 0.0, -dir.x)
+		var d_perp := ap.dot(perp) - _road_meander(t, ln, _road_seed(a, b))
+		var over := maxf(maxf(-along, along - ln), 0.0)        # overrun past either end
+		if Vector2(d_perp, over).length() < ROAD_WIDTH:
 			return true
 	return false
 
@@ -4598,8 +4813,529 @@ func _update_capture(delta: float) -> void:
 				_send_player_despatch("[color=#ffd773]%s has fallen[/color] to %s." % [t["name"], "the Crown" if holder == 0 else "the Continentals"], {})
 		else:
 			t["cap_t"] = maxf(0.0, float(t["cap_t"]) - tick)
+	_update_economy(tick)            # held towns produce materials; barracks raise battalions
 	if changed:
 		_color_towns()
+
+# ============================================================ the WAR ECONOMY (auto-run)
+# Held towns produce raw materials (one each, by the land around them); a held town with a
+# production building draws the materials it needs and, over time, MUSTERS a unit that joins the
+# war: Barracks -> infantry, Armory -> a battery, Stables -> a cavalry regiment, Shipyard -> a
+# ship. The faction's economy runs ITSELF — the player shapes it only by which towns he holds and
+# denies; his OWN force he raises with prestige. No town is self-sufficient (each yields ONE
+# material, every building needs SEVERAL), so holding a SPREAD of towns is what keeps armies grown.
+const MAT_GRAIN := 0
+const MAT_IRON := 1
+const MAT_TIMBER := 2
+const MAT_HORSES := 3
+const MAT_POWDER := 4
+const N_MATS := 5
+const MAT_NAMES := ["Grain", "Iron", "Timber", "Horses", "Powder"]
+const MAT_PER_SIZE := 0.28          # raw material a town yields per tick, x its size
+const BUILD_DRAW := 8.0             # how fast a building pulls from the stores (the stores throttle)
+const REINFORCE_MEN := 560          # strength of a freshly-mustered battalion
+const MAX_REINFORCEMENTS := 24      # cap on mustered units per side (render/headroom safety)
+# cost vectors [Grain, Iron, Timber, Horses, Powder] per building type
+const BUILD_COSTS := {
+	"barracks": [240.0, 150.0, 0.0, 0.0, 0.0],     # Grain + Iron            -> infantry battalion
+	"armory":   [0.0, 200.0, 150.0, 0.0, 120.0],   # Iron + Timber + Powder  -> a battery of guns
+	"stables":  [170.0, 110.0, 0.0, 260.0, 0.0],   # Grain + Iron + Horses   -> a cavalry regiment
+	"shipyard": [0.0, 220.0, 360.0, 0.0, 150.0],   # Iron + Timber + Powder  -> a ship
+}
+const BUILD_NAMES := { "barracks": "Barracks", "armory": "Armory", "stables": "Stables", "shipyard": "Shipyard" }
+var _mat_pool := [[0.0, 0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0, 0.0]]   # [team][material]
+var _reinforced := [0, 0]            # units mustered this campaign, per side
+var _muster_cav_n := [0, 0]          # round-robins the arm of each cavalry regiment raised
+var _econ_ready := false
+
+func _assign_town_economy() -> void:
+	# each town yields ONE raw material and (most) house ONE production building. The coastal
+	# towns get the shipyards; the rest spread barracks/armory/stables. Assigned by index for now
+	# — TODO: key off the surrounding terrain (farmland->grain, hills->iron, forest->timber...).
+	var coastal: Array = []
+	for i in range(field_towns.size()):
+		coastal.append([float((field_towns[i]["pos"] as Vector3).x), i])
+	coastal.sort_custom(func(a, c): return a[0] > c[0])   # nearest the coast first (highest x)
+	var ship_towns := {}
+	for k in range(mini(2, coastal.size())):
+		ship_towns[int(coastal[k][1])] = true
+	var blds := ["barracks", "armory", "stables"]
+	var bn := 0
+	for i in range(field_towns.size()):
+		var t: Dictionary = field_towns[i]
+		t["mat"] = i % N_MATS                       # spread the five raw materials across the towns
+		t["stock"] = 0.0                            # the town's own pile of its material, awaiting a convoy
+		t["build"] = [0.0, 0.0, 0.0, 0.0, 0.0]      # materials accrued toward this town's next unit
+		if ship_towns.has(i):
+			t["building"] = "shipyard"
+		elif i % 2 == 0:                            # ~half the inland towns raise a unit type
+			t["building"] = blds[bn % blds.size()]
+			bn += 1
+		else:
+			t["building"] = ""
+
+func _update_economy(tick: float) -> void:
+	if field_towns.is_empty():
+		return
+	if not _econ_ready:
+		_assign_town_economy()
+		_econ_ready = true
+	# PRODUCTION: every held town piles its raw material into its OWN local stock — it only reaches
+	# the faction stores (where buildings draw it) once a WAGON CONVOY hauls it up (see _update_supply)
+	for t in field_towns:
+		var owner := int(t["owner"])
+		if owner < 0 or owner > 1:
+			continue
+		t["stock"] = float(t.get("stock", 0.0)) + MAT_PER_SIZE * float(int(t["size"])) * tick
+	# PRODUCTION BUILDINGS: each held building draws the materials it needs and musters its unit
+	for t in field_towns:
+		var bld := String(t.get("building", ""))
+		if bld == "" or not BUILD_COSTS.has(bld):
+			continue
+		var owner := int(t["owner"])
+		if owner < 0 or owner > 1 or _reinforced[owner] >= MAX_REINFORCEMENTS:
+			continue
+		var cost: Array = BUILD_COSTS[bld]
+		var prog: Array = t["build"]
+		var done := true
+		for mi in range(N_MATS):
+			if cost[mi] <= 0.0:
+				continue
+			if prog[mi] < cost[mi]:
+				var draw: float = minf(minf(_mat_pool[owner][mi], cost[mi] - prog[mi]), BUILD_DRAW * tick)
+				_mat_pool[owner][mi] -= draw
+				prog[mi] += draw
+			if prog[mi] < cost[mi]:
+				done = false
+		if done:
+			for mi in range(N_MATS):
+				prog[mi] -= cost[mi]
+			_reinforced[owner] += 1
+			_muster_unit(bld, owner, t)
+
+func _muster_unit(bld: String, team: int, town: Dictionary) -> void:
+	match bld:
+		"barracks": _muster_battalion(team, town)
+		"armory":   _muster_battery(team, town)
+		"stables":  _muster_cavalry(team, town)
+		"shipyard": _muster_ship(team, town)
+
+func _nearest_brigade(pos: Vector3, team: int):
+	var best = null
+	var bd := 1.0e18
+	for br in brigades:
+		if br.team != team:
+			continue
+		var d: float = pos.distance_to(_brigade_center(br))
+		if d < bd:
+			bd = d
+			best = br
+	return best
+
+# A battery founded at an armory town: GUNS_PER_BATTERY pieces roll out and join the nearest
+# brigade's guns (driven by the existing artillery AI).
+func _muster_battery(team: int, town: Dictionary) -> void:
+	var tpos: Vector3 = town["pos"]
+	var face := 0.0 if team == 0 else PI
+	var fwd := Vector3(sin(face), 0, cos(face))
+	var rightv := Vector3(fwd.z, 0, -fwd.x)
+	var span := (GUNS_PER_BATTERY - 1) * GUN_SPACING
+	var br = _nearest_brigade(tpos, team)
+	for i in range(GUNS_PER_BATTERY):
+		var g := Gun.new()
+		g.team = team
+		g.pos = tpos + rightv * (float(i) * GUN_SPACING - span * 0.5) - fwd * 60.0
+		g.move_to = g.pos
+		g.facing = face
+		g.reload = ARTY_RELOAD * randf_range(0.2, 1.0)
+		_make_gun(g)
+		guns.append(g)
+		if br != null:
+			g.brigade = br
+			br.guns.append(g)
+	if player != null and team == player.team:
+		_send_player_despatch("[color=#9fe0a0]A battery is founded at %s[/color] and rolls up to the guns' line." % String(town["name"]), {})
+
+# A regiment of horse raised at a stables town: a fresh Cav joins the reserve (its arm round-
+# robins through the four). Needs the per-arm cavalry MultiMesh headroom from _spawn_cavalry.
+func _muster_cavalry(team: int, town: Dictionary) -> void:
+	var ct: int = _muster_cav_n[team] % CAV_TYPE_DATA.size()
+	_muster_cav_n[team] += 1
+	if team > 1 or cav_horse_mm[team][ct] == null:
+		return
+	var c := Cav.new()
+	c.team = team
+	c.idx = CAV_PER_TEAM * 2 + 100 + cavalry.size()
+	c.cav_type = ct
+	var face := 0.0 if team == 0 else PI
+	c.pos = (town["pos"] as Vector3) - Vector3(sin(face), 0, cos(face)) * 80.0
+	c.reserve_pos = c.pos
+	c.facing = face
+	c.decide_cd = randf_range(0.0, CAV_DECIDE)
+	var hp := AudioStreamPlayer3D.new()
+	hp.max_distance = 1100.0
+	hp.unit_size = 22.0
+	hp.volume_db = 7.0
+	add_child(hp)
+	c.hoof_player = hp
+	_fill_troopers(c)
+	cavalry.append(c)
+	if player != null and team == player.team:
+		_send_player_despatch("[color=#9fe0a0]A regiment of horse is raised at %s[/color] and trots to the reserve." % String(town["name"]), {})
+
+# A ship launched from a shipyard town: it stands out to sea and joins the patrol/sea-fight.
+func _muster_ship(team: int, town: Dictionary) -> void:
+	var node := _ship_node(team)
+	add_child(node)
+	var tz: float = (town["pos"] as Vector3).z
+	var ph := 0.0 if team == 0 else PI
+	ships.append({ "node": node, "pos": Vector3(COAST_X + randf_range(900.0, 2200.0), 0, tz), "heading": ph,
+		"patrol_h": ph, "speed": SHIP_SPEED * randf_range(0.9, 1.1), "team": team, "fire_cd": randf_range(2.0, 6.0) })
+	if player != null and team == player.team:
+		_send_player_despatch("[color=#9fe0a0]A ship is launched from %s[/color] and stands out to sea." % String(town["name"]), {})
+
+# Raise a battalion at a barracks town and send it up to reinforce — built on the proven
+# mid-game spawn pattern (_spawn_raid_party), but for team 0/1 and attached to a real brigade so
+# the existing AI marches and fights it.
+func _muster_battalion(team: int, town: Dictionary) -> void:
+	var b := Batt.new()
+	b.team = team
+	b.idx = BATT_PER_TEAM * 2 + 200 + battalions.size()   # synthetic id, outside the standing OOB
+	var tpos: Vector3 = town["pos"]
+	var spawn_pos := tpos + Vector3(randf_range(-30.0, 30.0), 0, randf_range(-30.0, 30.0))
+	b.pos = spawn_pos
+	b.spawn = spawn_pos
+	b.last_pos = spawn_pos
+	b.fire_pos = spawn_pos
+	b._fat_pos = spawn_pos
+	var face := 0.0 if team == 0 else PI
+	b.facing = face
+	b.off_facing = face
+	b.off_pos = b.pos - Vector3(sin(face), 0, cos(face)) * 10.0
+	b.formation = "column"            # march up in column, deploy on contact
+	b.companies = 6
+	b.ammo = START_ROUNDS
+	b.ai_facing = face
+	b.ai_posture = "advance"
+	_fill_figs(b, REINFORCE_MEN)
+	_assign_battalion_skills(b)
+	b.rname = "%s Battalion" % String(town["name"])
+	var fc := team_color(team)
+	b.inst_col = Color(fc.r, fc.g, fc.b, _dress_packed(0, b.idx, false))
+	b.start_men = b.figs.size()
+	b.cohesion = _disc_cohesion(b)
+	battalions.append(b)
+	_attach_to_nearest_brigade(b)
+	if player != null and team == player.team:
+		_send_player_despatch("[color=#9fe0a0]A fresh battalion musters at %s[/color] and marches up to reinforce the line." % String(town["name"]), {})
+
+func _attach_to_nearest_brigade(b: Batt) -> void:
+	var best = null
+	var bd := 1.0e18
+	for br in brigades:
+		if br.team != b.team:
+			continue
+		var d: float = b.pos.distance_to(_brigade_center(br))
+		if d < bd:
+			bd = d
+			best = br
+	if best != null:
+		b.brigade = best
+		best.battalions.append(b)
+
+# ============================================================ SUPPLY CONVOYS (logistics)
+# Civilian waggon trains physically haul a town's raw material up to the front, FEEDING the faction
+# stores the production buildings draw on. The AI quartermaster despatches a convoy whenever the
+# stores run short of a material a held town can supply — and OFFERS the escort as a job: ride to it
+# yourself (for prestige), or, if you don't, the nearest AI unit is detached to see it through. A
+# convoy with no escort bleeds its cargo to a prowling enemy — so the roads are now worth fighting over.
+const CONVOY_SPEED := 7.0
+const CONVOY_CARGO := 120.0
+const POOL_LOW := 90.0              # stores below this for a material -> call a convoy of it
+const CONVOY_COOLDOWN := 12.0       # min seconds between a faction's convoy despatches
+const ESCORT_RANGE := 95.0          # a friendly unit this near counts as escorting the convoy
+const THREAT_RANGE := 130.0         # an enemy this near threatens it
+const CONVOY_BLEED := 10.0          # cargo lost / sec to a prowling enemy with no escort
+const CONVOY_GRACE := 16.0          # seconds before the AI sends its own escort if you don't
+const MAX_CONVOYS := 6              # per side
+const CONVOY_ESCORT_PRESTIGE := 8   # your reward for seeing a convoy safe in
+var supply_convoys: Array = []
+var _convoy_cd := [0.0, 0.0]
+var _convoy_next_id := 0
+var _offered_id := -1               # the convoy currently offered to you (press Y to take it)
+var _escort_id := -1                # the convoy you have accepted to escort
+
+# A path of road points from a to b across the town road network (field_roads), or [] (then the
+# convoy goes straight). BFS over the towns the roads link, then samples each leg's road curve.
+func _nearest_town_index(pos: Vector3) -> int:
+	var best := -1
+	var bd := 1.0e18
+	for i in range(field_towns.size()):
+		var d: float = (field_towns[i]["pos"] as Vector3).distance_to(pos)
+		if d < bd:
+			bd = d
+			best = i
+	return best
+
+func _road_path(a: Vector3, b: Vector3) -> Array:
+	var ia := _nearest_town_index(a)
+	var ib := _nearest_town_index(b)
+	if ia < 0 or ib < 0 or ia == ib or field_roads.is_empty():
+		return []
+	var adj := {}
+	for seg in field_roads:
+		var i0 := _nearest_town_index(seg[0])
+		var i1 := _nearest_town_index(seg[1])
+		if i0 < 0 or i1 < 0:
+			continue
+		if not adj.has(i0): adj[i0] = []
+		if not adj.has(i1): adj[i1] = []
+		(adj[i0] as Array).append(i1)
+		(adj[i1] as Array).append(i0)
+	var prev := {}
+	var visited := { ia: true }
+	var queue := [ia]
+	while not queue.is_empty():
+		var cur = queue.pop_front()
+		if cur == ib:
+			break
+		for nb in adj.get(cur, []):
+			if not visited.has(nb):
+				visited[nb] = true
+				prev[nb] = cur
+				queue.append(nb)
+	if not prev.has(ib):
+		return []
+	var chain := [ib]
+	var c = ib
+	while prev.has(c):
+		c = prev[c]
+		chain.push_front(c)
+	var pts: Array = []
+	for k in range(chain.size() - 1):
+		var t0: Vector3 = field_towns[chain[k]]["pos"]
+		var t1: Vector3 = field_towns[chain[k + 1]]["pos"]
+		for p in _road_curve(t0, t1, maxi(4, int(t0.distance_to(t1) / 60.0))):
+			pts.append(p)
+	return pts
+
+# Y — take the offered convoy under your protection (a formal escort mission, double the reward).
+func _accept_escort() -> void:
+	if _offered_id < 0:
+		return
+	for cv in supply_convoys:
+		if int(cv["id"]) == _offered_id:
+			cv["accepted"] = true
+			_escort_id = _offered_id
+			_offered_id = -1
+			_send_player_despatch("[color=#9fe0a0]You take the convoy under your protection.[/color] Ride with it to the front.", {})
+			return
+	_offered_id = -1
+
+func _clear_convoy_refs(cv: Dictionary) -> void:
+	var id := int(cv["id"])
+	if id == _offered_id: _offered_id = -1
+	if id == _escort_id: _escort_id = -1
+
+func _team_center(team: int) -> Vector3:
+	var sum := Vector3.ZERO
+	var n := 0
+	for b in battalions:
+		if b.team == team and not b.independent and not b.spent:
+			sum += b.pos
+			n += 1
+	return (sum / float(n)) if n > 0 else Vector3(0, 0, -360.0 if team == 0 else 360.0)
+
+func _supply_dest(team: int) -> Vector3:
+	# deliver to the held BUILDING town nearest the front; failing that, the army's centre
+	var best := Vector3.INF
+	var bd := 1.0e18
+	var ec := _team_center(1 - team)
+	for t in field_towns:
+		if int(t["owner"]) != team or String(t.get("building", "")) == "":
+			continue
+		var d: float = (t["pos"] as Vector3).distance_to(ec)
+		if d < bd:
+			bd = d
+			best = t["pos"]
+	return best if best != Vector3.INF else _team_center(team)
+
+func _maybe_spawn_convoy(team: int) -> void:
+	if _convoy_cd[team] > 0.0:
+		return
+	var n_team := 0
+	for cv in supply_convoys:
+		if int(cv["team"]) == team:
+			n_team += 1
+	if n_team >= MAX_CONVOYS:
+		return
+	# the material the stores are shortest of that a held town can actually supply
+	for mat in range(N_MATS):
+		if _mat_pool[team][mat] >= POOL_LOW:
+			continue
+		var src = null
+		var best_stock := 40.0
+		for t in field_towns:
+			if int(t["owner"]) != team or int(t["mat"]) != mat:
+				continue
+			var st: float = float(t.get("stock", 0.0))
+			if st > best_stock:
+				best_stock = st
+				src = t
+		if src != null:
+			_spawn_convoy(team, src, mat)
+			_convoy_cd[team] = CONVOY_COOLDOWN
+			return
+
+func _spawn_convoy(team: int, src: Dictionary, mat: int) -> void:
+	var cargo: float = minf(float(src.get("stock", 0.0)), CONVOY_CARGO)
+	src["stock"] = float(src.get("stock", 0.0)) - cargo
+	var origin: Vector3 = src["pos"]
+	var node := _make_caisson_node(team)
+	node.position = Vector3(origin.x, _gh(origin.x, origin.z), origin.z)
+	add_child(node)
+	var dest := _supply_dest(team)
+	var id := _convoy_next_id
+	_convoy_next_id += 1
+	supply_convoys.append({ "node": node, "pos": origin, "dest": dest, "path": _road_path(origin, dest),
+		"wp": 0, "mat": mat, "cargo": cargo, "team": team, "grace": CONVOY_GRACE, "escort": null,
+		"player_esc": false, "accepted": false, "id": id })
+	if player != null and team == player.team:
+		_offered_id = id
+		_send_player_despatch("[color=#ffe9a8]Convoy:[/color] a %s train sets out from %s for the front — [color=#cfe0ff]press Y to take the escort[/color]." % [String(MAT_NAMES[mat]), String(src["name"])], {})
+
+func _update_supply(delta: float) -> void:
+	if field_towns.is_empty():
+		return
+	for team in [0, 1]:
+		_convoy_cd[team] = maxf(0.0, _convoy_cd[team] - delta)
+		_maybe_spawn_convoy(team)
+	var i := 0
+	while i < supply_convoys.size():
+		var cv: Dictionary = supply_convoys[i]
+		var team := int(cv["team"])
+		var pos: Vector3 = cv["pos"]
+		var node: Node3D = cv["node"]
+		var path: Array = cv["path"]
+		var wp := int(cv["wp"])
+		# make for the next road waypoint, or — once past the road path — the final dest
+		var aim: Vector3 = path[wp] if wp < path.size() else (cv["dest"] as Vector3)
+		var escorted := _convoy_escorted(cv)
+		var threatened := _convoy_threat(cv)
+		if escorted:
+			if player != null and team == player.team and off_pos.distance_to(pos) < ESCORT_RANGE:
+				cv["player_esc"] = true
+		else:
+			cv["grace"] = float(cv["grace"]) - delta
+			if threatened and float(cv["grace"]) <= 0.0 and cv["escort"] == null:
+				cv["escort"] = _send_ai_escort(team, pos)
+			if threatened:
+				cv["cargo"] = float(cv["cargo"]) - CONVOY_BLEED * delta
+		# an escorting AI unit keeps station on the convoy
+		var eu = cv["escort"]
+		if eu != null and is_instance_valid(eu) and not eu.spent:
+			if eu is Batt:
+				eu.ai_target = pos
+			elif eu is Cav:
+				eu.reserve_pos = pos
+		# lost to the enemy?
+		if float(cv["cargo"]) <= 0.0:
+			if player != null and team == player.team:
+				_send_player_despatch("[color=#ff9a8a]A supply convoy is lost[/color] — taken on the road, its cargo gone.", {})
+			_clear_convoy_refs(cv)
+			node.queue_free()
+			supply_convoys.remove_at(i)
+			continue
+		var to := Vector3(aim.x - pos.x, 0, aim.z - pos.z)
+		var step := CONVOY_SPEED * delta
+		if to.length() <= maxf(step, 16.0):
+			if wp < path.size():
+				cv["wp"] = wp + 1                        # on to the next road waypoint
+				cv["pos"] = aim
+				node.position = Vector3(aim.x, _gh(aim.x, aim.z), aim.z)
+				i += 1
+				continue
+			# reached the front — deliver to the stores
+			_mat_pool[team][int(cv["mat"])] += float(cv["cargo"])
+			if player != null and team == player.team:
+				var bonus := ""
+				if bool(cv["player_esc"]):
+					var rew: int = CONVOY_ESCORT_PRESTIGE * (2 if bool(cv["accepted"]) else 1)
+					prestige += rew
+					bonus = "  [color=#9fe0a0](+%d prestige — escort)[/color]" % rew
+				_send_player_despatch("[color=#9fe0a0]Convoy in:[/color] %s reaches the stores.%s" % [String(MAT_NAMES[int(cv["mat"])]), bonus], {})
+			_clear_convoy_refs(cv)
+			node.queue_free()
+			supply_convoys.remove_at(i)
+			continue
+		var dir := to / to.length()
+		pos = pos + dir * step
+		cv["pos"] = pos
+		node.position = Vector3(pos.x, _gh(pos.x, pos.z), pos.z)
+		node.rotation.y = atan2(dir.x, dir.z)
+		i += 1
+
+func _convoy_escorted(cv: Dictionary) -> bool:
+	var team := int(cv["team"])
+	var pos: Vector3 = cv["pos"]
+	if player != null and team == player.team and off_pos.distance_to(pos) < ESCORT_RANGE:
+		return true
+	for b in battalions:
+		if b.team == team and not b.spent and not b.independent and b.pos.distance_to(pos) < ESCORT_RANGE:
+			return true
+	for c in cavalry:
+		if c.team == team and not c.spent and c.pos.distance_to(pos) < ESCORT_RANGE:
+			return true
+	return false
+
+func _convoy_threat(cv: Dictionary) -> bool:
+	var team := int(cv["team"])
+	var pos: Vector3 = cv["pos"]
+	for b in battalions:
+		if b.spent or b.pos.distance_to(pos) >= THREAT_RANGE:
+			continue
+		if b.is_raider or (b.team != team and b.team != 2 and b.figs.size() > 40):
+			return true
+	return false
+
+func _send_ai_escort(team: int, pos: Vector3):
+	# the quartermaster pulls the nearest steady battalion (or regiment of horse) off to see the
+	# convoy through — its objective is set to the convoy; it keeps station on it (see _update_supply)
+	var best = null
+	var bd := 1.0e18
+	for b in battalions:
+		if b.team != team or b.spent or b.independent or b.is_player or b.state == "routing":
+			continue
+		var d: float = b.pos.distance_to(pos)
+		if d < bd and d < 1400.0:
+			bd = d
+			best = b
+	for c in cavalry:
+		if c.team != team or c.spent:
+			continue
+		var d2: float = c.pos.distance_to(pos)
+		if d2 < bd and d2 < 1400.0:
+			bd = d2
+			best = c
+	if best != null:
+		if best is Batt:
+			best.ai_target = pos
+		elif best is Cav:
+			best.reserve_pos = pos
+		if player != null and team == player.team:
+			_send_player_despatch("[color=#caa15a]No escort answered[/color] — a unit is detached to see the convoy through.", {})
+	return best
+
+# The map label for a town: its raw material and (if any) its production building, e.g. "Iron · Armory".
+func _town_econ_suffix(name: String) -> String:
+	for t in field_towns:
+		if String(t["name"]) == name and t.has("mat"):
+			var s: String = "\n" + String(MAT_NAMES[int(t["mat"])])
+			var bld := String(t.get("building", ""))
+			if bld != "":
+				s += " · " + String(BUILD_NAMES.get(bld, bld))
+			return s
+	return ""
 
 # ------------------------------------------------------------------ native raid parties
 # Small war-bands out of the woodland — team 2, hostile to both colonial sides alike.
@@ -4746,6 +5482,7 @@ func _strategic_win(winner: int) -> void:
 	if battle_over:
 		return
 	battle_over = true
+	_campaign_over = true             # the province is decided — this is the true end of the campaign
 	_town_winner = winner
 	_bill_t = 8.0
 	var won_it: bool = player != null and player.team == winner
@@ -5411,7 +6148,10 @@ func _refresh_cmd_panel() -> void:
 	var firemode := "volley on order" if b.auto_volley else ("holding fire" if b.volley_fire else "firing at will")
 	var rt := "[b][color=#ffd773]YOUR COMMAND[/color][/b]\n"
 	rt += "[color=#ffe9a8]%s[/color]\n" % _unit_name(b)
-	rt += "[color=#cdd6e6]%d men · [color=#%s]%s[/color] · %d rds · %s[/color]\n" % [b.figs.size(), mcol, morale_word, int(round(b.ammo)), b.formation]
+	# an encamped battalion is in bivouac, not a formation — and you cannot re-form it until you
+	# break camp (the manoeuvre drill is the one exception, where re-forming IS the exercise)
+	var form_word: String = "encamped" if (b.encamped and not _mdrill_on) else b.formation
+	rt += "[color=#cdd6e6]%d men · [color=#%s]%s[/color] · %d rds · %s[/color]\n" % [b.figs.size(), mcol, morale_word, int(round(b.ammo)), form_word]
 	rt += "[color=#9fb0c8]%s · %s[/color]" % [task, firemode]
 	if b.masked:
 		rt += "\n[color=#ffcf6e]fire masked — friends to the front![/color]"
@@ -5422,8 +6162,13 @@ func _refresh_cmd_panel() -> void:
 	cmd_roster.text = rt
 	# the order page
 	var ot := "[b][color=#ffd773]%s[/color][/b]\n" % PAGE_TITLES.get(_cmd_page, "ORDERS")
+	var no_form: bool = b.encamped and not _mdrill_on    # no manoeuvring while the men bivouac
 	for item in CMD_PAGES[_cmd_page]:
+		if no_form and (String(item[3]) == "page:form" or String(item[3]) in ["line", "column", "square"]):
+			continue
 		ot += "  [color=#ffe9a8]%s[/color]  [color=#cdd6e6]%s[/color]\n" % [item[1], item[2]]
+	if no_form and _cmd_page == "":
+		ot += "  [color=#6f7888]Formation — break camp to re-form[/color]\n"
 	var foot := "Q close" if _cmd_page == "" else "Esc back · Q close"
 	ot += "[right][color=#6f7888]%s[/color][/right]"
 	cmd_orders.text = ot % foot
@@ -5470,18 +6215,30 @@ func _build_help(cl: CanvasLayer) -> void:
 		"[right][color=#6f7888]Tab to hide[/color][/right]"
 	help_panel.add_child(rt)
 
-func _scope_tex() -> Texture2D:
-	var g := Gradient.new()
-	g.offsets = PackedFloat32Array([0.0, 0.60, 0.66, 1.0])
-	g.colors = PackedColorArray([Color(0, 0, 0, 0), Color(0, 0, 0, 0), Color(0, 0, 0, 1), Color(0, 0, 0, 1)])
-	var t := GradientTexture2D.new()
-	t.gradient = g
-	t.fill = GradientTexture2D.FILL_RADIAL
-	t.fill_from = Vector2(0.5, 0.5)
-	t.fill_to = Vector2(0.92, 0.5)
-	t.width = 256
-	t.height = 256
-	return t
+func _scope_shader() -> Shader:
+	# The view through a drawn-brass spyglass: a true CIRCULAR field (aspect-corrected, so it
+	# never stretches to an ellipse on a wide screen), ringed by a thin brass eyepiece, with a
+	# soft optical vignette that deepens as the glass is drawn out to higher magnification.
+	var sh := Shader.new()
+	sh.code = """
+shader_type canvas_item;
+uniform float amt = 0.0;       // 0 glass down .. 1 fully raised (fades the whole mask in)
+uniform float zoom = 0.45;     // 0 wide .. 1 drawn out (a touch more vignette when drawn out)
+void fragment() {
+	vec2 d = UV - vec2(0.5);
+	float aspect = SCREEN_PIXEL_SIZE.y / SCREEN_PIXEL_SIZE.x;   // = width / height
+	d.x *= aspect;                                             // correct so the field is a true circle
+	float r = length(d) / 0.46;                                // r = 1 at the eyepiece edge
+	vec3 brass = vec3(0.42, 0.31, 0.13);
+	float vig = smoothstep(0.45, 1.0, r) * (0.22 + 0.14 * zoom);                         // soft lens darkening
+	float rim = clamp(smoothstep(1.0, 1.018, r) - smoothstep(1.05, 1.072, r), 0.0, 1.0); // thin brass ring
+	float wall = smoothstep(1.06, 1.095, r);                   // opaque tube wall / black surround
+	vec3 col = mix(vec3(0.0), brass, rim);
+	float alpha = max(max(vig, wall), rim * 0.9);
+	COLOR = vec4(col, clamp(alpha, 0.0, 1.0) * amt);
+}
+"""
+	return sh
 
 func _vignette_tex() -> Texture2D:
 	var g := Gradient.new()
@@ -5977,7 +6734,9 @@ func _spawn_from_setup() -> void:
 		b.off_facing = face
 		b.off_pos = b.pos + Vector3(sin(face), 0, cos(face)) * 14.0
 		b.human = (u.human_slot >= 0)                          # any player-commanded unit
-		b.is_player = (u.human_slot == GameConfig.local_slot)  # the one THIS peer drives
+		# the one THIS peer drives — guard local_slot >= 0 so a dedicated server (slot -1)
+		# doesn't claim every AI unit (whose human_slot is also -1) as its own
+		b.is_player = (GameConfig.local_slot >= 0 and u.human_slot == GameConfig.local_slot)
 		b.companies = 6 if team == 0 else 10
 		b.ammo = u.ammo
 		b.morale = u.morale
@@ -6032,19 +6791,87 @@ func _make_flag(b: Batt, team: int) -> void:
 	pmat.albedo_color = Color(0.25, 0.16, 0.08)
 	pole.material_override = pmat
 	b.flag.add_child(pole)
-	var cloth := MeshInstance3D.new()
-	var cbox := BoxMesh.new()
-	cbox.size = Vector3(0.95, 0.62, 0.02)
-	cloth.mesh = cbox
+
+	# a gold spearhead finial atop the staff, the mark of a proper stand of colours
+	var gold := Color(0.83, 0.68, 0.21)
+	var finial := MeshInstance3D.new()
+	var fcone := CylinderMesh.new()
+	fcone.top_radius = 0.0
+	fcone.bottom_radius = 0.04
+	fcone.height = 0.16
+	finial.mesh = fcone
+	finial.position = Vector3(0, 2.23, 0)
+	var finmat := StandardMaterial3D.new()
+	finmat.albedo_color = gold
+	finmat.metallic = 0.6
+	finmat.roughness = 0.3
+	finial.material_override = finmat
+	b.flag.add_child(finial)
+
+	var nat := ARMY_BLUE if team == 0 else ARMY_RED
+	var fac := Color(b.inst_col.r, b.inst_col.g, b.inst_col.b)
+
+	# the cloth assembly: one wrapper node so the existing sway/flap animation
+	# (which rotates b.flag_cloth as a whole) still drives every part together
+	var cloth := Node3D.new()
 	cloth.position = Vector3(0.5, 1.85, 0)      # the colours fly just above the men's heads
-	var cmat := StandardMaterial3D.new()
-	# the cloth carries the REGIMENT's facing colour quartered with the national one
-	var nat := team_color(team)
-	cmat.albedo_color = nat.lerp(Color(b.inst_col.r, b.inst_col.g, b.inst_col.b), 0.5)
-	cmat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	cloth.material_override = cmat
 	b.flag.add_child(cloth)
 	b.flag_cloth = cloth
+
+	# the field — the regiment's facing colour quartered with the national one
+	var field := MeshInstance3D.new()
+	var cbox := BoxMesh.new()
+	cbox.size = Vector3(0.95, 0.62, 0.018)
+	field.mesh = cbox
+	var cmat := StandardMaterial3D.new()
+	cmat.albedo_color = nat.lerp(fac, 0.5)
+	cmat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	field.material_override = cmat
+	cloth.add_child(field)
+
+	# a hoist canton in the facing colour, by the staff edge
+	var canton := MeshInstance3D.new()
+	var canbox := BoxMesh.new()
+	canbox.size = Vector3(0.34, 0.29, 0.02)
+	canton.mesh = canbox
+	canton.position = Vector3(-0.30, 0.16, 0.0015)
+	var canmat := StandardMaterial3D.new()
+	canmat.albedo_color = fac
+	canmat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	canton.material_override = canmat
+	cloth.add_child(canton)
+
+	# a gold roundel at the centre, standing for the regimental badge
+	var roundel := MeshInstance3D.new()
+	var rcyl := CylinderMesh.new()
+	rcyl.top_radius = 0.13
+	rcyl.bottom_radius = 0.13
+	rcyl.height = 0.012
+	roundel.mesh = rcyl
+	roundel.rotation_degrees = Vector3(90, 0, 0)
+	roundel.position = Vector3(0.05, 0, 0.013)
+	var rolmat := StandardMaterial3D.new()
+	rolmat.albedo_color = gold
+	rolmat.metallic = 0.4
+	roundel.material_override = rolmat
+	cloth.add_child(roundel)
+
+	# a gold fringe along the top, bottom and fly edge
+	var fringe_mat := StandardMaterial3D.new()
+	fringe_mat.albedo_color = gold
+	for fr in [
+		[Vector3(0, 0.325, 0), Vector3(0.99, 0.03, 0.02)],   # top edge
+		[Vector3(0, -0.325, 0), Vector3(0.99, 0.03, 0.02)],  # bottom edge
+		[Vector3(0.49, 0, 0), Vector3(0.03, 0.65, 0.02)],    # fly edge
+	]:
+		var fr_mi := MeshInstance3D.new()
+		var fr_box := BoxMesh.new()
+		fr_box.size = fr[1]
+		fr_mi.mesh = fr_box
+		fr_mi.position = fr[0]
+		fr_mi.material_override = fringe_mat
+		cloth.add_child(fr_mi)
+
 	b.flag.visible = false
 
 func _fill_figs(b: Batt, n: int = MEN) -> void:
@@ -6070,9 +6897,62 @@ func _reslot(b: Batt) -> void:
 		b.figs[i]["slot"] = e["p"]
 		b.figs[i]["company"] = int(e["c"])
 		b.figs[i]["face"] = float(e.get("f", 0.0))
+	_post_file_closers(b)
+
+# File-closers: post the sergeants/corporals (and any subaltern serving in the ranks) in the
+# REAR rank of a line/column — and the INTERIOR of a square — historically where NCOs stood,
+# behind the firing line, shielded by the men in front from the fire that takes the front rank
+# first (see _kill_some / the ray fire). Only the PLAYER's battalion carries named ranks (the
+# fig→man link), so this is what keeps your trained leaders alive through a mauling. The line
+# already lands them there by index; this makes it explicit and holds it true in EVERY
+# formation (the square especially, where the raw layout would put low-index men on the
+# exposed outer face). Swaps only POSITIONS between figs — each man keeps his identity/skill.
+func _post_file_closers(b: Batt) -> void:
+	if b.roster.is_empty() or b.figs.size() < 8 or b.formation == "skirmish":
+		return
+	var n := b.figs.size()
+	var score := PackedFloat32Array()
+	score.resize(n)
+	for i in range(n):
+		var sl: Vector2 = b.figs[i]["slot"]
+		score[i] = (-sl.length()) if b.formation == "square" else (-sl.y)   # higher = safer (rear / interior)
+	var ncos: Array = []
+	for i in range(n):
+		var man = b.figs[i].get("man", null)
+		if man != null and String(man["rank"]) in ["Sgt.", "Cpl.", "C/Sgt.", "Lt."]:
+			ncos.append(i)
+	if ncos.is_empty():
+		return
+	var order: Array = range(n)
+	order.sort_custom(func(a, c): return score[a] > score[c])   # safest slots first
+	var want_safe := {}
+	for j in range(ncos.size()):
+		want_safe[int(order[j])] = true
+	var need: Array = []                       # file-closers NOT already in a safe slot
+	for i in ncos:
+		if not want_safe.has(i):
+			need.append(i)
+	var ni := 0
+	for j in range(ncos.size()):
+		if ni >= need.size():
+			break
+		var safe_i := int(order[j])
+		var occ = b.figs[safe_i].get("man", null)
+		if occ != null and String(occ["rank"]) in ["Sgt.", "Cpl.", "C/Sgt.", "Lt."]:
+			continue                           # this safe slot already holds a file-closer
+		var nco_i: int = need[ni]
+		if score[nco_i] >= score[safe_i]:
+			continue                           # no real improvement (e.g. line ties) — leave him be
+		ni += 1
+		for key in ["slot", "company", "face"]:   # trade POSITIONS; the man links stay put
+			var tmp = b.figs[safe_i][key]
+			b.figs[safe_i][key] = b.figs[nco_i][key]
+			b.figs[nco_i][key] = tmp
 
 # =============================================================== SKILLS & ROSTER
 const SKILL_KEYS := ["reload", "aim", "melee", "discipline", "stamina"]
+const LEADER_RANKS := ["Cpl.", "Sgt.", "C/Sgt.", "Lt.", "Capt."]   # the cadre that steadies the men
+const NCO_RANKS := ["Sgt.", "Cpl.", "C/Sgt."]                      # file-closers shown behind each company
 const SKILL_NAMES := { "reload": "Drill", "aim": "Marksmanship", "melee": "Bayonet",
 	"discipline": "Discipline", "stamina": "Stamina" }
 const _SURNAMES := ["Sharpe", "Harper", "Cooper", "Hagman", "Perkins", "Tongue", "Harris",
@@ -6100,7 +6980,8 @@ func _fatigue_aim_mul(b: Batt) -> float:
 	return 1.0 - clampf(b.fatigue / 100.0, 0.0, 1.0) * 0.35
 # discipline buys lasting order — a steady battalion has more cohesion to spend before it breaks
 func _disc_cohesion(b: Batt) -> float:
-	return lerpf(72.0, 122.0, clampf(_sk(b, "discipline") / 100.0, 0.0, 1.0))
+	# the order a battalion can hold rises with discipline AND with a full leadership cadre
+	return lerpf(72.0, 122.0, clampf(_sk(b, "discipline") / 100.0, 0.0, 1.0)) * lerpf(0.82, 1.0, b._leadership)
 
 func _quality_label(base: float) -> String:
 	if base >= 84.0: return "elite"
@@ -6158,16 +7039,17 @@ func _build_roster(b: Batt) -> void:
 	var n := b.figs.size()
 	if n <= 0:
 		return
-	var ncos := clampi(int(round(float(n) / 90.0)), 3, 9)   # a sergeant to roughly each company
+	var per_coy := maxi(1, int(ceil(float(n) / float(b.companies))))   # men to a company
 	for i in range(n):
-		var coy := (i * b.companies) / maxi(1, n)
+		var coy := mini(i / per_coy, b.companies - 1)
+		var within := i - coy * per_coy        # his place within his own company
 		var rank := "Pte."
 		if i == 0:
-			rank = "Capt."          # the commanding officer (you)
-		elif i <= ncos:
-			rank = "Sgt."
-		elif i <= ncos * 3:
-			rank = "Cpl."
+			rank = "Capt."          # you, at the head of the colour company
+		elif within == 0:
+			rank = "Sgt."           # each company fields its OWN sergeant (a file-closer)
+		elif within <= 2:
+			rank = "Cpl."           # two corporals to a company
 		var lift := 0.0
 		if rank == "Capt.": lift = 16.0
 		elif rank == "Sgt.": lift = 11.0
@@ -6176,6 +7058,14 @@ func _build_roster(b: Batt) -> void:
 		for key in SKILL_KEYS:
 			man[key] = clampf(_sk(b, key) + lift + randf_range(-12.0, 12.0), 6.0, 99.0)
 		b.roster.append(man)
+		if i > 0:
+			b.figs[i]["man"] = man   # THIS named man IS this soldier on the field (the Capt is you, mounted)
+	# the establishment cadre: the leaders the battalion fields at full strength (the denominator
+	# the living-leader count is measured against, so the line grows brittle as they fall)
+	b._leaders0 = 0
+	for m in b.roster:
+		if String(m["rank"]) in LEADER_RANKS:
+			b._leaders0 += 1
 	# the officers you commissioned on the intro screen lead the companies of YOUR battalion
 	if b.is_player and GameConfig.has_militia and not GameConfig.militia_officers.is_empty():
 		var offs: Array = GameConfig.militia_officers
@@ -6200,10 +7090,13 @@ func _reprofile(b: Batt) -> void:
 		return
 	var sums := { "reload": 0.0, "aim": 0.0, "melee": 0.0, "discipline": 0.0, "stamina": 0.0 }
 	var live := 0
+	var leaders := 0
 	for m in b.roster:
 		if not m["alive"]:
 			continue
 		live += 1
+		if String(m["rank"]) in LEADER_RANKS:
+			leaders += 1
 		for key in SKILL_KEYS:
 			sums[key] += float(m[key])
 	if live == 0:
@@ -6216,9 +7109,25 @@ func _reprofile(b: Batt) -> void:
 			continue
 		b.skill[key] = sums[key] / float(live)
 	b.exp_mul = _reload_factor(b)
+	# LEADERSHIP: the living cadre vs the establishment, scaled to current strength (so ordinary
+	# losses keep it ~1.0 — it only sinks when the LEADERS themselves are cut down). Drives the
+	# battalion's steadiness in _update_morale / _disc_cohesion / _update_rally.
+	if b._leaders0 > 0:
+		var sfrac := clampf(float(b.figs.size()) / float(maxi(1, b.start_men)), 0.0, 1.0)
+		var expected := maxf(1.0, float(b._leaders0) * sfrac)
+		var lead := clampf(float(leaders) / expected, 0.35, 1.0)
+		if b.is_player and lead < 0.6 and not b._lead_warned:
+			b._lead_warned = true
+			_send_player_despatch("[color=#ff9a8a]Your sergeants and officers are falling[/color] — without the file-closers the men begin to waver.", {})
+		elif lead >= 0.78:
+			b._lead_warned = false        # cadre restored (promotions / recruits) — re-arm the warning
+		b._leadership = lead
 
-# Keep the named roster in step with the strength: as figs fall, mark men dead from the
-# rank and file first (privates before corporals before sergeants), so the leaders endure.
+# Keep the named roster in step with the strength. Musketry now kills the SPECIFIC man whose
+# soldier was shot (see _drop_fig, via the fig→man link), so the men who fall are whoever the
+# enemy hit — a marksman can be lost. This reconciles any REMAINING shortfall (deaths through
+# paths that don't carry the link, e.g. melee) by dropping the rank and file first, then always
+# re-derives the battalion profile so the average tracks both casualties and battlefield blooding.
 func _sync_roster_losses(b: Batt) -> void:
 	if b.roster.is_empty():
 		return
@@ -6228,20 +7137,18 @@ func _sync_roster_losses(b: Batt) -> void:
 		if m["alive"]:
 			live += 1
 	var to_kill := live - want
-	if to_kill <= 0:
-		return
-	var order := { "Pte.": 0, "Cpl.": 1, "Sgt.": 2, "C/Sgt.": 3, "Lt.": 4, "Capt.": 5 }
-	# walk privates → leaders, dropping the rank and file first
-	for tier in range(6):
-		if to_kill <= 0:
-			break
-		for m in b.roster:
+	if to_kill > 0:
+		var order := { "Pte.": 0, "Cpl.": 1, "Sgt.": 2, "C/Sgt.": 3, "Lt.": 4, "Capt.": 5 }
+		for tier in range(6):
 			if to_kill <= 0:
 				break
-			if m["alive"] and int(order.get(m["rank"], 0)) == tier:
-				m["alive"] = false
-				to_kill -= 1
-	_reprofile(b)
+			for m in b.roster:
+				if to_kill <= 0:
+					break
+				if m["alive"] and int(order.get(m["rank"], 0)) == tier:
+					m["alive"] = false
+					to_kill -= 1
+	_reprofile(b)   # always: the men's average shifts as they fall AND as they blood themselves
 
 func _dims(n: int, formation: String) -> Vector2i:
 	if formation == "march":
@@ -6411,6 +7318,130 @@ func _build_guns() -> void:
 				_make_gun(g)
 				guns.append(g)
 
+# A detailed gun-crew figure (the artillery's own branch dress: brass/buff trim, a round
+# forage cap instead of a shako, a cartridge pouch at the hip, no crossbelts or gold lace).
+func _gunner_mesh() -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	_add_box(st, Vector3(0, 0.175, 0.0), Vector3(0.38, 0.46, 0.22))         # coat body
+	_add_box(st, Vector3(0, -0.02, -0.08), Vector3(0.34, 0.18, 0.12))      # short coat skirt (back)
+	_add_box(st, Vector3(0, 0.40, 0.0), Vector3(0.32, 0.06, 0.225))        # collar
+	_add_box(st, Vector3(0, 0.18, 0.118), Vector3(0.20, 0.36, 0.03))       # lapel / plastron
+	_add_box(st, Vector3(0, 0.0, 0.10), Vector3(0.42, 0.07, 0.18))         # waist belt
+	_add_box(st, Vector3(0.22, -0.08, 0.16), Vector3(0.12, 0.13, 0.08))    # cartridge pouch (hip)
+	for sx in [-0.255, 0.255]:
+		_add_box(st, Vector3(sx, 0.17, 0.0), Vector3(0.11, 0.44, 0.125))      # sleeve
+		_add_box(st, Vector3(sx, -0.05, 0.0), Vector3(0.12, 0.07, 0.135))     # cuff
+		_add_box(st, Vector3(sx, -0.15, -0.01), Vector3(0.095, 0.10, 0.105)) # hand
+	for sx in [-0.10, 0.10]:
+		_add_box(st, Vector3(sx, -0.45, 0), Vector3(0.16, 0.78, 0.19))        # leg
+	_add_box(st, Vector3(0, 0.555, 0), Vector3(0.205, 0.21, 0.205))         # head
+	_add_cyl(st, Vector3(0, 0.70, 0), 0.165, 0.155, 0.10, 10)               # forage cap body
+	_add_box(st, Vector3(0, 0.655, 0.155), Vector3(0.14, 0.03, 0.07))      # cap peak
+	_add_box(st, Vector3(0, 0.765, 0), Vector3(0.05, 0.035, 0.05))         # cap top button
+	return st.commit()
+
+func _gunner_shader(coat: Color) -> ShaderMaterial:
+	var sh := Shader.new()
+	sh.code = """
+shader_type spatial;
+uniform vec3 coat_col;
+uniform vec3 trim = vec3(0.62, 0.50, 0.22);    // brass / buff — the artillery's own colour
+uniform vec3 skin = vec3(0.76, 0.58, 0.46);
+varying float vy;
+varying float vx;
+varying float vz;
+void vertex() { vy = VERTEX.y; vx = VERTEX.x; vz = VERTEX.z; }
+void fragment() {
+	vec3 col = coat_col;
+	if (vy < -0.05) col = vec3(0.16, 0.16, 0.18);                          // dark trousers
+	if (vy > 0.37 && vy < 0.43) col = trim;                                // collar
+	if (vz > 0.09 && abs(vx) < 0.13 && vy > 0.0 && vy < 0.36) col = trim;  // lapel
+	if (abs(vx) > 0.20 && vy > -0.09 && vy < -0.015) col = trim;           // cuffs
+	if (vy > -0.04 && vy < 0.07 && vz > 0.0) col = vec3(0.30, 0.27, 0.20); // waist belt (buff leather)
+	if (vx > 0.13 && vy < -0.01 && vy > -0.22) col = vec3(0.22, 0.16, 0.10); // cartridge pouch
+	if (abs(vx) > 0.20 && vy < -0.10) col = skin;                          // hands
+	if (vy > 0.44 && vy < 0.65) col = skin;                                // head
+	if (vy >= 0.65 && vy < 0.76) col = vec3(0.07, 0.07, 0.08);             // forage cap body
+	if (vz > 0.10 && vy > 0.60 && vy < 0.70) col = vec3(0.05, 0.05, 0.06); // cap peak
+	if (vy >= 0.75) col = trim;                                            // cap top button
+	ALBEDO = col;
+	ROUGHNESS = 0.85;
+}
+"""
+	var m := ShaderMaterial.new()
+	m.shader = sh
+	m.set_shader_parameter("coat_col", Vector3(coat.r, coat.g, coat.b))
+	return m
+
+# Lazily build (once) and return [mesh, material] for a gunner of the given team —
+# every gun on the field shares the same two materials, so building 30+ pieces costs
+# nothing extra beyond the first gunner of each side.
+func _gunner_assets(team: int) -> Array:
+	if _gunner_mesh_cache == null:
+		_gunner_mesh_cache = _gunner_mesh()
+	if _gunner_mats[team] == null:
+		_gunner_mats[team] = _gunner_shader(team_color(team).darkened(0.15))
+	return [_gunner_mesh_cache, _gunner_mats[team]]
+
+# A draft horse in harness — the same body plan as the cavalry's mount but stripped of
+# saddle/shabraque/stirrups and given a collar, back band and breeching strap instead,
+# since it tows the limber rather than carries a rider.
+func _draft_horse_mesh() -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	_add_box(st, Vector3(0, 0.95, 0), Vector3(0.46, 0.58, 1.30))            # barrel
+	_add_box(st, Vector3(0, 0.98, 0.60), Vector3(0.42, 0.48, 0.38))        # chest
+	_add_box(st, Vector3(0, 0.98, -0.70), Vector3(0.46, 0.55, 0.46))       # hindquarters
+	_add_box(st, Vector3(0, 1.48, 0.95), Vector3(0.24, 0.50, 0.40))        # neck
+	_add_box(st, Vector3(0, 1.72, 1.28), Vector3(0.20, 0.24, 0.38))        # head
+	_add_box(st, Vector3(0, 1.62, 1.46), Vector3(0.16, 0.14, 0.14))        # muzzle
+	for ex in [-0.06, 0.06]:
+		_add_box(st, Vector3(ex, 1.88, 1.06), Vector3(0.045, 0.12, 0.045))    # ears
+	_add_box(st, Vector3(0, 1.50, 0.95), Vector3(0.30, 0.10, 0.46))        # mane crest
+	_add_box(st, Vector3(0, 0.76, -1.00), Vector3(0.12, 0.58, 0.12))       # tail
+	for lp in [Vector2(0.17, 0.48), Vector2(-0.17, 0.48), Vector2(0.19, -0.52), Vector2(-0.19, -0.52)]:
+		_add_box(st, Vector3(lp.x, 0.34, lp.y), Vector3(0.14, 0.68, 0.16))        # leg
+		_add_box(st, Vector3(lp.x, 0.02, lp.y + 0.02), Vector3(0.16, 0.12, 0.19)) # hoof
+	_add_box(st, Vector3(0, 1.20, 0.58), Vector3(0.36, 0.22, 0.18))        # neck collar (harness)
+	_add_box(st, Vector3(0, 1.08, -0.05), Vector3(0.42, 0.10, 0.30))       # back band
+	_add_box(st, Vector3(0, 0.92, -0.62), Vector3(0.40, 0.06, 0.10))       # breeching strap (hip band)
+	return st.commit()
+
+func _draft_horse_shader(coat: Color) -> ShaderMaterial:
+	var sh := Shader.new()
+	sh.code = """
+shader_type spatial;
+uniform vec3 coat_col;
+varying float vy;
+varying float vz;
+void vertex() { vy = VERTEX.y; vz = VERTEX.z; }
+void fragment() {
+	vec3 col = coat_col;
+	if (vy < 0.10) col = vec3(0.07, 0.06, 0.05);                                     // hooves
+	if (vz < -0.85) col = vec3(0.05, 0.05, 0.05);                                    // tail
+	if (vy > 1.40 && vz > 0.75 && vz < 1.15) col = vec3(0.07, 0.06, 0.05);           // mane
+	if (vz > 1.35) col = vec3(0.10, 0.08, 0.07);                                     // muzzle
+	if (vy > 1.05 && vy < 1.32 && vz > 0.35 && vz < 0.85) col = vec3(0.32, 0.25, 0.14); // collar
+	if (vy > 0.98 && vy < 1.20 && vz > -0.35 && vz < 0.20) col = vec3(0.30, 0.24, 0.14); // back band
+	if (vy > 0.82 && vy < 1.00 && vz < -0.45) col = vec3(0.30, 0.24, 0.14);          // breeching
+	ALBEDO = col;
+	ROUGHNESS = 0.85;
+}
+"""
+	var m := ShaderMaterial.new()
+	m.shader = sh
+	m.set_shader_parameter("coat_col", Vector3(coat.r, coat.g, coat.b))
+	return m
+
+# Lazily build (once) the shared draft-horse mesh and a couple of coat-colour variants
+# (bay / black) so every limber and caisson team draws from the same two materials.
+func _draft_horse_assets() -> Array:
+	if _draft_horse_mesh_cache == null:
+		_draft_horse_mesh_cache = _draft_horse_mesh()
+		_draft_horse_mats = [_draft_horse_shader(Color(0.34, 0.22, 0.12)), _draft_horse_shader(Color(0.14, 0.13, 0.12))]
+	return [_draft_horse_mesh_cache, _draft_horse_mats]
+
 # Build one piece: a bronze barrel on a wooden carriage with two wheels and a crew.
 func _make_gun(g: Gun) -> void:
 	var n := Node3D.new()
@@ -6468,19 +7499,18 @@ func _make_gun(g: Gun) -> void:
 	tube.material_override = bronze
 	barrel.add_child(tube)
 
-	# the crew — capsules clustered at the breech (the last one is the rammer, who
-	# steps up to the muzzle to load). Kept as nodes so they can be animated.
+	# the crew — detailed gunner figures clustered at the breech (the last is the rammer,
+	# who steps up to the muzzle to load). Each crewman is a Node3D wrapping the shared
+	# mesh, so the existing per-node crew animation and casualty code keep working unchanged.
+	var gassets := _gunner_assets(g.team)
 	for off in [Vector3(0.8, 0, -0.4), Vector3(-0.8, 0, -0.4), Vector3(0, 0, -1.4)]:
-		var crew := MeshInstance3D.new()
-		var cc := CapsuleMesh.new()
-		cc.radius = 0.2
-		cc.height = 1.7
-		crew.mesh = cc
-		var base := Vector3(off.x, CAP_HALF, off.z)
+		var crew := Node3D.new()
+		var cmi := MeshInstance3D.new()
+		cmi.mesh = gassets[0]
+		cmi.material_override = gassets[1]
+		crew.add_child(cmi)
+		var base := Vector3(off.x, 0.85, off.z)
 		crew.position = base
-		var crewmat := StandardMaterial3D.new()
-		crewmat.albedo_color = team_color(g.team).darkened(0.25)
-		crew.material_override = crewmat
 		n.add_child(crew)
 		g.crew.append(crew)
 		g.crew_base.append(base)
@@ -6490,9 +7520,6 @@ func _make_gun(g: Gun) -> void:
 	g.limber_group = Node3D.new()
 	n.add_child(g.limber_group)
 	g.limber_group.visible = false
-	var horsemat := StandardMaterial3D.new()
-	horsemat.albedo_color = Color(0.20, 0.13, 0.08)
-	horsemat.roughness = 0.9
 	var chest := MeshInstance3D.new()
 	var cb := BoxMesh.new()
 	cb.size = Vector3(0.9, 0.55, 1.0)
@@ -6511,17 +7538,18 @@ func _make_gun(g: Gun) -> void:
 		lw.position = Vector3(sx2, 0.5, 1.5)
 		lw.material_override = wood
 		g.limber_group.add_child(lw)
+	var dassets := _draft_horse_assets()
+	var dmesh: ArrayMesh = dassets[0]
+	var dmats: Array = dassets[1]
+	var hi := 0
 	for hz in [3.0, 4.7]:
 		for sx3 in [-0.45, 0.45]:
 			var horse := MeshInstance3D.new()
-			var hc := CapsuleMesh.new()
-			hc.radius = 0.3
-			hc.height = 1.7
-			horse.mesh = hc
-			horse.rotation = Vector3(PI * 0.5, 0, 0)   # lay it along the travel direction
-			horse.position = Vector3(sx3, 0.9, hz)
-			horse.material_override = horsemat
+			horse.mesh = dmesh
+			horse.material_override = dmats[hi % dmats.size()]
+			horse.position = Vector3(sx3, 0, hz)       # the mesh already faces +Z, the direction of travel
 			g.limber_group.add_child(horse)
+			hi += 1
 
 # Pick a gun's target. It obeys its brigade's fire mission when one is set and in
 # range, otherwise prioritises by doctrine: the nearest FORMED body (skirmishers make
@@ -6581,7 +7609,7 @@ func _drop_crewman(g: Gun, from_pos: Vector3) -> void:
 	if g.crew.is_empty():
 		g.dead = true
 		return
-	var node: MeshInstance3D = g.crew.pop_back()
+	var node: Node3D = g.crew.pop_back()
 	g.crew_base.pop_back()
 	var wp: Vector3 = g.node.to_global(node.position)
 	var knock := wp - from_pos
@@ -6957,6 +7985,7 @@ func _process(delta: float) -> void:
 				_sim_player(b, bd)           # any player-led battalion
 			else:
 				_sim_ai(b, bd)
+		_musket_snd_left = MUSKET_SND_BUDGET   # refresh the per-frame shot-voice budget
 		for b in battalions:
 			if b._active:
 				_update_firing(b, b._tick_dt)
@@ -6983,6 +8012,7 @@ func _process(delta: float) -> void:
 		_update_caissons(delta)          # the ammunition waggons plod up from the rear
 		_update_couriers(delta)
 		_update_capture(delta)           # towns change hands as forces hold them
+		_update_supply(delta)            # wagon trains haul materials up; escort missions; interdiction
 		_update_combat(delta)            # your own sabre, pistol and mortality
 		_update_prestige()               # your renown rises and falls with the butcher's bill
 		_update_objective()              # has your personal objective been won?
@@ -6991,6 +8021,7 @@ func _process(delta: float) -> void:
 	else:
 		# client: no sim — battalions come from the host via _apply_state. We still
 		# generate the continuous fire-at-will crackle locally from synced state.
+		_musket_snd_left = MUSKET_SND_BUDGET   # refresh the per-frame shot-voice budget (client too)
 		for b in battalions:
 			b.flinch = maxf(0.0, b.flinch - delta * 2.2)
 			_client_firing_fx(b, delta)
@@ -6999,6 +8030,9 @@ func _process(delta: float) -> void:
 		_shake = maxf(_shake, player.flinch * 0.4)   # you FEEL your unit get hit
 	_update_ragdolls(delta)
 	_update_wounded(delta)
+	_update_camp_scene(delta)         # pitch/strike the bivouac; the firelight flickers
+	_update_drill(delta)              # the volley drill: targets re-set, safety watched
+	_update_maneuver_drill(delta)     # the manoeuvre drill: watch for the called formation
 	_update_shots(delta)
 	_update_drums(delta)
 	_update_marching_drums(delta)
@@ -7010,15 +8044,23 @@ func _process(delta: float) -> void:
 
 # Each battalion's drummer beats the march while the unit is on the move: a random
 # cadence is struck up when it starts moving and falls silent the moment it halts.
-func _update_marching_drums(_delta: float) -> void:
-	if snd_marchdrum.is_empty() or cam == null:
+func _update_marching_drums(delta: float) -> void:
+	if cam == null:
 		return
+	var have_drums := not snd_marchdrum.is_empty()
 	for b in battalions:
+		var moved := b.pos.distance_to(b.last_pos)
+		b.last_pos = b.pos
+		# the pale haze a marching (or routing) body of men kicks up underfoot — throttled,
+		# scaled to strength, and only spawned where the camera can actually see it
+		if moved > 0.01 and not b.figs.is_empty() and cam.position.distance_to(b.pos) < DUST_RANGE \
+				and randf() < delta * 5.0:
+			_emit_march_dust(b)
+		if not have_drums:
+			continue
 		var mp: AudioStreamPlayer3D = b.march_player
 		if mp == null:
 			continue
-		var moved := b.pos.distance_to(b.last_pos)
-		b.last_pos = b.pos
 		var moving := moved > 0.004 and not b.spent and b.state != "routing" and not b.drummer_down
 		var near := cam.position.distance_to(b.pos) < 950.0   # drums carry down the line
 		if moving and near:
@@ -7142,6 +8184,7 @@ func _abstract_fire(b: Batt, delta: float, moving: bool) -> void:
 func _update_firing(b: Batt, delta: float) -> void:
 	b.has_target = false
 	b.masked = false
+	b.volley_cd = maxf(0.0, b.volley_cd - delta)   # the line reloads between commanded volleys
 	# a line does not fire on the move — it must halt to load and to fire
 	var batt_moving := b.pos.distance_to(b.fire_pos) > 0.012
 	b.fire_pos = b.pos
@@ -7269,6 +8312,8 @@ func _update_firing(b: Batt, delta: float) -> void:
 	var shots := 0                   # rounds expended this frame (for ammunition)
 	var loading := 0                 # men working the ramrod this frame (for the reload sound)
 	var volley_pts: Array = []
+	var b_aim := _sk(b, "aim")       # the battalion's TRAINED marksmanship — the baseline each man builds on
+	var fat_aim := _fatigue_aim_mul(b)   # weary hands shoot worse (a whole-battalion tell)
 	for f in b.figs:
 		if (f["slot"] as Vector2).y < fire_band:
 			continue                     # rear ranks don't fire
@@ -7297,7 +8342,7 @@ func _update_firing(b: Batt, delta: float) -> void:
 					_emit_flash(mp)
 					_emit_smoke(mp, fwd)
 					_emit_muzzle_bloom(mp, fwd)
-					_play_shot(mp)       # individual crack
+					_play_shot_line(mp)       # individual crack (budgeted)
 			else:
 				massed_men += 1
 				if vis:
@@ -7305,14 +8350,31 @@ func _update_firing(b: Batt, delta: float) -> void:
 					_emit_smoke(mp, fwd)
 					_emit_smoke(mp, fwd)
 					_emit_muzzle_bloom(mp, fwd)
+					_play_shot_line(mp)       # each musket in the volley reports too (budgeted)
 					volley_pts.append(mp)
 			# THIS man's own range to the enemy decides his shot, lifted by enfilade and a held volley
 			var mfwd := (tpos.x - w.x) * fwd.x + (tpos.z - w.z) * fwd.z   # forward range to the enemy line
 			if mfwd < 2.0:
 				mfwd = Vector2(w.x - tpos.x, w.z - tpos.z).length()
-			var mhc := _hit_chance(mfwd) * enf_mult * _aim_factor(b) * _fatigue_aim_mul(b)   # marksmanship & weariness
+			# INDIVIDUAL marksmanship. For the PLAYER's battalion every soldier IS a named man on
+			# the roster (f["man"], linked in _build_roster), so he fires with HIS OWN trained aim —
+			# the marksman you drilled in camp is the deadly shot here, and his battlefield hits
+			# harden his eye AND show on his roster record (he becomes a marksman the hard way).
+			# Other battalions' men carry a stable personal deviation (f["marks"]) instead.
+			var man = f.get("man", null)
+			var maim: float
+			if man != null and bool(man["alive"]):
+				maim = float(man["aim"])
+			else:
+				var pm := float(f.get("marks", 1.0e9))
+				if pm > 1.0e8:
+					pm = randfn(0.0, 14.0)
+					f["marks"] = pm
+				maim = clampf(b_aim + pm, 6.0, 99.0)
+			var mhc := _hit_chance(mfwd) * enf_mult * lerpf(0.7, 1.34, maim / 100.0) * fat_aim
 			if held_close:
 				mhc *= HELD_VOLLEY_HIT
+			var felled0 := felled
 			if randf() < minf(0.97, mhc):
 				if aim_cav:
 					kills += 1
@@ -7331,6 +8393,14 @@ func _update_firing(b: Batt, delta: float) -> void:
 						kills += 1
 						felled += 1
 						_drop_fig(hit["b"], hit["i"], sd)
+			# a telling shot hardens the man's eye and grows his tally — for a NAMED soldier it
+			# shows on the camp roster, so the veterans who do the killing become your marksmen
+			if felled > felled0:
+				if man != null:
+					man["aim"] = minf(99.0, float(man["aim"]) + 0.04)
+					man["kills"] = int(man["kills"]) + 1
+				else:
+					f["marks"] = minf(float(f.get("marks", 0.0)) + 0.06, 30.0)
 			var rmul := INDEP_RELOAD_MUL if atwill else 1.0   # at-will fire loads more raggedly
 			f["reload"] = RELOAD_TIME * shaken * b.exp_mul * _fatigue_reload_mul(b) * rmul * randf_range(0.78, 1.3)
 		else:
@@ -7446,19 +8516,22 @@ func _update_morale(b: Batt, delta: float) -> void:
 			call_deferred("_recall_skirmishers", b.parent)   # deferred: mutates the array we iterate
 		_break_unit(b)
 		return
+	# the living NCO/officer cadre steadies the men: spirits recover faster, the line gives way
+	# at a lower nerve and sheds its order more slowly. As the leaders fall, all of this decays.
+	var lead := b._leadership
 	b.calm_t += delta
 	if b.calm_t > 4.0:               # NERVE returns once the fire slackens (cohesion does NOT)
-		var rate := MORALE_RECOVER * (0.7 if b.state == "routing" else 1.0)
+		var rate := MORALE_RECOVER * (0.7 if b.state == "routing" else 1.0) * lerpf(0.72, 1.12, lead)
 		b.morale = minf(100.0, b.morale + rate * delta)
 	# DISCIPLINE tells under pressure: a steady regiment holds at a lower nerve, loses its
 	# order more slowly when it does run, and tired men crack sooner
 	var disc := clampf(_sk(b, "discipline") / 100.0, 0.0, 1.0)
 	var fat := clampf(b.fatigue / 100.0, 0.0, 1.0)
-	var rout_thr := ROUT_THRESHOLD * lerpf(1.28, 0.74, disc) * (1.0 + fat * 0.18)
+	var rout_thr := ROUT_THRESHOLD * lerpf(1.28, 0.74, disc) * lerpf(1.22, 0.95, lead) * (1.0 + fat * 0.18)
 	# running wears the unit out fast, and a rout that lasts too long becomes permanent
 	if b.state == "routing":
 		b.rout_t += delta
-		b.cohesion -= COH_ROUT_RATE * lerpf(1.3, 0.72, disc) * delta
+		b.cohesion -= COH_ROUT_RATE * lerpf(1.3, 0.72, disc) * lerpf(1.2, 0.9, lead) * delta
 	# THE BREAK POINT: order gone, or run too long without an officer steadying them
 	if b.cohesion <= COHESION_BREAK or (b.state == "routing" and b.rout_t > MAX_ROUT_TIME):
 		_break_unit(b)
@@ -7587,6 +8660,519 @@ func _blood_skill(b: Batt) -> void:
 		for m in b.roster:
 			if m["alive"]:
 				m[key] = clampf(float(m[key]) + gain * 0.9, 6.0, 99.0)
+
+# ============================================================ the LIVING encampment
+# When the battalion makes camp (and the field is safe), a bivouac is pitched around it —
+# rows of ridge tents, campfires with a cook-pot, stacked arms, supply crates, and a few men
+# resting off-duty by the fires. Struck the instant camp breaks or the enemy comes near. It's
+# the player's ONE battalion at ONE spot near the camera, so it's individual nodes (like the
+# hero), never the affordability-keystone MultiMeshes.
+func _update_camp_scene(delta: float) -> void:
+	var show := player != null and player.encamped and _camp_safe(player)
+	if not show:
+		if _camp_node != null:
+			_strike_camp_scene()
+		return
+	if _camp_node == null or player.pos.distance_to(_camp_scene_at) > 70.0:
+		_strike_camp_scene()
+		_build_camp_scene(player.pos, player.facing)
+	# the fires breathe: flame height and firelight flicker, and bite harder against the dark
+	for f in _camp_fires:
+		var s := float(f["seed"])
+		var fl := 0.80 + 0.20 * sin(_t * 9.0 + s) * sin(_t * 5.3 + s * 1.7) + randf() * 0.05
+		var flame: MeshInstance3D = f["flame"]
+		if is_instance_valid(flame):
+			flame.scale = Vector3(0.9 + 0.1 * fl, fl, 0.9 + 0.1 * fl)
+		var light: OmniLight3D = f["light"]
+		if is_instance_valid(light):
+			light.light_energy = (1.4 + 1.2 * fl) * (0.6 + 0.9 * _night)
+	_animate_camp_actors()         # the men come to life: cooking, pacing, fetching, drilling
+
+func _strike_camp_scene() -> void:
+	if _camp_node != null:
+		_camp_node.queue_free()
+		_camp_node = null
+	_camp_fires.clear()
+	_camp_actors.clear()
+
+func _camp_part(mesh: Mesh, gx: float, gz: float, ly: float, mat: Material, rot := Vector3.ZERO) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	mi.mesh = mesh
+	mi.material_override = mat
+	mi.position = Vector3(gx, _gh(gx, gz) + ly, gz)
+	mi.rotation = rot
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_camp_node.add_child(mi)
+	return mi
+
+func _build_camp_scene(center: Vector3, facing: float) -> void:
+	_camp_node = Node3D.new()
+	add_child(_camp_node)
+	_camp_scene_at = center
+	var fwd := Vector3(sin(facing), 0, cos(facing))
+	var right := Vector3(fwd.z, 0, -fwd.x)
+	var coat_col: Color = GameConfig.UNIFORM_COLS[clampi(GameConfig.militia_uniform, 0, GameConfig.UNIFORM_COLS.size() - 1)]
+	var canvas := _hero_mat(Color(0.80, 0.76, 0.66), 0.96)
+	var canvas2 := _hero_mat(Color(0.72, 0.67, 0.57), 0.96)
+	var pole := _hero_mat(Color(0.30, 0.21, 0.12), 0.9)
+	var wood := _hero_mat(Color(0.34, 0.24, 0.13), 0.95)
+	var ember := _hero_mat(Color(0.20, 0.09, 0.05), 1.0)
+	var flame_mat := _hero_mat(Color(1.0, 0.55, 0.14), 0.5)
+	flame_mat.emission_enabled = true
+	flame_mat.emission = Color(1.0, 0.52, 0.14)
+	flame_mat.emission_energy_multiplier = 3.2
+	var iron := _hero_mat(Color(0.11, 0.11, 0.13), 0.6, 0.4)
+	var coat := _hero_mat(coat_col.lightened(0.05), 0.7)
+	var skin := _hero_mat(Color(0.74, 0.57, 0.44), 0.8)
+	# rows of ridge tents behind the line
+	for rowi in range(2):
+		var back := 26.0 + float(rowi) * 13.0
+		for k in range(-2, 3):
+			var tp := center - fwd * back + right * (float(k) * 9.0 + float(rowi % 2) * 4.5)
+			var cm: Material = canvas if (k + rowi) % 2 == 0 else canvas2
+			_camp_tent(tp.x, tp.z, facing, cm, pole)
+	var gear := _hero_mat(Color(0.12, 0.12, 0.14), 0.6, 0.35)   # muskets, tools, kit
+	# campfires with a cook-pot: a cook crouches and STIRS at each, a couple of men warm by it
+	for k in range(-1, 2):
+		var fp := center - fwd * 15.0 + right * (float(k) * 17.0)
+		_camp_fire(fp.x, fp.z, wood, ember, flame_mat, iron)
+		var cookp := fp - fwd * 1.5
+		var cook := _camp_man(cookp.x, cookp.z, atan2(fp.x - cookp.x, fp.z - cookp.z), "cook", coat, skin, gear)
+		cook["phase"] = randf() * TAU
+		cook["by"] = _gh(cookp.x, cookp.z)
+		_camp_actors.append(cook)
+		for m in range(2):
+			var ang := PI * 0.6 + PI * float(m) + float(k) * 0.5
+			var mp := fp + Vector3(cos(ang), 0, sin(ang)) * 2.6
+			var rest := _camp_man(mp.x, mp.z, atan2(fp.x - mp.x, fp.z - mp.z), "rest", coat, skin, gear)
+			rest["phase"] = randf() * TAU
+			_camp_actors.append(rest)
+	# stacked arms (tripods of muskets) dressed in front of the tents
+	for k in range(-2, 3):
+		var sp := center - fwd * 20.0 + right * (float(k) * 9.0 + 4.5)
+		_camp_stacked_arms(sp.x, sp.z, facing, iron, wood)
+	# a supply dump off one flank, with men carrying wood/water to and from the fires
+	var supply := center - fwd * 33.0 + right * 17.0
+	for k in range(3):
+		var cp := supply + right * (float(k % 2) * 2.6) - fwd * float(k) * 2.4
+		_camp_part(_box(2.0, 1.5, 2.0), cp.x, cp.z, 0.75, wood, Vector3(0, randf() * 0.7, 0))
+	for s in range(2):
+		var fire0 := center - fwd * 15.0 + right * (float(s * 2 - 1) * 17.0)
+		var fe := _camp_man(supply.x, supply.z, 0.0, "fetch", coat, skin, gear)
+		fe["phase"] = randf() * TAU
+		fe["a"] = Vector3(supply.x, 0, supply.z)
+		fe["b"] = Vector3(fire0.x, 0, fire0.z)
+		fe["face_b"] = atan2(fire0.x - supply.x, fire0.z - supply.z)
+		fe["face_a"] = atan2(supply.x - fire0.x, supply.z - fire0.z)
+		_camp_actors.append(fe)
+	# sentries pacing a beat along the camp's front, muskets shouldered
+	for s in range(2):
+		var mid := center - fwd * 7.0 + right * ((float(s) * 2.0 - 1.0) * 23.0)
+		var a0 := mid - right * 6.0
+		var b0 := mid + right * 6.0
+		var sen := _camp_man(a0.x, a0.z, 0.0, "sentry", coat, skin, gear)
+		sen["phase"] = randf() * TAU
+		sen["a"] = Vector3(a0.x, 0, a0.z)
+		sen["b"] = Vector3(b0.x, 0, b0.z)
+		sen["face_b"] = atan2(b0.x - a0.x, b0.z - a0.z)
+		sen["face_a"] = atan2(a0.x - b0.x, a0.z - b0.z)
+		_camp_actors.append(sen)
+	# a squad at drill off one flank — present and shoulder arms in slow unison, the sergeant watching
+	var dctr := center - fwd * 22.0 - right * 24.0
+	for d in range(6):
+		var dp := dctr + right * (float(d) * 1.5)
+		var dm := _camp_man(dp.x, dp.z, facing, "drill", coat, skin, gear)
+		dm["phase"] = float(d) * 0.05
+		_camp_actors.append(dm)
+	var sgtp := dctr - fwd * 3.0 + right * 4.0
+	var sgt := _camp_man(sgtp.x, sgtp.z, atan2(dctr.x - sgtp.x, dctr.z - sgtp.z), "rest", coat, skin, gear)
+	sgt["phase"] = randf() * TAU
+	_camp_actors.append(sgt)
+
+func _camp_tent(gx: float, gz: float, facing: float, canvas: Material, pole: Material) -> void:
+	# a ridge tent (prism) with a guy pole at the door and a dark entrance slit
+	_camp_part(_prism(4.6, 2.7, 5.2), gx, gz, 1.35, canvas, Vector3(0, facing, 0))
+	var fwd := Vector3(sin(facing), 0, cos(facing))
+	var dp := Vector3(gx, 0, gz) + fwd * 2.7
+	_camp_part(_box(0.10, 2.9, 0.10), dp.x, dp.z, 1.45, pole)                 # ridge pole at the door
+	_camp_part(_box(1.1, 1.9, 0.08), dp.x, dp.z, 0.95, _hero_mat(Color(0.10, 0.09, 0.08), 1.0), Vector3(0, facing, 0))  # door
+
+func _camp_fire(gx: float, gz: float, wood: Material, ember: Material, flame_mat: Material, iron: Material) -> void:
+	# a ring of embers, crossed logs, a flame, a cook-pot on a tripod, and the firelight
+	_camp_part(_cylm(0.95, 0.95, 0.18, 10), gx, gz, 0.06, ember)              # ash/ember ring
+	for a in range(3):
+		var ang := PI * float(a) / 3.0
+		_camp_part(_box(1.7, 0.18, 0.18), gx, gz, 0.22, wood, Vector3(0, ang, 0.05))   # crossed logs
+	var flame := _camp_part(_cylm(0.0, 0.42, 1.1, 8), gx, gz, 0.7, flame_mat)  # the flame (a cone)
+	# a cook-pot slung on a tripod over the fire
+	for a in range(3):
+		var ang := TAU * float(a) / 3.0
+		var lp := Vector3(gx, 0, gz) + Vector3(cos(ang), 0, sin(ang)) * 0.7
+		_camp_part(_box(0.06, 1.9, 0.06), lp.x, lp.z, 0.9, iron, Vector3(cos(ang) * 0.5, 0, sin(ang) * 0.5))   # tripod leg
+	_camp_part(_cylm(0.30, 0.38, 0.42, 10), gx, gz, 1.0, iron)                # the pot
+	var light := OmniLight3D.new()
+	light.light_color = Color(1.0, 0.66, 0.36)
+	light.omni_range = 16.0
+	light.light_energy = 2.0
+	light.position = Vector3(gx, _gh(gx, gz) + 1.0, gz)
+	_camp_node.add_child(light)
+	_camp_fires.append({ "flame": flame, "light": light, "seed": randf() * TAU })
+
+func _camp_stacked_arms(gx: float, gz: float, facing: float, iron: Material, wood: Material) -> void:
+	# three muskets stood on their butts, leaning together at the muzzle — arms piled for rest
+	for a in range(3):
+		var ang := facing + TAU * float(a) / 3.0
+		var lean := 0.22
+		_camp_part(_box(0.05, 1.7, 0.05), gx + cos(ang) * 0.18, gz + sin(ang) * 0.18, 0.85, iron,
+			Vector3(cos(ang) * lean, 0, sin(ang) * lean))
+
+# An articulated camp man: a body, a head and two SHOULDER-PIVOTED arms (Node3D pivots, so the
+# arms swing about the shoulder), wrapped in one Node3D so the whole man can pace/walk. Returned
+# as a dict of handles the animator drives each frame by his `kind` (rest/cook/sentry/fetch/drill).
+func _camp_man(gx: float, gz: float, face: float, kind: String, coat: Material, skin: Material, gear: Material) -> Dictionary:
+	var node := Node3D.new()
+	node.position = Vector3(gx, _gh(gx, gz), gz)
+	node.rotation.y = face
+	_camp_node.add_child(node)
+	var crouch := kind == "cook"
+	var bh := 0.66 if crouch else 0.98
+	var by := 0.50 if crouch else 0.80
+	var hy := 0.92 if crouch else 1.42
+	var sh_y := 0.66 if crouch else 1.16
+	var body := MeshInstance3D.new()
+	body.mesh = _capm(0.19, bh)
+	body.material_override = coat
+	body.position = Vector3(0, by, 0.0)
+	if crouch:
+		body.rotation.x = 0.5
+	body.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	node.add_child(body)
+	var head := MeshInstance3D.new()
+	head.mesh = _sph(0.135)
+	head.material_override = skin
+	head.position = Vector3(0, hy, (0.12 if crouch else 0.0))
+	head.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	node.add_child(head)
+	var pivs := {}
+	for side in [[-0.21, "armL"], [0.21, "armR"]]:
+		var piv := Node3D.new()
+		piv.position = Vector3(float(side[0]), sh_y, (0.08 if crouch else 0.0))
+		node.add_child(piv)
+		var arm := MeshInstance3D.new()
+		arm.mesh = _capm(0.057, 0.46)
+		arm.material_override = coat
+		arm.position = Vector3(0, -0.21, 0)
+		arm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		piv.add_child(arm)
+		pivs[String(side[1])] = piv
+	if kind == "sentry":
+		var musket := MeshInstance3D.new()
+		musket.mesh = _box(0.05, 1.6, 0.05)
+		musket.material_override = gear
+		musket.position = Vector3(0.21, 1.0, 0.10)
+		musket.rotation.z = 0.06
+		musket.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		node.add_child(musket)
+	return { "node": node, "head": head, "armL": pivs["armL"], "armR": pivs["armR"], "kind": kind }
+
+func _animate_camp_actors() -> void:
+	for a in _camp_actors:
+		var node = a.get("node", null)
+		if node == null or not is_instance_valid(node):
+			continue
+		var ph := float(a.get("phase", 0.0))
+		var armR = a.get("armR", null)
+		var armL = a.get("armL", null)
+		match String(a.get("kind", "")):
+			"rest":
+				node.rotation.z = sin(_t * 1.0 + ph) * 0.035            # shifts his weight, warms his hands
+				if armR != null: armR.rotation.x = -0.32 + sin(_t * 0.8 + ph) * 0.12
+				if armL != null: armL.rotation.x = -0.28 + sin(_t * 0.8 + ph + 1.0) * 0.10
+			"cook":
+				if armR != null:
+					armR.rotation.x = -1.05 + sin(_t * 3.2 + ph) * 0.32  # stirring the pot
+					armR.rotation.z = cos(_t * 3.2 + ph) * 0.32
+				node.position.y = float(a.get("by", node.position.y)) + absf(sin(_t * 1.6 + ph)) * 0.02
+			"sentry":
+				_walk_actor(a, node, ph, 0.45, armR, armL)
+			"fetch":
+				_walk_actor(a, node, ph, 0.62, armR, armL)
+			"drill":
+				var lvl := clampf(sin(_t * 0.5 + ph), 0.0, 1.0)         # present .. shoulder arms, in unison
+				if armR != null: armR.rotation.x = -1.45 * lvl
+				if armL != null: armL.rotation.x = -1.45 * lvl
+
+func _walk_actor(a: Dictionary, node, ph: float, speed: float, armR, armL) -> void:
+	var a0: Vector3 = a["a"]
+	var b0: Vector3 = a["b"]
+	var arg := _t * speed + ph
+	var u := 0.5 + 0.5 * sin(arg)
+	var p := a0.lerp(b0, u)
+	node.position = Vector3(p.x, _gh(p.x, p.z) + absf(sin(_t * 4.2 + ph)) * 0.03, p.z)
+	node.rotation.y = float(a["face_b"]) if cos(arg) >= 0.0 else float(a["face_a"])   # face the way he steps
+	if armR != null: armR.rotation.x = sin(_t * 5.0 + ph) * 0.3
+	if armL != null: armL.rotation.x = -sin(_t * 5.0 + ph) * 0.3
+
+# small primitive-mesh factories for the camp props (single instances, not instanced)
+func _cylm(rt: float, rb: float, h: float, sides: int) -> CylinderMesh:
+	var c := CylinderMesh.new()
+	c.top_radius = rt
+	c.bottom_radius = rb
+	c.height = h
+	c.radial_segments = sides
+	c.rings = 0
+	return c
+
+func _capm(radius: float, height: float) -> CapsuleMesh:
+	var c := CapsuleMesh.new()
+	c.radius = radius
+	c.height = maxf(height, radius * 2.0 + 0.01)
+	c.radial_segments = 8
+	c.rings = 3
+	return c
+
+func _mesh_child(parent: Node3D, mesh: Mesh, pos: Vector3, mat: Material, rot := Vector3.ZERO) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	mi.mesh = mesh
+	mi.material_override = mat
+	mi.position = pos
+	mi.rotation = rot
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(mi)
+	return mi
+
+# ============================================================ the VOLLEY DRILL (hands-on)
+# Straw men are set up at the butts in front of the battalion; you call Present (V) and Fire
+# (F) yourself. Each volley is MARKED on how many men fired together (synchronisation) and how
+# well it fell on the beat (a present, then a held pause, then fire) — crisp volleys harden the
+# battalion's reload/aim/discipline (and the named men with them), ragged ones earn little. The
+# straw is knocked flat by good shooting and set back up after a moment so the drill runs on.
+func _begin_drill() -> void:
+	if player == null or player.figs.is_empty():
+		return
+	if not _camp_safe(player):
+		_send_player_despatch("[color=#ff9a8a]The enemy stands too near to drill.[/color]", {})
+		return
+	_close_camp()
+	_drill_on = true
+	_drill_score = 50.0
+	_drill_volleys = 0
+	_drill_gain = 0.0
+	_drill_present_t = -10.0
+	_build_drill_targets()
+	_send_player_despatch("[color=#ffe9a8]VOLLEY DRILL[/color] — targets at the butts. [color=#cfe0ff]Present (V)[/color], hold the beat, then [color=#cfe0ff]Fire (F)[/color]. Open camp (C) to dismiss.", {})
+
+func _end_drill(summary := true) -> void:
+	if not _drill_on:
+		return
+	_drill_on = false
+	_clear_drill_targets()
+	if summary:
+		_send_player_despatch("[color=#9fe0a0]Drill dismissed.[/color]  %d volleys · drill %d/100 · +%.0f skill earned." % [_drill_volleys, int(round(_drill_score)), _drill_gain], {})
+
+func _clear_drill_targets() -> void:
+	if _drill_node != null:
+		_drill_node.queue_free()
+		_drill_node = null
+	_drill_targets.clear()
+
+func _build_drill_targets() -> void:
+	_clear_drill_targets()
+	_drill_node = Node3D.new()
+	add_child(_drill_node)
+	var fwd := Vector3(sin(player.facing), 0, cos(player.facing))
+	var right := Vector3(fwd.z, 0, -fwd.x)
+	var base := player.pos + fwd * 52.0
+	var n := 12
+	for i in range(n):
+		var off := (float(i) - float(n - 1) * 0.5) * 2.3
+		var p := base + right * off
+		var node := _make_straw_target(p, player.facing + PI)
+		_drill_targets.append({ "node": node, "alive": true, "down_t": 0.0 })
+
+func _make_straw_target(p: Vector3, face: float) -> Node3D:
+	var t := Node3D.new()
+	t.position = Vector3(p.x, _gh(p.x, p.z), p.z)
+	t.rotation.y = face
+	_drill_node.add_child(t)
+	var frame := _hero_mat(Color(0.34, 0.24, 0.13), 0.95)
+	var straw := _hero_mat(Color(0.74, 0.66, 0.36), 1.0)
+	var dark := _hero_mat(Color(0.30, 0.26, 0.18), 1.0)
+	for sx in [-0.55, 0.55]:
+		_mesh_child(t, _box(0.08, 2.0, 0.08), Vector3(sx, 1.0, 0), frame)        # frame post
+	_mesh_child(t, _box(1.25, 0.08, 0.08), Vector3(0, 1.9, 0), frame)            # crossbar
+	_mesh_child(t, _cylm(0.16, 0.20, 1.2, 8), Vector3(0, 1.05, 0), straw)        # straw body
+	_mesh_child(t, _sph(0.18), Vector3(0, 1.82, 0), straw)                       # straw head
+	_mesh_child(t, _box(0.42, 0.12, 0.30), Vector3(0, 1.2, 0), dark)             # a dark belt to aim at
+	return t
+
+func _update_drill(delta: float) -> void:
+	if not _drill_on:
+		return
+	if player == null or player.figs.is_empty() or not _camp_safe(player):
+		_end_drill()                       # broken off if the enemy comes up
+		return
+	# knocked-down straw men are stood back up after a moment, so the exercise can run on
+	for tgt in _drill_targets:
+		if not bool(tgt["alive"]):
+			tgt["down_t"] = float(tgt["down_t"]) - delta
+			if float(tgt["down_t"]) <= 0.0:
+				tgt["alive"] = true
+				var node: Node3D = tgt["node"]
+				if is_instance_valid(node):
+					node.rotation = Vector3(0, player.facing + PI, 0)
+
+func _knock_targets(frac: float) -> int:
+	var standing: Array = []
+	for tgt in _drill_targets:
+		if bool(tgt["alive"]):
+			standing.append(tgt)
+	standing.shuffle()
+	var k: int = mini(int(round(frac * float(standing.size()))), standing.size())
+	for i in range(k):
+		var tgt = standing[i]
+		tgt["alive"] = false
+		tgt["down_t"] = randf_range(2.5, 4.5)
+		var node: Node3D = tgt["node"]
+		if is_instance_valid(node):
+			node.rotation = Vector3(-1.3, player.facing + PI, 0)   # struck — flat on its back
+	return k
+
+func _score_drill_volley() -> void:
+	var b := player
+	var total := maxi(1, b.figs.size())
+	var ready := 0
+	for f in b.figs:
+		if float(f["reload"]) <= AIM_LEAD:
+			ready += 1
+	var sync := float(ready) / float(total)               # the fraction loaded & firing as one
+	var dt := _t - _drill_present_t
+	var cadence := 0.15                                    # firing without a present is ragged
+	if dt < 4.0:
+		cadence = clampf(1.0 - absf(dt - 1.1) / 1.1, 0.0, 1.0)   # crispest ~1.1s after "Present!"
+	var quality := clampf(sync * 0.62 + cadence * 0.38, 0.0, 1.0)
+	_drill_volleys += 1
+	_drill_score = lerpf(_drill_score, quality * 100.0, 0.5)
+	var dr := quality * 0.9
+	var dd := quality * 0.7
+	var aim := _sk(b, "aim")
+	var hitfrac := clampf(aim / 100.0 * 0.5 + sync * 0.5, 0.0, 1.0)
+	var hits := _knock_targets(hitfrac)
+	var da := quality * 0.45 + float(hits) * 0.05
+	b.skill["reload"] = minf(96.0, _sk(b, "reload") + dr)
+	b.skill["discipline"] = minf(96.0, _sk(b, "discipline") + dd)
+	b.skill["aim"] = minf(96.0, aim + da)
+	b.exp_mul = _reload_factor(b)
+	_drill_gain += dr + dd + da
+	if not b.roster.is_empty():
+		for m in b.roster:
+			if m["alive"]:
+				m["reload"] = clampf(float(m["reload"]) + dr, 6.0, 99.0)
+				m["discipline"] = clampf(float(m["discipline"]) + dd, 6.0, 99.0)
+				m["aim"] = clampf(float(m["aim"]) + da, 6.0, 99.0)
+	var word := "Ragged!" if quality < 0.45 else ("Steady." if quality < 0.72 else "Crisp volley!")
+	var col := "ff9a8a" if quality < 0.45 else ("ffcf6e" if quality < 0.72 else "9fe0a0")
+	_send_player_despatch("[color=#%s][Drill] %s[/color]  %d hits · drill %d/100 · +%.1f reload +%.1f aim +%.1f disc" % [col, word, hits, int(round(_drill_score)), dr, da, dd], {})
+
+# ============================================================ the MANOEUVRE DRILL (hands-on)
+# The drill-master calls a formation; you must pass the order yourself (Q ▸ Formation) and get
+# the battalion dressed in it. The exercise TIMES each manoeuvre from the word to the moment
+# the men are settled in the called formation — quick, clean changes harden discipline and
+# stamina (and the named men with them); a sluggish one earns little. Forming square against
+# a sudden cavalry alarm is the drill that saves a battalion, so it's called the hardest.
+func _begin_maneuver_drill() -> void:
+	if player == null or player.figs.is_empty():
+		return
+	if not _camp_safe(player):
+		_send_player_despatch("[color=#ff9a8a]The enemy stands too near to drill.[/color]", {})
+		return
+	if _drill_on:
+		_end_drill(false)                  # only one drill at a time
+	_close_camp()
+	_mdrill_on = true
+	_mdrill_score = 50.0
+	_mdrill_count = 0
+	_mdrill_gain = 0.0
+	_mdrill_cycle = 0
+	_send_player_despatch("[color=#ffe9a8]MANOEUVRE DRILL[/color] — on the word, pass the order ([color=#cfe0ff]Q ▸ Formation[/color]) and get the men dressed. Open camp (C) to dismiss.", {})
+	_mdrill_call()
+
+func _mdrill_call() -> void:
+	var seq := ["square", "line", "column", "line"]
+	var want: String = seq[_mdrill_cycle % seq.size()]
+	_mdrill_cycle += 1
+	if want == player.formation:
+		want = "column" if want != "column" else "line"   # never call the formation already held
+	_mdrill_target = want
+	_mdrill_call_t = _t
+	_mdrill_await = true
+	_send_player_despatch("[color=#cfe0ff]► FORM %s![/color]" % want.to_upper(), {})
+
+func _end_maneuver_drill(summary := true) -> void:
+	if not _mdrill_on:
+		return
+	_mdrill_on = false
+	_mdrill_await = false
+	if summary:
+		_send_player_despatch("[color=#9fe0a0]Drill dismissed.[/color]  %d manoeuvres · drill %d/100 · +%.0f skill earned." % [_mdrill_count, int(round(_mdrill_score)), _mdrill_gain], {})
+
+func _update_maneuver_drill(_delta: float) -> void:
+	if not _mdrill_on:
+		return
+	if player == null or player.figs.is_empty() or not _camp_safe(player):
+		_end_maneuver_drill()
+		return
+	if _mdrill_await:
+		var elapsed := _t - _mdrill_call_t
+		if player.formation == _mdrill_target and _men_settled(player):
+			_mdrill_finish(elapsed, true)
+		elif elapsed > 32.0:
+			_mdrill_finish(elapsed, false)        # too slow — the manoeuvre is marked a failure
+	elif _t >= _mdrill_next_t:
+		_mdrill_call()
+
+func _mdrill_finish(elapsed: float, ok: bool) -> void:
+	_mdrill_count += 1
+	_mdrill_await = false
+	_mdrill_next_t = _t + 2.5                      # a breath before the next word
+	var b := player
+	var quality := 0.0
+	if ok:
+		var par := 12.0 if _mdrill_target == "square" else 8.0   # square takes longest to form
+		quality = clampf(1.0 - maxf(0.0, elapsed - par) / par, 0.15, 1.0)
+	_mdrill_score = lerpf(_mdrill_score, quality * 100.0, 0.5)
+	var dd := quality * 1.0                        # discipline — clean drill is disciplined drill
+	var ds := quality * 0.8                        # stamina — the marching about hardens the legs
+	b.skill["discipline"] = minf(96.0, _sk(b, "discipline") + dd)
+	b.skill["stamina"] = minf(96.0, _sk(b, "stamina") + ds)
+	_mdrill_gain += dd + ds
+	if not b.roster.is_empty():
+		for m in b.roster:
+			if m["alive"]:
+				m["discipline"] = clampf(float(m["discipline"]) + dd, 6.0, 99.0)
+				m["stamina"] = clampf(float(m["stamina"]) + ds, 6.0, 99.0)
+	if not ok:
+		_send_player_despatch("[color=#ff9a8a][Drill] Too slow — the men were caught out of formation.[/color]", {})
+		return
+	var word := "Sluggish." if quality < 0.45 else ("Steady." if quality < 0.72 else "Smartly done!")
+	var col := "ff9a8a" if quality < 0.45 else ("ffcf6e" if quality < 0.72 else "9fe0a0")
+	_send_player_despatch("[color=#%s][Drill] %s formed in %.1fs — %s[/color]  +%.1f discipline +%.1f stamina" % [col, _mdrill_target.capitalize(), elapsed, word, dd, ds], {})
+
+# how well the battalion is dressed: the fraction of men settled at their formation slots
+func _men_settled(b: Batt) -> bool:
+	if b.figs.is_empty():
+		return true
+	var fwd := Vector3(sin(b.facing), 0, cos(b.facing))
+	var right := Vector3(fwd.z, 0, -fwd.x)
+	var ok := 0
+	for f in b.figs:
+		var slot: Vector2 = f["slot"]
+		var tx := b.pos.x + right.x * slot.x + fwd.x * slot.y
+		var tz := b.pos.z + right.z * slot.x + fwd.z * slot.y
+		var w: Vector3 = f["wpos"]
+		if Vector2(w.x - tx, w.z - tz).length() < 2.5:
+			ok += 1
+	return float(ok) / float(b.figs.size()) > 0.85
 
 # Under fire, the men at the colours draw the eye and the enemy's aim: the officer,
 # the colour-bearer and the drummer can be shot down. Losing the colours is a heavy
@@ -7826,7 +9412,7 @@ func _update_rally(delta: float) -> void:
 		if b.team != player.team or b.spent or b.broken or b.state != "routing" or _army_broken[b.team]:
 			continue
 		if off_pos.distance_to(b.pos) < RALLY_RANGE:
-			b.morale = minf(100.0, b.morale + RALLY_RATE * delta)
+			b.morale = minf(100.0, b.morale + RALLY_RATE * lerpf(0.7, 1.15, b._leadership) * delta)
 			b.calm_t = maxf(b.calm_t, 4.1)         # your voice counts as breathing room
 			if _rally_cd <= 0.0:
 				_rally_cd = 10.0
@@ -7867,17 +9453,14 @@ func _make_caisson_node(team: int) -> Node3D:
 		wh.position = Vector3(sx, 0.5, 0.0)
 		wh.material_override = wood
 		n.add_child(wh)
-	var hmat := StandardMaterial3D.new()
-	hmat.albedo_color = Color(0.20, 0.13, 0.08)
+	var dassets := _draft_horse_assets()
+	var dmesh: ArrayMesh = dassets[0]
+	var dmats: Array = dassets[1]
 	for sx2 in [-0.4, 0.4]:
 		var horse := MeshInstance3D.new()
-		var hc := CapsuleMesh.new()
-		hc.radius = 0.3
-		hc.height = 1.7
-		horse.mesh = hc
-		horse.rotation = Vector3(PI * 0.5, 0, 0)
-		horse.position = Vector3(sx2, 0.9, 1.7)
-		horse.material_override = hmat
+		horse.mesh = dmesh
+		horse.material_override = dmats[(0 if sx2 < 0 else 1) % dmats.size()]
+		horse.position = Vector3(sx2, 0, 1.7)   # the mesh already faces +Z, the direction of travel
 		n.add_child(horse)
 	return n
 
@@ -7974,11 +9557,9 @@ func _spawn_cavalry() -> void:
 		var coat := team_color(team).lightened(0.12)
 		for ct in range(ntypes):
 			var nreg: int = types.count(ct)
-			if nreg <= 0:
-				cav_horse_mm[team][ct] = null
-				cav_rider_mm[team][ct] = null
-				continue
-			var n := nreg * CAV_MEN
+			# size EVERY arm (even one with no starting regiments) with spare slots, so a Stables
+			# can raise fresh regiments of any arm mid-campaign (see _muster_cavalry)
+			var n := (nreg + CAV_REINFORCE_HEADROOM) * CAV_MEN
 			var hmi := MultiMeshInstance3D.new()
 			var hmm := MultiMesh.new()
 			hmm.transform_format = MultiMesh.TRANSFORM_3D
@@ -8770,6 +10351,7 @@ func _army_decide(army) -> void:
 	# the contestable town nearest IT — brigades fight what's to their front, then march on
 	# the town. (Value × weakness ÷ distance, biased by temperament — the campaign mind.)
 	army.target_town = _pick_target_town(army, mine)
+	_assign_strategic_tasks(army, mine)   # give each brigade a PLACE to take or hold (its primary task)
 	for cpn in range(CORPS_PER_TEAM):
 		var cc := Vector3.ZERO
 		var cn := 0
@@ -8997,6 +10579,10 @@ func _set_brigade_orders(br) -> void:
 			kind = "reserve"; text = "Stand in reserve"; opos = br.objective
 		"refuse":
 			kind = "hold"; text = "Refuse the flank — hold"; opos = br.objective
+		"seize":
+			kind = "attack"; text = "March on the objective"; opos = br.objective
+		"garrison":
+			kind = "reserve"; text = "Garrison & hold the town"; opos = br.objective
 	if br.posture == "withdraw":
 		kind = "withdraw"; text = "Fall back and rally"; opos = br.objective
 	for b in br.battalions:
@@ -9080,6 +10666,77 @@ func _brigade_position_guns(br) -> void:
 
 # The brigade carries out the mission the army handed it, choosing the moment-to-moment
 # posture (advance / engage / assault / withdraw) and the ground to move its line onto.
+# THE OPERATIONAL ALLOCATION: HQ reads the whole province and gives each brigade a PLACE to
+# work — DEFEND a held town under threat, or ASSAULT a contestable one — weighing each town's
+# value (its size AND its economy: a barracks/armory/stables/shipyard town is worth fighting for),
+# how hard it is held, and how near it lies. This is the campaign brain: brigades disperse to
+# objectives instead of all merging into one line. (A brigade still gives battle on contact.)
+func _assign_strategic_tasks(army, mine: Array) -> void:
+	var team: int = army.team
+	for br in mine:
+		var center := _brigade_center(br)
+		var best_kind := "screen"
+		var best_town = null
+		var best_sc := 0.0
+		for t in field_towns:
+			var tp: Vector3 = t["pos"]
+			var val := float(int(t["size"])) + (3.0 if String(t.get("building", "")) != "" else 0.0) + 0.5
+			var d: float = center.distance_to(tp)
+			var owner := int(t["owner"])
+			if owner == team:
+				# DEFEND a held town that an enemy force is bearing down on
+				var threat := 0
+				for b in battalions:
+					if b.team != team and b.team != 2 and not b.spent and b.pos.distance_to(tp) < 1600.0:
+						threat += b.figs.size()
+				if threat < 250:
+					continue
+				var sc := val * (1.0 + float(threat) / 2500.0) / (1.0 + d / 2500.0)
+				if sc > best_sc:
+					best_sc = sc
+					best_kind = "defend"
+					best_town = t
+			else:
+				# ASSAULT a contestable (enemy/neutral) town — prefer valuable, weakly held, near
+				var def := 0
+				for b in battalions:
+					if not b.spent and b.team == owner and b.pos.distance_to(tp) < 800.0:
+						def += b.figs.size()
+				var weak := 1.0 / (1.0 + float(def) / 1500.0)
+				var sc := val * weak / (1.0 + d / 3500.0) * lerpf(0.8, 1.3, army.aggression)
+				if sc > best_sc:
+					best_sc = sc
+					best_kind = "assault"
+					best_town = t
+		br.task_kind = best_kind
+		br.task_town = best_town
+
+# Pursue the strategic task when out of contact: march to the town and take it (assault), or
+# hold/garrison and PATROL its approaches while the men rest (defend). Screen brigades hold.
+func _brigade_pursue_task(br, center: Vector3) -> void:
+	br.enemy = null
+	br.fire_mission = null
+	var tt = br.task_town
+	if tt == null:
+		br.posture = "hold"
+		br.mission = "garrison"
+		br.objective = center
+		return
+	var tp: Vector3 = tt["pos"]
+	var d := center.distance_to(tp)
+	if br.task_kind == "defend" and d <= TOWN_HOLD_RADIUS:
+		# garrison: hold the town, patrol its approaches at a slow walk, and let the men rest
+		br.posture = "hold"
+		br.mission = "garrison"
+		var ang := _t * 0.18 + float(br.idx)
+		br.objective = tp + Vector3(cos(ang), 0, sin(ang)) * (TOWN_HOLD_RADIUS * 0.5)
+	else:
+		br.posture = "advance"
+		br.mission = "seize"
+		br.objective = tp
+	if center.distance_to(br.objective) > 1.0:
+		br.facing = atan2((br.objective - center).x, (br.objective - center).z)
+
 func _brigade_decide(br) -> void:
 	var center := _brigade_center(br)
 	if not _battle_begun:
@@ -9087,6 +10744,14 @@ func _brigade_decide(br) -> void:
 		br.posture = "hold"
 		br.objective = br.anchor
 		br.fire_mission = null
+		return
+	# OPERATIONAL: give battle to an enemy brigade only when it is in CONTACT; otherwise pursue
+	# the strategic task (defend / assault / screen a town) — so brigades campaign across the
+	# province instead of all converging into one line. The tactical battle below runs on contact.
+	var near_enemy = _nearest_enemy_brigade(br)
+	var ndist: float = (_brigade_center(near_enemy).distance_to(center)) if near_enemy != null else 1.0e18
+	if near_enemy == null or ndist >= OPERATIONAL_CONTACT:
+		_brigade_pursue_task(br, center)
 		return
 	# fight the enemy the army assigned us; fall back to the nearest if that brigade is gone
 	var enemy = br.mission_target if (br.mission_target != null and _brigade_live(br.mission_target) > 0) else _nearest_enemy_brigade(br)
@@ -9638,6 +11303,9 @@ func _drop_fig(b: Batt, idx: int, dir: Vector3) -> void:
 	var sl: Vector2 = b.figs[idx]["slot"]
 	var w := b.pos + fright * sl.x + ffwd * sl.y
 	_drop_dead(w, b.team, dir, b.visible)
+	var dman = b.figs[idx].get("man", null)
+	if dman != null:
+		dman["alive"] = false        # this SPECIFIC named man falls — his trained skill leaves the line
 	b.figs.remove_at(idx)
 	b.cas_since_redress += 1
 
@@ -9838,7 +11506,9 @@ func _render(delta: float) -> void:
 				byaw = atan2(bmv.x, bmv.z)
 			if not b.colours_down:
 				var bbob := absf(sin(_t * 2.4 + idn + 1.0)) * 0.04
-				bearer_mm.set_instance_transform(bearer_i, Transform3D(Basis(Vector3.UP, byaw), Vector3(bw.x, CAP_HALF + bbob + _gh(bw.x, bw.z), bw.z)))
+				# 0.85 ground-origin offset (officer mesh), NOT CAP_HALF (that's for capsule-centre origins)
+				bearer_mm.set_instance_transform(bearer_i, Transform3D(Basis(Vector3.UP, byaw), Vector3(bw.x, 0.85 + bbob + _gh(bw.x, bw.z), bw.z)))
+				_cg_dress(bearer_mm, bearer_i, b.team, bw.distance_to(bp) > 0.1, false)
 				bearer_i += 1
 			_place_flag(b, Vector3(bw.x, 0, bw.z), fyaw)   # lays low when the colours are down
 			# the COLOUR PARTY: a guard of two with half-pikes, posted at the colours
@@ -9863,43 +11533,43 @@ func _render(delta: float) -> void:
 			var dbob := absf(sin(_t * 3.0 + idn)) * 0.05
 			drummer_mm.set_instance_transform(drummer_i, Transform3D(Basis(Vector3.UP, dyaw), Vector3(dw.x, CAP_HALF + dbob + _gh(dw.x, dw.z), dw.z)))
 			drummer_i += 1
-		# a sergeant posted at each company front, stepping along it to dress the ranks
+		# NCOs posted as FILE-CLOSERS behind each company. For YOUR battalion the number behind a
+		# company is exactly its LIVING sergeants & corporals (from the named roster) — lose them
+		# and the post stands empty; promote/recruit and they fill back in. (AI keeps no named
+		# roster, so it shows one sergeant per company.) They pace the rear, half-pikes in hand.
 		if b.formation == "line":
+			var rearY := -maxy - 0.9
+			var nco_per_coy: Array = []
+			nco_per_coy.resize(b.companies)
+			if b.roster.is_empty():
+				for ci in range(b.companies):
+					nco_per_coy[ci] = 1                  # AI: a representative sergeant per company
+			else:
+				for ci in range(b.companies):
+					nco_per_coy[ci] = 0
+				for m in b.roster:
+					if m["alive"] and String(m["rank"]) in NCO_RANKS:
+						var mc := int(m["coy"])
+						if mc >= 0 and mc < b.companies:
+							nco_per_coy[mc] = mini(int(nco_per_coy[mc]) + 1, 3)
 			for c in range(b.companies):
-				if nco_i >= nco_mm.instance_count:
-					break
-				var sgn := sin(_t * 0.5 + float(c) + idn)
-				var cp := b.pos + right * (_company_x(b, c) + sgn * 0.6) + fwd * (maxy + 0.8)
-				var sw := _cg_step(b, "s%d" % c, cp, delta, snap)
-				var syaw := along_yaw if sgn >= 0.0 else back_yaw   # faces down the line
-				if sw.distance_to(cp) > 0.4:
-					var smv := cp - sw
-					syaw = atan2(smv.x, smv.z)                      # walking to his post
-				var sbob := absf(sin(_t * 2.8 + float(c) * 1.3)) * 0.05
-				nco_mm.set_instance_transform(nco_i, Transform3D(Basis(Vector3.UP, syaw), Vector3(sw.x, CAP_HALF + sbob + _gh(sw.x, sw.z), sw.z)))
-				_cg_dress(nco_mm, nco_i, b.team, sw.distance_to(cp) > 0.1, true)
-				spontoon_mm.set_instance_transform(nco_i, Transform3D(Basis(Vector3.UP, syaw), Vector3(sw.x + right.x * 0.2, _gh(sw.x, sw.z), sw.z + right.z * 0.2)))
-				nco_i += 1
-		# ...and file-closers walking the rear, herding stragglers back into their files
-		var rearY := -maxy - 0.9
-		for fc in range(3):
-			if nco_i >= nco_mm.instance_count:
-				break
-			var base_rx := (float(fc) - 1.0) * hw * 0.6
-			var amp2 := minf(hw * 0.22, 4.0)
-			var pv2 := cos(_t * 0.2 + float(fc) * 2.0 + idn)
-			var pace := sin(_t * 0.2 + float(fc) * 2.0 + idn) * amp2
-			var rp: Vector3 = b.pos + right * (base_rx + pace) + fwd * rearY
-			var rw := _cg_step(b, "f%d" % fc, rp, delta, snap)
-			var ryaw := along_yaw if pv2 >= 0.0 else back_yaw
-			if rw.distance_to(rp) > 0.4:
-				var rmv := rp - rw
-				ryaw = atan2(rmv.x, rmv.z)
-			var rbob := absf(sin(_t * 2.8 + float(fc))) * 0.05
-			nco_mm.set_instance_transform(nco_i, Transform3D(Basis(Vector3.UP, ryaw), Vector3(rw.x, CAP_HALF + rbob + _gh(rw.x, rw.z), rw.z)))
-			_cg_dress(nco_mm, nco_i, b.team, rw.distance_to(rp) > 0.1, true)
-			spontoon_mm.set_instance_transform(nco_i, Transform3D(Basis(Vector3.UP, ryaw), Vector3(rw.x + right.x * 0.2, _gh(rw.x, rw.z), rw.z + right.z * 0.2)))
-			nco_i += 1
+				var ncnt := int(nco_per_coy[c])
+				for s in range(ncnt):
+					if nco_i >= nco_mm.instance_count:
+						break
+					var spread := (float(s) - float(ncnt - 1) * 0.5) * 1.5
+					var ph2 := _t * 0.22 + float(c) * 1.7 + float(s) * 0.9 + idn
+					var rp := b.pos + right * (_company_x(b, c) + spread + sin(ph2) * minf(hw * 0.1, 1.2)) + fwd * rearY
+					var rw := _cg_step(b, "nco%d_%d" % [c, s], rp, delta, snap)
+					var ryaw := along_yaw if cos(ph2) >= 0.0 else back_yaw   # faces down the line
+					if rw.distance_to(rp) > 0.4:
+						var rmv := rp - rw
+						ryaw = atan2(rmv.x, rmv.z)                            # walking to his post
+					var rbob := absf(sin(_t * 2.8 + float(c) + float(s))) * 0.05
+					nco_mm.set_instance_transform(nco_i, Transform3D(Basis(Vector3.UP, ryaw), Vector3(rw.x, CAP_HALF + rbob + _gh(rw.x, rw.z), rw.z)))
+					_cg_dress(nco_mm, nco_i, b.team, rw.distance_to(rp) > 0.1, true)
+					spontoon_mm.set_instance_transform(nco_i, Transform3D(Basis(Vector3.UP, ryaw), Vector3(rw.x + right.x * 0.2, _gh(rw.x, rw.z), rw.z + right.z * 0.2)))
+					nco_i += 1
 	for team in [0, 1, 2]:
 		var mm: MultiMesh = team_mm[team]
 		var gun: MultiMesh = musket_mm[team]
@@ -10347,6 +12017,305 @@ func _end_at_nightfall() -> void:
 	_bill_t = 7.0
 	_send_player_despatch("[color=#cdd6e6]Night falls.[/color] The firing dies away down the line — the day is spent. Both armies draw off to count the cost.", {})
 
+# THE CAMPAIGN PERSISTS: a spent day (nightfall, or even a beaten army) is NOT the end of the war —
+# in the night both sides draw off, the broken survivors are rallied and re-formed, the men rest,
+# and at first light the campaign goes on. Only a clean sweep of every town (_strategic_win) ends it.
+func _continue_to_next_day() -> void:
+	battle_over = false
+	_night_end = false
+	_town_winner = -1
+	_bill_t = 0.0
+	_army_broken = [false, false, false]
+	_day_count += 1
+	for b in battalions:
+		if b.spent or b.figs.is_empty():
+			continue
+		b.broken = false
+		if b.state == "routing":
+			b.state = "shaken"
+		b.morale = maxf(b.morale, 55.0)
+		b.cohesion = maxf(b.cohesion, COHESION_BREAK + 25.0)
+		b.fatigue = maxf(0.0, b.fatigue - 45.0)      # a night's rest
+		b._coh_figs = b.figs.size()                  # losses are banked; the new day starts clean
+	for c in cavalry:
+		if not c.spent:
+			c.state = "reserve"
+			c.rally_t = 0.0
+	_time_of_day = 6.5                                # first light
+	_recompute_start_strength()                      # the new day's baseline for the next bill
+	if _bill_panel != null:
+		_bill_panel.visible = false
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if _mouse_captured else Input.MOUSE_MODE_VISIBLE
+	_send_player_despatch("[color=#ffe9a8]Day %d dawns.[/color] The armies re-form and the campaign goes on." % _day_count, {})
+	_save_game()                                     # the campaign is auto-saved each daybreak
+
+func _recompute_start_strength() -> void:
+	_start_strength = [0, 0, 0]
+	for b in battalions:
+		_start_strength[b.team] += b.figs.size()
+
+# ============================================================ SAVE / LOAD (campaign persistence)
+# The whole campaign is written to ONE file: the province (towns + economy), every battalion /
+# regiment / battery / ship, and the global state (prestige, time, day). The named ROSTER of your
+# men is preserved (their ranks, skills, who has fallen); per-fig tactical micro re-rolls. On load
+# the world is regenerated from the SAVED SEED (so the map matches), then the units are rebuilt and
+# the command structure re-derived. Auto-saves at each daybreak; F5 quicksave, F9 quickload.
+const SAVE_PATH := "user://commander_save.dat"
+var _loaded_save = null              # the save data read at startup, applied after the spawn
+
+static func save_exists() -> bool:
+	return FileAccess.file_exists(SAVE_PATH)
+
+func _save_game() -> void:
+	var data := {
+		"version": 1, "time": _time_of_day, "day": _day_count, "prestige": prestige,
+		"mat_pool": _mat_pool, "reinforced": _reinforced, "muster_cav_n": _muster_cav_n,
+		"convoy_next_id": _convoy_next_id, "start_strength": _start_strength,
+		"army_broken": _army_broken, "seed": GameConfig.match_seed,
+		"militia": {
+			"has_militia": GameConfig.has_militia, "uniform": GameConfig.militia_uniform,
+			"fr": GameConfig.militia_facing.r, "fg": GameConfig.militia_facing.g, "fb": GameConfig.militia_facing.b,
+			"flag": GameConfig.militia_flag, "hat": GameConfig.militia_hat, "belt": GameConfig.militia_belt,
+			"pants": GameConfig.militia_pants, "name": GameConfig.militia_name, "slot": GameConfig.local_slot,
+		},
+		"towns": [], "battalions": [], "cavalry": [], "guns": [], "ships": [],
+	}
+	for t in field_towns:
+		data["towns"].append({ "name": String(t["name"]), "owner": int(t["owner"]), "mat": int(t.get("mat", 0)),
+			"building": String(t.get("building", "")), "stock": float(t.get("stock", 0.0)),
+			"build": t.get("build", [0.0, 0.0, 0.0, 0.0, 0.0]), "size": int(t["size"]),
+			"cap_t": float(t["cap_t"]), "cap_team": int(t["cap_team"]) })
+	for b in battalions:
+		data["battalions"].append(_save_batt(b))
+	for c in cavalry:
+		data["cavalry"].append({ "team": c.team, "idx": c.idx, "cav_type": c.cav_type, "x": c.pos.x, "z": c.pos.z,
+			"facing": c.facing, "men": c.troopers.size(), "state": c.state, "spent": c.spent,
+			"rx": c.reserve_pos.x, "rz": c.reserve_pos.z })
+	for g in guns:
+		data["guns"].append({ "team": g.team, "x": g.pos.x, "z": g.pos.z, "facing": g.facing, "dead": g.dead })
+	for s in ships:
+		var sp: Vector3 = s["pos"]
+		data["ships"].append({ "team": int(s["team"]), "x": sp.x, "z": sp.z, "heading": float(s["heading"]), "speed": float(s["speed"]) })
+	var f := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
+	if f == null:
+		_send_player_despatch("[color=#ff9a8a]Could not write the save file.[/color]", {})
+		return
+	f.store_var(data, true)
+	f.close()
+	_send_player_despatch("[color=#9fe0a0]Campaign saved.[/color]  [color=#9fb0c8](day %d)[/color]" % _day_count, {})
+
+func _save_batt(b: Batt) -> Dictionary:
+	var d := {
+		"team": b.team, "idx": b.idx, "x": b.pos.x, "z": b.pos.z, "facing": b.facing,
+		"formation": b.formation, "companies": b.companies, "men": b.figs.size(),
+		"skill": b.skill.duplicate(), "morale": b.morale, "cohesion": b.cohesion, "fatigue": b.fatigue,
+		"ammo": b.ammo, "independent": b.independent, "is_player": b.is_player, "is_raider": b.is_raider,
+		"human": b.human, "rname": b.rname, "quality": b.quality, "spent": b.spent, "broken": b.broken,
+		"leaders0": b._leaders0, "start_men": b.start_men,
+		"icr": b.inst_col.r, "icg": b.inst_col.g, "icb": b.inst_col.b, "ica": b.inst_col.a,
+		"roster": b.roster,
+	}
+	# per-SOLDIER stats — each man's own marksmanship (marks), nerve, build and coat-wear — kept
+	# for the battalions that have a named roster (yours), so individual soldiers restore exactly
+	# rather than re-rolling. (AI line figs are cosmetic and skipped to keep the save lean.)
+	if b.is_player or not b.roster.is_empty():
+		var fs: Array = []
+		for f in b.figs:
+			fs.append([float(f.get("marks", 0.0)), float(f.get("nerve", 0.5)), float(f.get("wear", 1.0)),
+				float(f.get("bw", 1.0)), float(f.get("bh", 1.0)), float(f.get("spd", 1.0))])
+		d["figstats"] = fs
+	return d
+
+func _load_save_file():
+	if not FileAccess.file_exists(SAVE_PATH):
+		return null
+	var f := FileAccess.open(SAVE_PATH, FileAccess.READ)
+	if f == null:
+		return null
+	var data = f.get_var(true)
+	f.close()
+	return data if typeof(data) == TYPE_DICTIONARY else null
+
+func _apply_save(data: Dictionary) -> void:
+	_time_of_day = float(data.get("time", _time_of_day))
+	_day_count = int(data.get("day", 1))
+	prestige = int(data.get("prestige", prestige))
+	if data.has("mat_pool"): _mat_pool = data["mat_pool"]
+	if data.has("reinforced"): _reinforced = data["reinforced"]
+	if data.has("muster_cav_n"): _muster_cav_n = data["muster_cav_n"]
+	_convoy_next_id = int(data.get("convoy_next_id", 0))
+	if data.has("start_strength"): _start_strength = data["start_strength"]
+	if data.has("army_broken"): _army_broken = data["army_broken"]
+	_econ_ready = true
+	for td in data.get("towns", []):
+		for t in field_towns:
+			if String(t["name"]) == String(td["name"]):
+				t["owner"] = int(td["owner"])
+				t["mat"] = int(td.get("mat", 0))
+				t["building"] = String(td.get("building", ""))
+				t["stock"] = float(td.get("stock", 0.0))
+				t["build"] = td.get("build", [0.0, 0.0, 0.0, 0.0, 0.0])
+				t["cap_t"] = float(td.get("cap_t", 0.0))
+				t["cap_team"] = int(td.get("cap_team", -1))
+				break
+	_color_towns()
+	_clear_all_units()
+	for bd in data.get("battalions", []):
+		_load_batt(bd)
+	for cd in data.get("cavalry", []):
+		_load_cav(cd)
+	for gd in data.get("guns", []):
+		var g := Gun.new()
+		g.team = int(gd["team"])
+		g.pos = Vector3(float(gd["x"]), 0, float(gd["z"]))
+		g.move_to = g.pos
+		g.facing = float(gd["facing"])
+		g.dead = bool(gd["dead"])
+		g.reload = ARTY_RELOAD * randf_range(0.2, 1.0)
+		_make_gun(g)
+		guns.append(g)
+	for sd in data.get("ships", []):
+		var node := _ship_node(int(sd["team"]))
+		add_child(node)
+		ships.append({ "node": node, "pos": Vector3(float(sd["x"]), 0, float(sd["z"])), "heading": float(sd["heading"]),
+			"patrol_h": float(sd["heading"]), "speed": float(sd["speed"]), "team": int(sd["team"]), "fire_cd": randf_range(2.0, 6.0) })
+	_assign_brigades()
+	if player != null:
+		off_pos = player.pos - Vector3(sin(player.facing), 0, cos(player.facing)) * 8.0
+		off_facing = player.facing
+		off_vis = player.facing
+		_cam_yaw = player.facing + PI
+	_recompute_start_strength()
+
+func _clear_all_units() -> void:
+	for b in battalions:
+		if b.flag != null and is_instance_valid(b.flag):
+			b.flag.queue_free()
+	battalions.clear()
+	for c in cavalry:
+		if c.hoof_player != null and is_instance_valid(c.hoof_player):
+			c.hoof_player.queue_free()
+	cavalry.clear()
+	for g in guns:
+		if g.node != null and is_instance_valid(g.node):
+			g.node.queue_free()
+	guns.clear()
+	for s in ships:
+		var n = s["node"]
+		if n != null and is_instance_valid(n):
+			n.queue_free()
+	ships.clear()
+	supply_convoys.clear()
+	brigades.clear()
+	divisions.clear()
+	player = null
+
+func _load_batt(bd: Dictionary) -> void:
+	var b := Batt.new()
+	b.team = int(bd["team"])
+	b.idx = int(bd["idx"])
+	b.pos = Vector3(float(bd["x"]), 0, float(bd["z"]))
+	b.spawn = b.pos
+	b.last_pos = b.pos
+	b.fire_pos = b.pos
+	b._fat_pos = b.pos
+	b.facing = float(bd["facing"])
+	b.formation = String(bd["formation"])
+	b.companies = int(bd["companies"])
+	b.off_facing = b.facing
+	b.off_pos = b.pos - Vector3(sin(b.facing), 0, cos(b.facing)) * 8.0
+	b.morale = float(bd["morale"])
+	b.cohesion = float(bd["cohesion"])
+	b.fatigue = float(bd["fatigue"])
+	b.ammo = float(bd["ammo"])
+	b.independent = bool(bd["independent"])
+	b.is_player = bool(bd["is_player"])
+	b.is_raider = bool(bd.get("is_raider", false))
+	b.human = bool(bd.get("human", false))
+	b.rname = String(bd["rname"])
+	b.quality = String(bd["quality"])
+	b.spent = bool(bd["spent"])
+	b.broken = bool(bd["broken"])
+	b._leaders0 = int(bd.get("leaders0", 0))
+	b.start_men = int(bd.get("start_men", int(bd["men"])))
+	b.inst_col = Color(float(bd["icr"]), float(bd["icg"]), float(bd["icb"]), float(bd["ica"]))
+	var sk = bd["skill"]
+	for k in SKILL_KEYS:
+		if sk.has(k):
+			b.skill[k] = float(sk[k])
+	_fill_figs(b, maxi(1, int(bd["men"])))
+	b.roster = bd.get("roster", [])
+	_relink_figs(b)
+	# restore each soldier's own stats (marksmanship, nerve, build, wear) where they were saved
+	if bd.has("figstats"):
+		var fs: Array = bd["figstats"]
+		for i in range(mini(b.figs.size(), fs.size())):
+			var s: Array = fs[i]
+			b.figs[i]["marks"] = float(s[0])
+			b.figs[i]["nerve"] = float(s[1])
+			b.figs[i]["wear"] = float(s[2])
+			b.figs[i]["bw"] = float(s[3])
+			b.figs[i]["bh"] = float(s[4])
+			b.figs[i]["spd"] = float(s[5])
+	b.exp_mul = _reload_factor(b)
+	if not b.roster.is_empty():
+		_reprofile(b)
+	_make_flag(b, b.team)
+	battalions.append(b)
+	if b.is_player:
+		player = b
+		player.human = true
+
+func _relink_figs(b: Batt) -> void:
+	if b.roster.is_empty():
+		return
+	var living: Array = []
+	for m in b.roster:
+		if bool(m.get("alive", true)):
+			living.append(m)
+	var li := 1   # man[0] is the Capt (you, the mounted officer) — not a line fig
+	for i in range(b.figs.size()):
+		if li < living.size():
+			b.figs[i]["man"] = living[li]
+			li += 1
+
+func _load_cav(cd: Dictionary) -> void:
+	var c := Cav.new()
+	c.team = int(cd["team"])
+	c.idx = int(cd["idx"])
+	c.cav_type = int(cd["cav_type"])
+	c.pos = Vector3(float(cd["x"]), 0, float(cd["z"]))
+	c.facing = float(cd["facing"])
+	c.reserve_pos = Vector3(float(cd.get("rx", cd["x"])), 0, float(cd.get("rz", cd["z"])))
+	c.state = String(cd.get("state", "reserve"))
+	c.spent = bool(cd.get("spent", false))
+	c.decide_cd = randf_range(0.0, CAV_DECIDE)
+	var hp := AudioStreamPlayer3D.new()
+	hp.max_distance = 1100.0
+	hp.unit_size = 22.0
+	hp.volume_db = 7.0
+	add_child(hp)
+	c.hoof_player = hp
+	_fill_troopers(c)
+	var want := int(cd.get("men", c.troopers.size()))
+	while c.troopers.size() > want and not c.troopers.is_empty():
+		c.troopers.pop_back()
+	cavalry.append(c)
+
+func _restore_militia_config(data: Dictionary) -> void:
+	var m = data.get("militia", {})
+	if typeof(m) != TYPE_DICTIONARY or m.is_empty():
+		return
+	GameConfig.has_militia = bool(m.get("has_militia", false))
+	GameConfig.militia_uniform = int(m.get("uniform", 2))
+	GameConfig.militia_facing = Color(float(m.get("fr", 0.82)), float(m.get("fg", 0.72)), float(m.get("fb", 0.50)))
+	GameConfig.militia_flag = int(m.get("flag", 0))
+	GameConfig.militia_hat = int(m.get("hat", 0))
+	GameConfig.militia_belt = int(m.get("belt", 0))
+	GameConfig.militia_pants = int(m.get("pants", 0))
+	GameConfig.militia_name = String(m.get("name", "1st Volunteers"))
+	GameConfig.local_slot = int(m.get("slot", GameConfig.local_slot))
+
 func _show_bill() -> void:
 	if _bill_panel == null or player == null:
 		return
@@ -10403,7 +12372,8 @@ func _show_bill() -> void:
 		txt += "[color=#cdd6e6]Your charge[/color]  %s  %s\n" % [_obj_text, obj_stat]
 	txt += "[color=#cdd6e6]Prestige banked[/color]  [color=#%s]%+d[/color]\n" % [pcol, prestige]
 	txt += _regiment_bill()
-	txt += "[color=#6f7888]——————————————————————\nEnter — return to the menu[/color][/center]"
+	var foot := "Enter — return to the menu" if _campaign_over else "Enter — rest the night; the campaign goes on into the next day"
+	txt += "[color=#6f7888]——————————————————————\n%s[/color][/center]" % foot
 	_bill_label.text = txt
 	_bill_panel.visible = true
 	_write_result(pt, et, won, men_now)
@@ -10586,10 +12556,38 @@ func _give_fire() -> void:
 		return
 	if player.charging or player.melee_foe != null or player.state == "routing":
 		return
-	player.fire_now = true                  # _update_firing fires every loaded man as one
-	player.fire_forward = true              # FIRE even with no enemy in front — into the open
-	player.presenting = false               # the present is released by the volley
-	_play_voice(snd_v_fire, player.off_pos)
+	var b := player
+	b.presenting = false                    # the present is released by the volley
+	# AT DRILL the volley is whatever the men actually managed to load — that IS the exercise,
+	# so don't help them; just fire and mark it.
+	if _drill_on:
+		b.fire_now = true
+		b.fire_forward = true
+		_play_voice(snd_v_fire, b.off_pos)
+		_score_drill_volley()
+		return
+	# IN THE FIELD "Give Fire!" is a COMMANDED VOLLEY — the WHOLE firing line discharges as ONE,
+	# not a ragged trickle of whoever happened to be loaded. Switch to volley discipline (so the
+	# men hold their fire rather than firing at will) and, once the line has reloaded since its
+	# last volley, bring EVERY man in the firing ranks up to the present so they all fire together.
+	# Then they must reload before the next volley — a well-drilled (or fresh) battalion sooner.
+	b.volley_fire = true
+	b.auto_volley = false
+	b.rolling = false
+	if b.volley_cd > 0.0:
+		_play_voice(snd_v_present, b.off_pos)   # still reloading — the men come to the present, not yet loaded
+		return
+	var maxy := -1.0e9
+	for f in b.figs:
+		maxy = maxf(maxy, (f["slot"] as Vector2).y)
+	var band := maxy - SP * 1.6
+	for f in b.figs:
+		if (f["slot"] as Vector2).y >= band:
+			f["reload"] = 0.0               # every man in the firing ranks: loaded, levelled, ready as one
+	b.fire_now = true
+	b.fire_forward = true
+	b.volley_cd = maxf(7.0, RELOAD_TIME * 0.6 * b.exp_mul * _fatigue_reload_mul(b))   # the reload before the next volley
+	_play_voice(snd_v_fire, b.off_pos)
 
 # "PRESENT!" — the battalion brings its muskets up to the level and holds, whether or not
 # there is an enemy to its front. (Press V.) The arms tire after a while and lower again.
@@ -10600,6 +12598,8 @@ func _present() -> void:
 		return
 	player.presenting = true
 	player.present_t = 0.0
+	if _drill_on:
+		_drill_present_t = _t               # mark the beat so the volley's cadence can be judged
 	_play_voice(snd_v_present, player.off_pos)
 	_send_player_despatch("[color=#ffe9a8]Present![/color] — the battalion brings its muskets up.", {})
 
@@ -10961,25 +12961,37 @@ func _update_cam(delta: float) -> void:
 		var eye := g.pos - fwd * 0.7 + Vector3(0, 1.25 + g.recoil * 0.12, 0)   # the piece bucks on firing
 		cam.fov = lerpf(cam.fov, 42.0, clampf(delta * 8.0, 0.0, 1.0))
 		if _scope_rect:
-			_scope_rect.modulate.a = 0.0
+			_scope_rect.visible = false
 		cam.position = eye
 		cam.look_at(to_global(eye + look * 80.0), Vector3.UP)
 		if _shake > 0.001:
 			cam.position += Vector3(randf_range(-1, 1), randf_range(-1, 1), randf_range(-1, 1)) * _shake * 0.4
 		return
-	# spyglass: raise the glass (RMB) -> narrow the FOV and mask to a circle
+	# spyglass: raise the glass (RMB) -> narrow the FOV and mask to a circular eyepiece. The
+	# magnification is set by how far you draw the glass out (mouse wheel -> _scope_zoom).
 	_scope_amt = move_toward(_scope_amt, 1.0 if _scoped else 0.0, delta * 6.0)
-	cam.fov = lerpf(FOV_NORMAL, FOV_SCOPE, _scope_amt)
+	var scope_fov := lerpf(FOV_SCOPE_WIDE, FOV_SCOPE_NARROW, _scope_zoom)
+	cam.fov = lerpf(FOV_NORMAL, scope_fov, _scope_amt)
 	if _scope_rect:
-		_scope_rect.modulate.a = _scope_amt
+		_scope_rect.visible = _scope_amt > 0.001
+		if _scope_mat:
+			_scope_mat.set_shader_parameter("amt", _scope_amt)
+			_scope_mat.set_shader_parameter("zoom", _scope_zoom)
 	var target := off_pos + Vector3(0, 2.35, 0)   # a mounted man's eyeline — over the ranks
 	# 3rd-person orbit behind you (camera height from _cam_pitch)
 	var dir := Vector3(sin(_cam_yaw) * cos(_cam_pitch), sin(_cam_pitch), cos(_cam_yaw) * cos(_cam_pitch))
 	var orbit_pos := target + dir * _cam_dist
-	# spyglass: look FORWARD from your eyeline, freely up/down via _scope_pitch
-	var hx := -sin(_cam_yaw)
-	var hz := -cos(_cam_yaw)
-	var look_dir := Vector3(hx * cos(_scope_pitch), sin(_scope_pitch), hz * cos(_scope_pitch))
+	# spyglass: look FORWARD from your eyeline, freely up/down via _scope_pitch, with a gentle
+	# HANDHELD sway + breathing so the glass feels held in the hand — and the wobble grows as
+	# you draw it out to higher power (just as a real glass is harder to hold steady magnified).
+	var sway := (0.0030 + 0.0042 * _scope_zoom) * _scope_amt
+	var sway_yaw := (sin(_t * 1.7) * 0.6 + sin(_t * 0.83 + 1.3) * 0.4) * sway
+	var sway_pitch := (sin(_t * 1.31 + 0.5) * 0.6 + sin(_t * 2.13) * 0.4) * sway * 0.8
+	var syaw := _cam_yaw + sway_yaw
+	var spitch := _scope_pitch + sway_pitch
+	var hx := -sin(syaw)
+	var hz := -cos(syaw)
+	var look_dir := Vector3(hx * cos(spitch), sin(spitch), hz * cos(spitch))
 	var scope_pos := target + look_dir * 0.6
 	cam.position = orbit_pos.lerp(scope_pos, _scope_amt)
 	var look_pt := target.lerp(target + look_dir * 80.0, _scope_amt)
@@ -11049,13 +13061,16 @@ func _update_hud() -> void:
 # ------------------------------------------------------------------ input
 
 func _unhandled_input(event: InputEvent) -> void:
-	if event is InputEventMouseMotion and _mouse_captured and _gun_sight:
+	# the camp & roster are mouse-driven GUIs — while one is open the mouse drives the cursor,
+	# NOT the camera look (no rotating the view behind the menu) nor the sabre/fire
+	var ui_modal := _camp_on or (roster_panel != null and roster_panel.visible)
+	if event is InputEventMouseMotion and _mouse_captured and _gun_sight and not ui_modal:
 		# laying the piece: mouse traverses the barrel and depresses/raises the gaze
 		var gs := MOUSE_SENS * 0.6
 		_sight_yaw -= event.relative.x * gs
 		_sight_pitch = clampf(_sight_pitch - event.relative.y * gs * 0.3, deg_to_rad(-14.0), deg_to_rad(3.0))
 		return
-	if event is InputEventMouseMotion and _mouse_captured:
+	if event is InputEventMouseMotion and _mouse_captured and not ui_modal:
 		var s := MOUSE_SENS * (1.0 - 0.65 * _scope_amt)   # finer aim through the glass
 		_cam_yaw -= event.relative.x * s
 		if _scoped:
@@ -11063,7 +13078,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			_scope_pitch = clampf(_scope_pitch - event.relative.y * s, deg_to_rad(-55.0), deg_to_rad(70.0))
 		else:
 			_cam_pitch = clampf(_cam_pitch + event.relative.y * s, deg_to_rad(6.0), deg_to_rad(78.0))
-	elif event is InputEventMouseButton:
+	elif event is InputEventMouseButton and not ui_modal:
 		if event.button_index == MOUSE_BUTTON_RIGHT:
 			_scoped = event.pressed                       # hold RMB to raise the spyglass
 		elif event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
@@ -11072,10 +13087,12 @@ func _unhandled_input(event: InputEvent) -> void:
 			else:
 				_swing_sabre()                            # cut at whatever you're facing
 		elif event.pressed and event.button_index == MOUSE_BUTTON_WHEEL_UP:
-			if _rts_cam: _rts_dist = clampf(_rts_dist * 0.85, 40.0, 6000.0)
+			if _scoped: _scope_zoom = clampf(_scope_zoom + 0.12, 0.0, 1.0)   # draw the glass out — magnify
+			elif _rts_cam: _rts_dist = clampf(_rts_dist * 0.85, 40.0, 6000.0)
 			else: _cam_dist = maxf(4.0, _cam_dist - 3.0)
 		elif event.pressed and event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			if _rts_cam: _rts_dist = clampf(_rts_dist * 1.18, 40.0, 6000.0)
+			if _scoped: _scope_zoom = clampf(_scope_zoom - 0.12, 0.0, 1.0)   # collapse the glass — wider field
+			elif _rts_cam: _rts_dist = clampf(_rts_dist * 1.18, 40.0, 6000.0)
 			else: _cam_dist = minf(220.0, _cam_dist + 3.0)
 	elif event is InputEventKey and event.pressed and not event.echo:
 		# while the despatch pad is open: pick a category, then an order
@@ -11093,6 +13110,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			for item in CMD_PAGES[_cmd_page]:
 				if event.keycode == int(item[0]):
 					var act := String(item[3])
+					if player != null and player.encamped and not _mdrill_on and (act == "page:form" or act == "line" or act == "column" or act == "square"):
+						_send_player_despatch("[color=#ffe9a8]The battalion is encamped[/color] — break camp before it can re-form or manoeuvre.", {})
+						return
 					if act.begins_with("page:"):
 						_cmd_page = act.trim_prefix("page:")
 						return
@@ -11139,11 +13159,15 @@ func _unhandled_input(event: InputEvent) -> void:
 		match event.keycode:
 			KEY_ENTER:
 				if battle_over and _bill_panel and _bill_panel.visible:
-					Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-					if hosted:
-						host_done = true     # MP host frees this battle and resumes the lobby
+					if _campaign_over:
+						# the province is decided — the war is over; leave the field
+						Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+						if hosted:
+							host_done = true     # MP host frees this battle and resumes the lobby
+						else:
+							get_tree().change_scene_to_file("res://menu.tscn")
 					else:
-						get_tree().change_scene_to_file("res://menu.tscn")   # the day is done
+						_continue_to_next_day()   # a spent day — the campaign carries on
 				elif authoritative and not _battle_begun:
 					_begin_battle()       # advance the step-off
 			KEY_E:
@@ -11161,6 +13185,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_V:
 				if player_arm != "cavalry" and player_arm != "artillery":
 					_present()                           # "PRESENT!" — bring the muskets up
+			KEY_Y:
+				_accept_escort()          # take the offered supply convoy under your escort
 			KEY_1:
 				_choose_arm("infantry")   # at the step-off, choose the arm you command
 			KEY_2:
@@ -11195,6 +13221,15 @@ func _unhandled_input(event: InputEvent) -> void:
 					aidbg_panel.visible = _aidbg_on
 			KEY_F4:
 				_toggle_rts_cam()           # dev: free-fly RTS camera over the whole province
+			KEY_F5:
+				_save_game()                # quicksave the campaign
+			KEY_F9:
+				var sd = _load_save_file()  # quickload (this campaign — same map seed)
+				if sd != null:
+					_apply_save(sd)
+					_send_player_despatch("[color=#9fe0a0]Campaign reloaded — day %d.[/color]" % _day_count, {})
+				else:
+					_send_player_despatch("[color=#ff9a8a]No save to load.[/color]", {})
 			KEY_ESCAPE:
 				_mouse_captured = not _mouse_captured
 				Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if _mouse_captured else Input.MOUSE_MODE_VISIBLE
@@ -11587,6 +13622,18 @@ func _emit_dust(pos: Vector3, fwd: Vector3) -> void:
 	musket_smoke_p.emit_particle(Transform3D(Basis(), pos + jitter), kick,
 		Color(0.60, 0.50, 0.36), Color.WHITE, EMIT_FLAGS)
 
+# A few low puffs spread along a battalion's front, scaled to its strength — bigger
+# units throw up more dust under their boots, small remnants barely any.
+func _emit_march_dust(b: Batt) -> void:
+	var fwd := Vector3(sin(b.facing), 0, cos(b.facing))
+	var right := Vector3(fwd.z, 0, -fwd.x)
+	var width := minf(float(b.figs.size()) * 0.9, 90.0)
+	var n := clampi(b.figs.size() / 50, 1, 3)
+	for _i in range(n):
+		var p := b.pos - fwd * 1.5 + right * randf_range(-width * 0.5, width * 0.5)
+		p.y = _gh(p.x, p.z) + 0.05
+		_emit_dust(p, fwd)
+
 # A burst of fine blood mist the instant a man is struck — it puffs out away from the
 # shot, hangs for a moment, then sinks and leaves a splatter on the ground.
 func _emit_blood(pos: Vector3, dir: Vector3) -> void:
@@ -11741,6 +13788,14 @@ func _play_shot(pos: Vector3) -> void:
 	ap.volume_db = -3.0
 	ap.pitch_scale = randf_range(0.92, 1.12)
 	ap.play()
+
+# A line musket's report — drawn from the shared per-frame budget so a mass volley gives
+# every musket a crack without exhausting the voice pool. The player's own shots bypass this.
+func _play_shot_line(pos: Vector3) -> void:
+	if _musket_snd_left <= 0:
+		return
+	_musket_snd_left -= 1
+	_play_shot(pos)
 
 # ------------------------------------------------------------------ couriers
 
@@ -12013,6 +14068,8 @@ func _state_name(c: int) -> String:
 func _net_broadcast(delta: float) -> void:
 	if GameConfig.mode != "host":
 		return                                   # single-player: nobody to tell
+	if multiplayer.multiplayer_peer == null or multiplayer.get_peers().is_empty():
+		return                                   # no clients connected — don't build or send a frame
 	_net_cd -= delta
 	if _net_cd > 0.0:
 		return
@@ -12088,6 +14145,23 @@ func net_apply_input(slot: int, c_off_pos: Vector3, c_off_facing: float, order: 
 	if not order.is_empty():
 		_apply_net_order(b, order)
 
+# host: a player dropped — hand his orphaned battalion to the AI so the line keeps fighting
+# instead of standing frozen for want of orders. (Called by Net on peer_disconnected.)
+func net_player_left(slot: int) -> void:
+	var b := _batt_by_idx(slot)
+	if b == null:
+		return
+	b.human = false
+	if b != player:
+		b.is_player = false
+	b.order = Order.IDLE
+	_send_player_despatch("[color=#ffd27f]A commander has quit the field — his battalion comes under the army's hand.[/color]", {})
+
+# client: the host vanished — there is no authority left to run the battle, so bow out.
+func net_server_lost() -> void:
+	GameConfig.mode = "single"
+	get_tree().change_scene_to_file("res://menu.tscn")
+
 # HOST -> clients: discrete effects (volleys, melee clashes) the client reproduces.
 @rpc("authority", "call_remote", "unreliable")
 func _apply_fx(events: Array) -> void:
@@ -12119,6 +14193,7 @@ func _client_volley(b: Batt) -> void:
 			_emit_smoke(mp, fwd)
 			_emit_smoke(mp, fwd)
 			_emit_muzzle_bloom(mp, fwd)
+			_play_shot_line(mp)       # each musket in the volley reports too (budgeted)
 			pts.append(mp)
 	if pts.is_empty():
 		return
@@ -12168,7 +14243,7 @@ func _client_firing_fx(b: Batt, delta: float) -> void:
 			_emit_flash(mp)
 			_emit_smoke(mp, fwd)
 			_emit_muzzle_bloom(mp, fwd)
-			_play_shot(mp)
+			_play_shot_line(mp)
 			f["reload"] = RELOAD_TIME * randf_range(0.78, 1.3)
 		else:
 			f["reload"] = 0.0            # hold aimed for the volley command

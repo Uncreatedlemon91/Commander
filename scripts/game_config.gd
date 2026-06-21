@@ -19,6 +19,8 @@ var setup = null   # : BattleSetup (null -> the battle builds a default field)
 var return_to_world: bool = false   # battle should return to world.tscn, not the menu
 var world_state: Dictionary = {}    # the whole province, serialized across the battle
 var battle_tokens: Array = []       # ids of the world tokens that inflated into this battle
+var load_requested: bool = false    # "Continue Campaign": game.gd loads the save file on start
+var dedicated: bool = false         # this peer is a HEADLESS DEDICATED SERVER (hosts + simulates, no local player)
 
 # CHARACTER CREATION — the militia the player raises at the start of a campaign.
 # Authored on the intro screen (menu.gd), applied to the player's battalion in the

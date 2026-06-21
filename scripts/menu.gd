@@ -98,7 +98,9 @@ func _ready() -> void:
 	Net.lobby_updated.connect(_refresh_lobby)
 
 	var args := OS.get_cmdline_user_args()
-	if "--auto-host" in args:
+	if "--server" in args or "--dedicated" in args:
+		_on_dedicated()                       # headless dedicated server: host, wait, auto-start
+	elif "--auto-host" in args:
 		_on_host()
 		get_tree().create_timer(3.0).timeout.connect(_on_start)
 	elif "--auto-join" in args:
@@ -114,6 +116,8 @@ func _build_main() -> void:
 	root.move_child(main, 3)
 
 	_btn(main, "New Game", _on_world)             # raise your militia and take the field
+	if FileAccess.file_exists("user://commander_save.dat"):
+		_btn(main, "Continue Campaign", _on_continue)   # resume the saved campaign
 
 	var mp_lbl := Label.new()
 	mp_lbl.text = "MULTIPLAYER"
@@ -124,6 +128,7 @@ func _build_main() -> void:
 	main.add_child(mp_lbl)
 
 	_btn(main, "Host Game", _on_host)
+	_btn(main, "Dedicated Server", _on_dedicated)   # host + simulate, command no battalion yourself
 	var iprow := HBoxContainer.new()
 	iprow.add_theme_constant_override("separation", 6)
 	ip_edit = LineEdit.new()
@@ -219,7 +224,18 @@ func _on_world() -> void:
 	GameConfig.setup = null
 	GameConfig.battle_tokens = []
 	GameConfig.has_militia = false
+	GameConfig.load_requested = false
 	_enter_campaign_intro()
+
+# Resume the saved campaign: game.gd reads the save on start (seed, militia, towns, units).
+func _on_continue() -> void:
+	GameConfig.world_state = {}
+	GameConfig.return_to_world = false
+	GameConfig.setup = null
+	GameConfig.battle_tokens = []
+	GameConfig.mode = "single"
+	GameConfig.load_requested = true
+	get_tree().change_scene_to_file("res://game.tscn")
 
 func _take_the_field() -> void:
 	GameConfig.has_militia = true
@@ -462,6 +478,17 @@ func _on_host() -> void:
 		return
 	_enter_lobby()
 	status.text = "Hosting on port %d — waiting for players…" % Net.PORT
+
+# Headless/standalone dedicated server: host the match, command no battalion, and let Net
+# auto-start the battle a short while after the first player joins.
+func _on_dedicated() -> void:
+	var err := Net.host_game(true)
+	if err != OK:
+		status.text = "Failed to start server (error %d)" % err
+		print("[NET] dedicated host failed: error %d" % err)
+		return
+	status.text = "Dedicated server on port %d — waiting for players to join…" % Net.PORT
+	print("[NET] dedicated server up on port %d, awaiting players" % Net.PORT)
 
 func _on_join() -> void:
 	var err := Net.join_game(ip_edit.text.strip_edges())

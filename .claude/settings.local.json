@@ -86,7 +86,29 @@
       "Bash(timeout 90 \"C:/Users/Felix/Downloads/Godot_v4.6.3-stable_win64.exe/Godot_v4.6.3-stable_win64_console.exe\" --headless --quit-after 600 -- --auto-host)",
       "Bash(~/Downloads/Godot_v4.6.3-stable_win64.exe --headless --editor --quit)",
       "Bash(\"/c/Users/Felix/Downloads/Godot_v4.6.3-stable_win64.exe/Godot_v4.6.3-stable_win64_console.exe\" --headless --editor --quit)",
-      "Bash(\"/c/Users/Felix/Downloads/Godot_v4.6.3-stable_win64.exe/Godot_v4.6.3-stable_win64_console.exe\" --headless --quit-after 650 -- --auto-host)"
+      "Bash(\"/c/Users/Felix/Downloads/Godot_v4.6.3-stable_win64.exe/Godot_v4.6.3-stable_win64_console.exe\" --headless --quit-after 650 -- --auto-host)",
+      "Bash(\"/c/Users/Felix/Downloads/Godot_v4.6.3-stable_win64.exe/Godot_v4.6.3-stable_win64_console.exe\" --headless --quit-after 900 -- --auto-host)",
+      "Bash(cp scripts/game.gd /tmp/game_econ_backup.gd)",
+      "Bash(sed -i 's/const BARRACKS_GRAIN := 240.0/const BARRACKS_GRAIN := 3.0/; s/const BARRACKS_IRON := 150.0/const BARRACKS_IRON := 2.0/' scripts/game.gd)",
+      "Bash(\"/c/Users/Felix/Downloads/Godot_v4.6.3-stable_win64.exe/Godot_v4.6.3-stable_win64_console.exe\" --headless --quit-after 1200 -- --auto-host)",
+      "Bash(\"/c/Users/Felix/Downloads/Godot_v4.6.3-stable_win64.exe/Godot_v4.6.3-stable_win64_console.exe\" --headless --quit-after 1500 -- --auto-host)",
+      "Bash(cp scripts/game.gd /tmp/game_supply_backup.gd)",
+      "Bash(sed -i 's/const MAT_PER_SIZE := 0.28/const MAT_PER_SIZE := 30.0/' scripts/game.gd)",
+      "Bash(\"/c/Users/Felix/Downloads/Godot_v4.6.3-stable_win64.exe/Godot_v4.6.3-stable_win64_console.exe\" --headless --quit-after 2000 -- --auto-host)",
+      "Bash(cp scripts/game.gd /tmp/game_supply3_backup.gd)",
+      "Bash(\"/c/Users/Felix/Downloads/Godot_v4.6.3-stable_win64.exe/Godot_v4.6.3-stable_win64_console.exe\" --headless --quit-after 800 -- --auto-host)",
+      "Bash(cp scripts/game.gd /tmp/game_saveload_backup.gd)",
+      "Bash(perl -0pi -e 's/\\(\\\\t_set_objective\\\\\\(\\\\\\)\\\\s+# your personal charge for the day\\)/\\\\t_save_game\\(\\)\\\\n\\\\t_apply_save\\(_load_save_file\\(\\)\\)\\\\n$1/' scripts/game.gd)",
+      "Bash(grep -n \"custom_data\\\\|_arm_phase\\\\|arm_p\\\\|reload_phase\\\\|\\\\.volley_cd\\\\|present_t\\\\|f\\\\\\\\.reload\\\\|Color\\(wear\\\\|Color\\(f\\\\\\\\[\" scripts/game.gd)",
+      "Bash(\"/c/Users/Felix/Downloads/Godot_v4.6.3-stable_win64.exe/Godot_v4.6.3-stable_win64_console.exe\" --headless --quit-after 700 -- --auto-host)",
+      "Bash(cd ~/Documents/GitHub/Commander && sed -n '5841,5963p' /tmp/old_artillery.gd)",
+      "Bash(awk 'NR>=5964 && /crew|limber|gunner|draft_horse|chest|horse/' /tmp/old_artillery.gd)",
+      "Bash(\"/c/Users/Felix/Downloads/Godot_v4.6.3-stable_win64.exe/Godot_v4.6.3-stable_win64_console.exe\" --headless --quit-after 750 -- --auto-host)",
+      "Bash(perl -i -pe 's/^\\\\t{7}\\(volley_pts\\\\.append\\\\\\(mp\\\\\\)\\)/\\\\t\\\\t\\\\t\\\\t\\\\t\\\\t$1/' scripts/game.gd)",
+      "Bash(perl -i -pe 's/^\\\\t{6}\\(volley_pts\\\\.append\\\\\\(mp\\\\\\)\\)/\\\\t\\\\t\\\\t\\\\t\\\\t$1/' scripts/game.gd)",
+      "Bash(grep -n \"^\\\\t*pts\\\\.append\\(mp\\)$\" scripts/game.gd)",
+      "Bash(perl -i -pe 's/^\\(\\\\t{3}\\)\\(pts\\\\.append\\\\\\(mp\\\\\\)\\)$/$1_play_shot_line\\(mp\\)       # each musket in the volley reports too \\(budgeted\\)\\\\n$1$2/' scripts/game.gd)",
+      "Bash(\"/c/Users/Felix/Downloads/Godot_v4.6.3-stable_win64.exe/Godot_v4.6.3-stable_win64_console.exe\" --headless --quit-after 1400 -- --auto-join)"
     ]
   }
 }
