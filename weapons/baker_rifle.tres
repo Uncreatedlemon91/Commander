@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="Weapon" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/weapon.gd" id="1_weapon"]
+
+[resource]
+script = ExtResource("1_weapon")
+id = "baker_rifle"
+display_name = "Baker Rifle"
+max_range = 180.0
+reload_time = 50.0
+hit_point_blank = 0.32
+hit_falloff = 0.5
+yaw_sd = 0.01
+pitch_sd = 0.008
+aim_lead = 1.1

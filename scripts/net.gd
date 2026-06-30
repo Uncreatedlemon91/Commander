@@ -13,30 +13,37 @@ signal net_status(text: String)      # human-readable connection state, for the 
 
 const PORT := 24555
 const MAX_PEERS := 16
-# the multiplayer skirmish is per_side battalions a team; the claimable command
-# slots are global unit indices: 0..MP_PER_SIDE-1 = team 0, the rest = team 1.
+# Multiplayer IS the campaign (one scene, no staged skirmish): each player commands one battalion
+# inside the full order of battle and rides the living province. A slot is an abstract PLAYER INDEX
+# (0..MAX); game.gd maps it to a brigade-lead battalion (even index -> Crown, odd -> Continental),
+# so players spread across the field on opposing sides and take their orders from the command chain.
 const MP_PER_SIDE := 8
-# interleaved so the first players to join end up on opposing sides
-const HUMAN_SLOTS := [0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15]
+const HUMAN_SLOTS := [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
 const DEDICATED_START_GRACE := 8.0   # a dedicated server kicks off this long after the first player joins
 
 var lobby: Dictionary = {}      # peer_id -> battalion slot (synced to everyone)
+var scenario: String = ""       # "" = the campaign field; else a historical key ("waterloo"), synced to clients
 var game: Node = null           # the running battle, set by game.gd
 var dedicated := false          # this peer is a headless dedicated server (commands no battalion)
 var _started := false           # the battle has been launched (guards a double start)
+var _upnp: UPNP = null          # the opened router port-mapping (for internet play), if any
 
 # ---------------------------------------------------------------- hosting / joining
 
 # Start hosting. dedicated_mode = true → a headless server with no battalion of its own.
-func host_game(dedicated_mode := false) -> int:
+# use_upnp = true → best-effort open the router's port so players can join over the internet.
+func host_game(dedicated_mode := false, use_upnp := false) -> int:
 	var p := ENetMultiplayerPeer.new()
 	var err := p.create_server(PORT, MAX_PEERS)
 	if err != OK:
 		return err
 	multiplayer.multiplayer_peer = p
+	if use_upnp:
+		_try_upnp()
 	GameConfig.mode = "host"
 	dedicated = dedicated_mode
 	GameConfig.dedicated = dedicated_mode
+	scenario = GameConfig.historical    # "" for the campaign field; a key for a set-piece battle
 	_started = false
 	if dedicated_mode:
 		lobby = {}                          # the server holds no command slot
@@ -70,12 +77,40 @@ func join_game(ip: String) -> int:
 	emit_signal("net_status", "Connecting to %s …" % ip)
 	return OK
 
+# Best-effort: ask the router (via UPnP) to forward our port to this machine, and report the
+# public address players should connect to. Many networks disable UPnP — on failure we just tell
+# the host to forward PORT/UDP by hand. NOTE: discover() blocks briefly while it probes the LAN.
+func _try_upnp() -> void:
+	var u := UPNP.new()
+	var derr := u.discover()
+	if derr != UPNP.UPNP_RESULT_SUCCESS:
+		print("[NET] UPnP: no router found (%d). For internet play, forward port %d/UDP manually." % [derr, PORT])
+		emit_signal("net_status", "UPnP unavailable — forward port %d (UDP) on your router" % PORT)
+		return
+	var gw := u.get_gateway()
+	if gw == null or not gw.is_valid_gateway():
+		print("[NET] UPnP: no valid gateway. Forward port %d/UDP manually." % PORT)
+		return
+	var merr := u.add_port_mapping(PORT, PORT, "Commander", "UDP", 0)
+	var ext := u.query_external_address()
+	if merr == UPNP.UPNP_RESULT_SUCCESS and ext != "":
+		_upnp = u
+		print("[NET] UPnP: port %d open. Players join at  %s  (port %d)" % [PORT, ext, PORT])
+		emit_signal("net_status", "Internet ready — players join at %s" % ext)
+	else:
+		print("[NET] UPnP: port mapping failed (%d). External IP looks like %s; forward %d/UDP manually." % [merr, ext, PORT])
+		emit_signal("net_status", "UPnP map failed — forward port %d (UDP) manually" % PORT)
+
 # tear everything down and return to a clean single-player state
 func leave() -> void:
+	if _upnp != null:
+		_upnp.delete_port_mapping(PORT, "UDP")
+		_upnp = null
 	if multiplayer.multiplayer_peer != null:
 		multiplayer.multiplayer_peer.close()
 		multiplayer.multiplayer_peer = null
 	lobby = {}
+	scenario = ""
 	dedicated = false
 	_started = false
 	game = null
@@ -168,12 +203,17 @@ func _set_slot(id: int, slot: int) -> void:
 	_broadcast_lobby()
 
 func _broadcast_lobby() -> void:
-	rpc("_sync_lobby", lobby)
-	_sync_lobby(lobby)                # apply on the host too
+	rpc("_sync_lobby", lobby, scenario)
+	_sync_lobby(lobby, scenario)      # apply on the host too
 
 @rpc("authority", "call_local", "reliable")
-func _sync_lobby(l: Dictionary) -> void:
+func _sync_lobby(l: Dictionary, sc: String) -> void:
 	lobby = l
+	scenario = sc
+	# clients learn the scenario from the lobby so their slot labels read right and (at load) the
+	# battle builds the correct terrain; the host already has it set.
+	if not multiplayer.is_server():
+		GameConfig.historical = sc
 	var myid := multiplayer.get_unique_id()
 	if lobby.has(myid):
 		GameConfig.local_slot = lobby[myid]
@@ -183,9 +223,11 @@ func human_slots() -> Array:
 	return lobby.values()
 
 func slot_label(slot: int) -> String:
-	if slot < MP_PER_SIDE:
-		return "Foot %d" % (slot + 1)
-	return "Prov %d" % (slot - MP_PER_SIDE + 1)
+	if scenario != "":
+		# a set-piece battle: even player-index → Anglo-Allied, odd → French
+		return "%s — cmd %d" % ["Allied" if slot % 2 == 0 else "French", slot / 2 + 1]
+	# the campaign field: even → Crown (team 0), odd → Continental (team 1)
+	return "%s — cmd %d" % ["Crown" if slot % 2 == 0 else "Continental", slot / 2 + 1]
 
 # ---------------------------------------------------------------- match start
 
@@ -195,8 +237,18 @@ func start_game() -> void:
 	if dedicated and lobby.is_empty():
 		return                        # nobody to play — keep waiting
 	_started = true
-	# author the shared skirmish (small enough to sync) and hand it to everyone
-	var setup := BattleSetup.skirmish(MP_PER_SIDE, lobby.values())
+	# a set-piece historical battle, or the campaign field. For history, build the authored OOB and
+	# bind the CLAIMED lobby slots to real battalions (each side's commands); for the campaign, hand
+	# everyone the same seeded full field. Either way every peer gets the identical setup.
+	var setup: BattleSetup
+	if scenario != "":
+		setup = Historical.make(scenario)
+		if setup == null:
+			setup = BattleSetup.default_field()
+		else:
+			Historical.assign_mp_slots(setup, lobby.values())
+	else:
+		setup = BattleSetup.default_field()
 	rpc("_load_battle", setup.to_dict())
 
 @rpc("authority", "call_local", "reliable")
@@ -204,8 +256,10 @@ func _load_battle(setup_dict: Dictionary) -> void:
 	var setup := BattleSetup.from_dict(setup_dict)
 	GameConfig.setup = setup
 	GameConfig.match_seed = setup.seed_value
+	GameConfig.historical = setup.historical   # flips _wmap → the right terrain + AI script on every peer
 	GameConfig.return_to_world = false
 	GameConfig.load_requested = false
+	GameConfig.has_militia = false        # MP: every player commands an OOB battalion, not a militia
 	print("[NET] loading battle (mode=%s, dedicated=%s, slot=%d, %d battalions)"
 		% [GameConfig.mode, GameConfig.dedicated, GameConfig.local_slot, setup.units.size()])
 	get_tree().change_scene_to_file("res://game.tscn")

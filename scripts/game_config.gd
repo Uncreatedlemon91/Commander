@@ -21,6 +21,7 @@ var world_state: Dictionary = {}    # the whole province, serialized across the 
 var battle_tokens: Array = []       # ids of the world tokens that inflated into this battle
 var load_requested: bool = false    # "Continue Campaign": game.gd loads the save file on start
 var dedicated: bool = false         # this peer is a HEADLESS DEDICATED SERVER (hosts + simulates, no local player)
+var historical: String = ""         # a set-piece historical battle by key ("waterloo") — drives terrain + OOB
 
 # CHARACTER CREATION — the militia the player raises at the start of a campaign.
 # Authored on the intro screen (menu.gd), applied to the player's battalion in the

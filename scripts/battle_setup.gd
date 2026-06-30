@@ -21,6 +21,11 @@ class BattUnit:
 	var fatigue: float = 0.0        # carried weariness — rested down in camp between battles
 	var coat_idx: int = 0
 	var facing_col: Color = Color.WHITE
+	var belt_idx: int = -1          # crossbelt colour (−1 = default white/hashed; 1 = a rifle's black belts)
+	var pants_idx: int = -1         # trouser colour (−1 = default/hashed)
+	var hat_idx: int = -1           # headgear shape (−1 = default/hashed)
+	var nation: String = "GEN"      # nationality key (FR/BR/PR/… or GEN) — drives the AI's national doctrine
+	var weapon: String = "brown_bess"   # weapon id → weapons/<id>.tres (drives range/reload/accuracy)
 	var brigade: int = 0            # place in the order of battle
 	var division: int = 0
 	var corps: int = 0
@@ -32,6 +37,8 @@ class BattUnit:
 		return { "n": name, "t": team, "m": men, "a": ammo, "mo": morale,
 			"e": experience, "sk": skills, "ft": fatigue, "c": coat_idx,
 			"f": [facing_col.r, facing_col.g, facing_col.b],
+			"bl": belt_idx, "pt": pants_idx, "ht": hat_idx,
+			"nt": nation, "wp": weapon,
 			"b": brigade, "d": division, "k": corps,
 			"p": [pos.x, pos.z], "fa": facing, "h": human_slot }
 
@@ -48,6 +55,11 @@ class BattUnit:
 		u.coat_idx = int(d.get("c", 0))
 		var f: Array = d.get("f", [1.0, 1.0, 1.0])
 		u.facing_col = Color(f[0], f[1], f[2])
+		u.belt_idx = int(d.get("bl", -1))
+		u.pants_idx = int(d.get("pt", -1))
+		u.hat_idx = int(d.get("ht", -1))
+		u.nation = String(d.get("nt", "GEN"))
+		u.weapon = String(d.get("wp", "brown_bess"))
 		u.brigade = int(d.get("b", 0))
 		u.division = int(d.get("d", 0))
 		u.corps = int(d.get("k", 0))
@@ -63,6 +75,7 @@ var cav_per_team: Array[int] = [6, 6] # regiments
 var seed_value: int = 0
 var weather: String = "clear"
 var time_of_day: float = 8.5
+var historical: String = ""           # a set-piece key ("waterloo") → drives terrain + the AI script
 var goal: Array[String] = ["", ""]    # per-team directed goal ("" = deduce freely)
 var result: Dictionary = {}           # filled by the battle: winner, losses, survivors
 
@@ -118,7 +131,7 @@ func to_dict() -> Dictionary:
 	for u in units:
 		ud.append(u.to_dict())
 	return { "u": ud, "g": guns_per_team, "c": cav_per_team, "s": seed_value,
-		"w": weather, "tod": time_of_day, "goal": goal }
+		"w": weather, "tod": time_of_day, "hist": historical, "goal": goal }
 
 static func from_dict(d: Dictionary) -> BattleSetup:
 	var s := BattleSetup.new()
@@ -127,4 +140,9 @@ static func from_dict(d: Dictionary) -> BattleSetup:
 	s.seed_value = int(d.get("s", 1))
 	s.weather = String(d.get("w", "clear"))
 	s.time_of_day = float(d.get("tod", 8.5))
+	s.historical = String(d.get("hist", ""))
+	var g: Array = d.get("g", [32, 32])
+	s.guns_per_team = [int(g[0]), int(g[1])]
+	var c: Array = d.get("c", [6, 6])
+	s.cav_per_team = [int(c[0]), int(c[1])]
 	return s

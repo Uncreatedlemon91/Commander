@@ -28,6 +28,8 @@ const BRIG_BATT_SPACING := 138.0  # interval between battalions dressed in a bri
 const BRIG_FRONT := 3             # battalions in the front line; the rest form a reserve
 const RESERVE_DEPTH := 55.0       # how far the reserve line stands behind the front
 const BRIG_DECIDE := 0.9          # a brigade re-reads the field this often (s)
+const BRIG_TURN_RATE := 1.6       # how fast a brigade wheels its line onto a new facing (rad-ease/s) — smooths slots
+const FORM_LOCK_TIME := 1.6       # after a battalion changes formation it HOLDS for this long — kills column<->line strobe
 const ARMY_DECIDE := 3.5          # the army commander re-plans this often (s)
 const FLANK_REACH := 120.0        # how far around an enemy flank a turning brigade swings
 const BRIG_ENGAGE_RANGE := 72.0   # halt & open fire when the enemy line is in musket range
@@ -59,8 +61,10 @@ const CAV_TYPE_DATA := [
 	{ "name": "Heavy Dragoons", "trot": 2.9, "gallop": 5.8, "rally_mult": 1.25, "shock": 1.30, "sturdy": 1.25, "scout": 0.85, "mount_scale": 1.14 },
 	{ "name": "Lancers",        "trot": 3.2, "gallop": 6.6, "rally_mult": 1.00, "shock": 1.20, "sturdy": 0.90, "scout": 1.00, "mount_scale": 1.02 },
 ]
-const SQUARE_ALERT := 150.0       # infantry forms square when enemy horse is this close
+const SQUARE_ALERT := 150.0       # infantry forms square when a CHARGING enemy horse is this close
 const SQUARE_RELAX := 230.0       # ...and re-forms line once it is well clear
+const SQUARE_PANIC := 100.0       # ...or for ANY enemy horse this close, charging or not (point-blank)
+const SQUARE_HOLD := 4.0          # hold the square this long after the threat clears — kills square<->line flicker
 # --- command depth: detachments, rallying, resupply ---
 const SKIRM_SCREEN := 42.0        # how far ahead of the battalion its skirmish screen works
 const RALLY_RANGE := 32.0         # ride this close to broken men to steady them
@@ -87,6 +91,8 @@ const MAN_SPEED := 2.0
 const OFF_WALK := 2.1             # your horse at a walk
 const OFF_RUN := 4.8              # ...and at a canter (Shift)
 const FORMUP_DIST := 7.0
+const LINE_HOLD_DIST := 45.0     # once formed in line a battalion HOLDS it until its slot drifts past
+								 # this (a wide deadband) — stops the line↔column / facing strobe on the advance
 const MOUSE_SENS := 0.0035
 # --- musketry (historical, tuned: long range almost useless, point-blank murderous) ---
 const RELOAD_TIME := 30.0         # ~2 rounds/min sustained — bite, pour, ram, prime, present
@@ -159,6 +165,13 @@ const HELD_VOLLEY_SHOCK := 2.3    # and shatters nerve far beyond the bodies it 
 const MORALE_RECOVER := 3.0       # per second once out of the fight
 const ROUT_SPEED := 3.4           # broken men run
 const AIM_LEAD := 0.7             # a man levels his musket this long before he's loaded
+# A commanded volley is STAGGERED by the battalion's DRILL: crack troops crash out almost as one,
+# raw troops straggle their fire over a window. The spread (first shot → last) runs from this max at
+# drill 0 down to the min at drill 100.
+const VOLLEY_SPREAD_MAX := 5.0   # raw, undrilled — a ragged five seconds of fire
+const VOLLEY_SPREAD_MIN := 0.18  # crack troops — a single crashing report
+const VOLLEY_CRASH_MIN := 10     # men firing together in one frame for it to BOOM as a volley crash
+								 # (below this it's left as the crackle of individual shots)
 # --- bayonet charge & melee ---
 const CHARGE_SPEED := 3.6         # the pas de charge (m/s)
 const CHARGE_RANGE := 65.0        # you may order a charge within this
@@ -166,6 +179,13 @@ const MELEE_RANGE := 6.0          # contact distance
 const CHARGE_SHOCK := 34.0        # morale blow the defender takes at the moment of impact
 const MELEE_RATE := 18.0          # men lost per second in the press (scaled by morale)
 const MELEE_MORALE := 16.0        # morale bled per second locked in melee
+# --- per-man duel melee (only the men at the SEAM fight; skill sets who bleeds, numbers lap the flank) ---
+const MELEE_MIN := 60            # a unit ground below this in the press is finished — the melee ends
+const MELEE_DUEL_RATE := 0.05    # men lost per CONTACTING pair per second (the grind's pace) — tunable
+const MELEE_FLANK_LAP := 0.4     # bonus a wider line gets for lapping the narrower one's flank
+const MELEE_MORALE_SLOW := 0.16  # how fast nerve erodes in the grind (lower = longer, bloodier fights)
+const MELEE_SKILL_PROTECT := 3.0 # in the press the less-skilled fall first — a good swordsman keeps his feet
+const MELEE_XP_GAIN := 0.04      # melee-skill a named front-rank man hardens by, per second in the press
 const CHARGE_COOL := 8.0          # seconds before a unit can charge again
 # companies are per-nation (French 6, British/Allied 10); see Batt.companies
 const COMPANY_GAP := 1.1         # visible lateral gap between companies (m)
@@ -180,6 +200,8 @@ const AUDIO_POOL := 128           # the whole front is audible now — more voic
 # shot-voices spawn each frame so a mass volley can't starve the pool of voices/cannon/orders.
 const MUSKET_SND_BUDGET := 64
 var _musket_snd_left := 0
+const COCK_SND_BUDGET := 40       # per-frame cap on "MusketCock" clicks (a crackle as the line presents)
+var _cock_snd_left := 0
 const MAX_PER_TEAM := BATT_PER_TEAM * MEN + MILITIA_MAX_MEN   # headroom for an independent militia on top of the standing OOB
 const CORPSE_MAX := 24000          # per team, rolling (the oldest dead are re-used)
 const RAID_CAP := 480              # team 2's render headroom — raiding parties are small war-bands, not armies
@@ -201,16 +223,50 @@ const SCAR_MAX := 512              # ground furrows torn by roundshot
 
 # LOD distances (m) from the camera
 const LOD_NEAR := 70.0
-const LOD_MID := 160.0
-const LOD_FAR := 340.0            # full per-man simulation out to here...
-const LOD_VFAR := 1400.0          # ...then a static formation IMPRESSION to here
+const LOD_MID := 150.0
+const LOD_FAR := 240.0            # full per-man detail out to here (pulled in for the big set-piece scale)...
+const LOD_VFAR := 1150.0          # ...then a static formation IMPRESSION to here, then culled entirely
+const LOD_HYST := 25.0           # dead-band around each LOD boundary so a unit at the edge doesn't
+								 # strobe between detailed men and the box-man impression
+# The far IMPRESSION (beyond LOD_FAR) draws only every Nth man — and that N GROWS with distance, so a
+# battalion at the back of the field costs a fraction of one up close. Lower the base / cap to render
+# fewer distant troops (more FPS); raise them for a denser-looking horizon. (Pure render — no sim effect.)
+const LOD_IMPRESSION_STEP := 6    # every Nth man at LOD_FAR
+const LOD_IMPRESSION_FALLOFF := 75.0   # +1 to the step every this-many metres further out
+const LOD_IMPRESSION_MAX := 22    # never sparser than 1-in-this
+const SEEN_GRACE := 0.4          # keep a just-departed unit drawn this long after it leaves the
+								 # frustum, so units don't flicker out at the screen edge
+# FOG OF WAR — you only know the enemy your own forces can see. Sight radii by spotter type;
+# light cavalry are the eyes of the army. A spotted enemy is drawn; one only lately seen leaves a
+# fading GHOST on the map at its last-known place; one never seen isn't there at all.
+const SIGHT_INF := 280.0         # a battalion's pickets see out to here
+const SIGHT_CAV := 620.0         # light horse range furthest — the scouts
+const SIGHT_OFFICER := 320.0     # you, in the saddle (the spyglass extends it)
+const SIGHT_GUN := 200.0         # a battery's own watch
+const VISION_TICK := 0.3         # recompute the army's picture this often (cheap, not per-frame)
+const PLAYER_SEES_ALL := true    # the PLAYER's view shows every enemy (no LoS hiding); the AI still has fog & scouts
+const GHOST_FADE := 90.0         # campaign-seconds a last-known marker lingers before it's forgotten
+const SCOUT_DIST := 900.0        # how far ahead light horse range to scout / picket the army's front
+const SCOUT_THREAT := 230.0      # enemy horse this close turns a scouting party for home
+const AI_MEMORY := 30.0          # how long a commander remembers a scouted enemy before the intel goes cold
+const NET_FOG_EXPIRE := 0.7      # MP client: an enemy not streamed for this long has slipped our sight
 
 enum Order { IDLE, FOLLOW }
 
 class Batt:
 	var team: int
 	var is_player: bool = false
+	var human_slot: int = -1        # the MP lobby slot commanding this battalion (-1 = AI-led)
 	var independent: bool = false   # founded militia: never joins the brigade/division/corps OOB
+	# authored OOB place (set from BattleSetup.BattUnit for historical battles; -1 = group procedurally)
+	var oob_corps: int = -1
+	var oob_division: int = -1
+	var oob_brigade: int = -1
+	var nation: String = "GEN"     # nationality key (FR/BR/PR/… or GEN) — drives the command AI's national doctrine
+	var weapon_id: String = "brown_bess"   # weapon id → weapons/<id>.tres; resolved lazily into `wpn`
+	var wpn: Weapon = null         # the resolved Weapon (range/reload/accuracy) — via _wpn(b)
+	var form_lock_t: float = 0.0   # cooldown after a column<->line/march change, so the formation can't strobe
+	var square_t: float = 0.0      # how much longer to hold square after the cavalry threat has passed
 	var pos: Vector3
 	var facing: float = 0.0
 	var formation: String = "line"
@@ -242,8 +298,11 @@ class Batt:
 	var calm_t: float = 0.0        # seconds since last casualty taken
 	var volley_fire: bool = false  # true = hold fire until the officer's command
 	var auto_volley: bool = false  # volley fire: wait until all are loaded, then fire as one
+	var indep_fire: bool = false   # INDEPENDENT fire: each man presents (cocks), holds, then fires at will
 	var volley_seq: float = 0.0    # the words of command run their course before the crash
 	var fire_now: bool = false     # one-shot: the officer's "FIRE!" this frame
+	var volley_window: float = 0.0 # >0 while a commanded volley is rippling out (staggered by drill)
+	var _volley_boom_cd: float = 0.0   # throttle on the volley CRASH report (the per-shot cracks aside)
 	var presenting: bool = false   # player order "Present!" — muskets up even with no target
 	var present_t: float = 0.0     # seconds the present has been held (the arms tire, then lower)
 	var fire_forward: bool = false # player order "Fire!" — discharge straight ahead, enemy or not
@@ -280,6 +339,12 @@ class Batt:
 	var _sleep_acc: float = 0.0    # elapsed time banked while asleep
 	var _active: bool = true       # simulated this frame?
 	var _tick_dt: float = 0.0      # the delta to integrate this tick (banked time when waking)
+	var _seen_t: float = -100.0    # _t when last inside the view frustum (render hysteresis)
+	var _lod: int = 0              # the render LOD it settled on last frame (LOD-band hysteresis)
+	# FOG OF WAR (an enemy unit's state in the local player's eyes): spotted now, and where/when last seen
+	var _spotted: bool = false
+	var _intel_pos: Vector3 = Vector3.ZERO
+	var _intel_t: float = -1000.0
 	var flinch: float = 0.0        # visible recoil/shudder when shocked (decays)
 	var shot_from: Vector3 = Vector3.ZERO   # where the incoming fire is coming from
 	var off_pos: Vector3           # this battalion's officer
@@ -351,6 +416,8 @@ class Gun:
 	var limber_state: String = "deployed"   # deployed | limbering | moving | unlimbering
 	var limber_t: float = 0.0   # timer for the current limber/unlimber transition
 	var limber_group: Node3D    # the limber cart + horse team (shown only while limbered)
+	var _spotted: bool = false  # fog of war: seen by the local player's side this frame
+	var _intel_t: float = -1000.0
 
 # A brigade: several battalions and a battery under one commander, manoeuvring as a
 # body to 18th-century doctrine — advance in line, soften with artillery, assault a
@@ -358,11 +425,19 @@ class Gun:
 class Brigade:
 	var team: int
 	var idx: int = 0
+	var nation: String = "GEN"     # dominant nationality of its battalions
+	var doctrine: Dictionary = {}  # the national doctrine it fights by (DOCTRINE entry)
+	var temper: Dictionary = {}    # the brigadier's temperament (TEMPERS entry)
+	var terrain_anchor: Vector3 = Vector3.INF   # ground the army wants it to form on/hold (INF = none) — Phase 2
+	var on_flank: int = 0          # -1 = army's left flank, +1 = right, 0 = interior (for flank anchoring)
+	var hold_high: bool = false    # a defender: stand on the chosen ground, don't advance off the crest
+	var obs_prev: Vector3 = Vector3.INF   # last observed centre (the enemy uses it to read this brigade's momentum)
 	var battalions: Array = []     # its Batt members
 	var guns: Array = []           # its attached battery
 	var posture: String = "advance"   # advance | engage | assault | hold | support | withdraw
 	var anchor: Vector3            # centre of the brigade's intended line
-	var facing: float = 0.0        # the direction it faces (toward the enemy)
+	var facing: float = 0.0        # the direction it faces (eased toward face_want so slots don't strobe)
+	var face_want: float = 0.0     # the direction it WANTS to face; `facing` turns onto it smoothly
 	var enemy = null               # the enemy Brigade it is engaging
 	var fire_mission = null        # an enemy Batt to point the battery at
 	var decide_cd: float = 0.0     # throttle on re-deciding
@@ -383,6 +458,9 @@ class Brigade:
 	var flank_side: int = 0        # for a flank mission: which way to swing (-1 / +1)
 	var objective: Vector3         # the ground the brigade is moving its line onto
 	var seize: Vector3 = Vector3.INF   # a TOWN the army has directed this brigade to take (INF = none)
+	# --- historical-script overrides (Waterloo): hold in place until a time, then march to a set point ---
+	var hold_until: float = 0.0    # while _t < this, the brigade stands fast (reserve / not yet arrived)
+	var scripted_obj: Vector3 = Vector3.ZERO   # a directed objective; cleared once reached (then normal AI)
 	# --- the OPERATIONAL task: this brigade's PRIMARY directive on the dispersed map. It marches
 	# to and works around a place; it only drops into the tactical battle (above) on CONTACT ---
 	var task_kind: String = "screen"   # assault | defend | screen
@@ -396,6 +474,9 @@ class Division:
 	var team: int
 	var idx: int = 0
 	var corps: int = 0
+	var nation: String = "GEN"     # dominant nationality of its brigades
+	var doctrine: Dictionary = {}  # the national doctrine (DOCTRINE entry)
+	var temper: Dictionary = {}    # the divisional general's temperament (TEMPERS entry)
 	var line2: bool = false
 	var directive: String = "hold"   # main | fix | reserve | hold — the army's order
 	var objective: Vector3           # the ground the army points the division at
@@ -411,12 +492,20 @@ class Division:
 class Army:
 	var team: int
 	var decide_cd: float = 0.0
-	var aggression: float = 0.5    # personality: cautious (0) .. bold (1)
+	var aggression: float = 0.5    # personality: cautious (0) .. bold (1) — derived from doctrine + temperament
+	var nation: String = "GEN"     # dominant nationality of the army
+	var doctrine: Dictionary = {}  # its national doctrine (DOCTRINE entry)
+	var temper: Dictionary = {}    # the army commander's temperament (TEMPERS entry)
+	var role: String = "meeting"   # strategic posture: attack | defend | rearguard | meeting — sets the war aim
+	var threat_x: float = 0.0      # ANTICIPATION (Phase 2): lateral axis where the enemy's weight is gathering
+	var threat_t: float = 0.0      # when that reading was last taken (0 = none yet)
+	var threat_mass: float = 0.0   # how concentrated/committed the read threat is (0..1) — confidence
 	var plan: String = "develop"   # develop | press | defend
 	var main = null                # the brigade making the main effort
 	# --- the appreciation: the goal this commander has DEDUCED for himself ---
 	var goal: String = "develop"   # destroy | turn_left | turn_right | break_centre | bleed | delay | seize
 	var goal_t: float = 0.0        # commitment: how long the present goal has stood
+	var scripted_goal: String = ""  # historical script forces the army's intent (Waterloo) when set
 	var play: String = ""          # the doctrine play serving the goal (e.g. grand_battery)
 	var gb_pos: Vector3            # where the grand battery masses
 	var intel_cd: float = 0.0      # reports arrive by courier — the picture lags reality
@@ -426,6 +515,98 @@ class Army:
 	var target_town = null         # the STRATEGIC objective: a town the army is campaigning to take
 
 var key_points: Array = []         # future terrain goals: { pos, value, owner } (step 5 hook)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NATIONAL DOCTRINE — how each nationality's commanders prefer to fight. Resolved
+# onto every army/division/brigade from its troops' `nation` tag. The knobs feed the
+# command AI (aggression, attack shape, where the guns mass, how the horse is used,
+# how thick the skirmish screen, whether a defender seeks a reverse slope, the tempo).
+# Tuned to period reputation, not exactness — and all freely adjustable.
+#   aggr        baseline boldness 0..1 (cautious..bold) before temperament
+#   attack      preferred assault shape: "column" (shock) or "line" (firepower)
+#   grand_bat   appetite for massing a grand battery 0..1
+#   cav         cavalry doctrine: "massed" (held for one big exploiting charge) or "local" (close support)
+#   skirmish    density of the light screen thrown forward 0..1
+#   reverse     defends on a reverse slope / behind cover when it can
+#   tempo       "brisk" | "build" | "methodical" — how fast it forces a decision
+const DOCTRINE := {
+	"french":    {"aggr": 0.72, "attack": "column", "grand_bat": 1.0, "cav": "massed", "skirmish": 0.9, "reverse": false, "tempo": "build"},
+	"british":   {"aggr": 0.42, "attack": "line",   "grand_bat": 0.3, "cav": "local",  "skirmish": 0.5, "reverse": true,  "tempo": "build"},
+	"prussian":  {"aggr": 0.66, "attack": "column", "grand_bat": 0.6, "cav": "local",  "skirmish": 0.8, "reverse": false, "tempo": "methodical"},
+	"dutch":     {"aggr": 0.46, "attack": "line",   "grand_bat": 0.4, "cav": "local",  "skirmish": 0.6, "reverse": true,  "tempo": "build"},
+	"brunswick": {"aggr": 0.52, "attack": "line",   "grand_bat": 0.3, "cav": "local",  "skirmish": 0.7, "reverse": true,  "tempo": "build"},
+	"line":      {"aggr": 0.55, "attack": "line",   "grand_bat": 0.5, "cav": "local",  "skirmish": 0.5, "reverse": true,  "tempo": "build"},
+}
+# nationality key (historical.gd NAT) → doctrine group above
+const NATION_DOCTRINE := {
+	"FR": "french", "FL": "french", "FG": "french",
+	"BR": "british", "KG": "british", "HA": "british",
+	"NL": "dutch", "NA": "dutch",
+	"BW": "brunswick", "PR": "prussian",
+	"GEN": "line",
+}
+# A COMMANDER'S TEMPERAMENT — rolled per general, tunes his doctrine. The same nation
+# fields different men: a bold marshal gambles where a cautious one waits. Modifiers add
+# to doctrine: aggr (boldness), tempo (+ = hurries the decision), hold (+ = clings to his
+# reserve longer), flank (taste for the wide manoeuvre), expose (rides forward, more at risk).
+const TEMPERS := [
+	{"name": "bold",       "aggr":  0.18, "tempo":  0.20, "hold": -0.15, "flank":  0.20, "expose":  0.20},
+	{"name": "impetuous",  "aggr":  0.12, "tempo":  0.28, "hold": -0.22, "flank":  0.10, "expose":  0.26},
+	{"name": "steady",     "aggr":  0.00, "tempo":  0.00, "hold":  0.05, "flank":  0.00, "expose":  0.00},
+	{"name": "methodical", "aggr": -0.06, "tempo": -0.16, "hold":  0.12, "flank": -0.05, "expose": -0.12},
+	{"name": "cautious",   "aggr": -0.18, "tempo": -0.22, "hold":  0.22, "flank": -0.12, "expose": -0.20},
+]
+
+# map a nationality key to its doctrine dict (falls back to the generic line doctrine)
+func _doctrine_for(nat: String) -> Dictionary:
+	return DOCTRINE[NATION_DOCTRINE.get(nat, "line")]
+
+# An ARMY's DOCTRINE GROUP — its CHARACTER comes from the main body fighting at the start. Two
+# corrections over a raw headcount: (1) tally by doctrine GROUP, so a COALITION's contingents
+# combine (British + KGL + Hanoverian all count as "british") instead of splitting the vote and
+# letting one big foreign bloc win; (2) weight each battalion by how forward it stands (close to
+# the enemy = engaged), so a numerous but distant, late-arriving contingent (the Prussians far
+# east at Waterloo) can't hijack the doctrine. Result: the Anglo-Allied army reads as British —
+# it defends the ridge — not Prussian.
+func _army_doctrine_group(team: int) -> String:
+	var ec := Vector3.ZERO
+	var en := 0
+	for b in battalions:
+		if b.team != team and not b.spent and not b.independent:
+			ec += b.pos
+			en += 1
+	var tally := {}
+	for b in battalions:
+		if b.team != team or b.spent or b.independent:
+			continue
+		var grp: String = NATION_DOCTRINE.get(b.nation, "line")
+		var w := float(maxi(1, b.figs.size()))
+		if en > 0:
+			w *= 1.0 / (1.0 + b.pos.distance_to(ec / float(en)) / 800.0)   # forward troops weigh most
+		tally[grp] = float(tally.get(grp, 0.0)) + w
+	var best := "line"
+	var bestv := -1.0
+	for g in tally:
+		if float(tally[g]) > bestv:
+			bestv = float(tally[g])
+			best = String(g)
+	return best
+
+# the dominant nationality across a set of battalions (most men) — a formation's nation
+func _dominant_nation(batts: Array) -> String:
+	var tally := {}
+	for b in batts:
+		if b.spent:
+			continue
+		var n: String = b.nation
+		tally[n] = int(tally.get(n, 0)) + maxi(1, b.figs.size())
+	var best := "GEN"
+	var bestv := -1
+	for n in tally:
+		if int(tally[n]) > bestv:
+			bestv = int(tally[n])
+			best = n
+	return best
 
 # A regiment of horse: held in reserve, loosed at an opportunity — a wavering line, a
 # routing mob, an exposed battery, or the enemy's own cavalry — then blown, and must
@@ -443,9 +624,15 @@ class Cav:
 	var rally_t: float = 0.0
 	var decide_cd: float = 0.0
 	var reserve_pos: Vector3
+	var scout_goal: Vector3        # where a "scouting" regiment is ranging to (then it rides home)
+	var scout_cd: float = 0.0      # throttle on a light regiment volunteering to scout
 	var spent: bool = false
 	var player: bool = false       # YOU lead this squadron — it forms on you and charges at your word
 	var hoof_player: AudioStreamPlayer3D   # the thunder of the gallop
+	var _spotted: bool = false     # fog of war: seen by the local player's side this frame
+	var _intel_pos: Vector3 = Vector3.ZERO
+	var _intel_t: float = -1000.0
+	var _drawn: bool = false       # render LOD state: was this regiment drawn last frame (cull hysteresis)
 
 var cavalry: Array[Cav] = []
 var cav_horse_mm: Array = [[], []]    # cav_horse_mm[team][cav_type] — per-team-per-arm mounts
@@ -482,9 +669,15 @@ const FACINGS_1 := [Color(0.92, 0.85, 0.30), Color(0.20, 0.45, 0.20), Color(0.10
 const ARMY_BLUE := Color(0.07, 0.10, 0.30)   # navy blue
 const ARMY_RED := Color(0.64, 0.15, 0.15)
 const ARMY_RAID := Color(0.34, 0.24, 0.13)   # buckskin/earth — a raiding war-party, no European coat
-const COATS_0 := [ARMY_BLUE, ARMY_BLUE, ARMY_BLUE]
-const COATS_1 := [ARMY_RED, ARMY_RED, ARMY_RED]
-const COATS_2 := [ARMY_RAID, ARMY_RAID, ARMY_RAID]
+const RIFLE_GREEN := Color(0.12, 0.20, 0.13)   # the 4th coat slot: rifle / jäger / Nassau green
+const COATS_0 := [ARMY_BLUE, ARMY_BLUE, ARMY_BLUE, RIFLE_GREEN]
+const COATS_1 := [ARMY_RED, ARMY_RED, ARMY_RED, RIFLE_GREEN]
+const COATS_2 := [ARMY_RAID, ARMY_RAID, ARMY_RAID, RIFLE_GREEN]
+# Waterloo coat palettes — 4 coats per side: France in blue (line / légère / Guard) + a green slot;
+# the Allies in British red, an Allied blue (Dutch/Prussian), Brunswick black, and rifle/Nassau green.
+# Each battalion picks its slot via coat_idx (the 4th, index 3, is the green for rifles & jägers).
+const COATS_W0 := [Color(0.13, 0.18, 0.46), Color(0.10, 0.16, 0.40), Color(0.07, 0.11, 0.32), RIFLE_GREEN]
+const COATS_W1 := [Color(0.63, 0.15, 0.13), Color(0.18, 0.28, 0.58), Color(0.10, 0.10, 0.13), RIFLE_GREEN]
 const FACINGS_2 := [Color(0.78, 0.62, 0.30), Color(0.55, 0.10, 0.08), Color(0.85, 0.80, 0.72),
 	Color(0.20, 0.30, 0.16), Color(0.40, 0.20, 0.10), Color(0.10, 0.10, 0.10)]
 
@@ -544,6 +737,10 @@ const WOUNDED_MAX := 110                  # crawling at once, per team
 const WOUNDED_FRAC := 0.3                 # fraction of the fallen who are wounded, not killed
 const WOUNDED_TIME := 26.0                # how long a man crawls before he is still
 const CRAWL_SPEED := 0.35
+var falling: Array = []                    # { pos, dir, t, team, yaw } — men mid-collapse, toppling before they lie still
+var falling_mm: Array = [null, null, null]
+const FALLING_MAX := 90                    # men toppling at once, per team
+const FALL_TIME := 0.7                     # seconds to topple from struck-upright to prone
 var _floor: StaticBody3D
 var _ragdolls: Array = []                 # pool of tumbling rigid-body deaths
 const RAGDOLL_POOL := 64
@@ -635,6 +832,7 @@ var snd_marchdrum: Array = []             # marching-cadence drum loops
 var snd_melee: AudioStream
 var snd_cannon: AudioStream
 var snd_reload: AudioStream               # ramrod work — the firing line loading
+var snd_cock: AudioStream                 # MusketCock — a man brings his piece to the present
 var snd_ball_land: AudioStream            # a roundshot striking the ground
 var snd_ball_over: AudioStream            # a roundshot screaming overhead the player
 var snd_hooves: AudioStream               # the thunder of a charge (optional file)
@@ -737,8 +935,18 @@ var _got_state := false
 var _got_fx := false
 var _fx: Array = []                        # host: fx events buffered for clients
 const NET_HZ := 15.0
+const NET_CHUNK := 7       # entities per state packet — keeps each under ENet's MTU (~1392B) so a
+						  # full-OOB snapshot isn't sent as one giant unreliable packet that drops
+# AREA-OF-INTEREST: the host SIMULATES the whole field (gameplay is unaffected) but only BROADCASTS
+# at full rate the units near a player's eye — anything a player can SEE. AOI_RANGE must exceed the
+# render range (LOD_VFAR) so no drawable unit is ever starved. Units out of everyone's sight are still
+# refreshed, just slowly (rolling over FAR_REFRESH seconds), so the wider map stays current and cheap.
+const AOI_RANGE := 1700.0   # > LOD_VFAR (1400): a unit this near any player gets every-tick updates
+const FAR_REFRESH := 2.0    # seconds to roll a full refresh over all the out-of-sight units
+var _net_far_cursor := 0    # rotates through the far units so each gets its slow refresh in turn
 const FX_VOLLEY := 0
 const FX_MELEE := 1
+const FX_GUN := 2          # a cannon firing — clients reproduce the muzzle blast at the given point
 
 # diegetic-UI bits: a toggleable help overlay, a raise-able spyglass, drummers
 var _help_on := false
@@ -810,6 +1018,8 @@ var _camp_btn_hire: Button      # commission a Lieutenant over a company that la
 var _camp_btn_equip: Button     # spend prestige on better muskets and kit
 var _scoped := false
 var _scope_amt := 0.0
+var _vision_cd := 0.0              # fog-of-war recompute throttle
+var _contact_cd := 0.0             # throttle on "enemy sighted" despatches
 var _scope_rect: ColorRect
 var _scope_mat: ShaderMaterial
 var _scope_zoom := 0.45             # spyglass magnification: 0 wide .. 1 drawn fully out (mouse wheel)
@@ -822,6 +1032,16 @@ const FOV_SCOPE_NARROW := 8.0       # glass drawn fully out — high magnificati
 
 var _setup: BattleSetup            # the seam: the world this battle was handed
 var _inflated: bool = false        # this battle was inflated from a campaign engagement
+var _wmap: bool = false            # the Waterloo battlefield terrain (not the campaign province)
+var _arty_range: float = ARTY_RANGE  # roundshot reach — wider on a set-piece field (authentic 1m scale)
+var _cav_men: int = CAV_MEN          # troopers per regiment — fuller on a set-piece field (historical scale)
+var _wat_t0: float = 0.0           # battle step-off time, for the historical phase clock
+var _wat_phase: int = -1           # the last historical phase that has fired
+# the historical timeline (seconds after step-off → phase key); the script plays each once, in order
+const WAT_PHASES := [
+	[0.0, "hougoumont"], [80.0, "grand_battery"], [150.0, "derlon"],
+	[270.0, "cavalry"], [400.0, "prussians"], [540.0, "guard"],
+]
 
 func _ready() -> void:
 	authoritative = GameConfig.mode != "client"
@@ -843,20 +1063,28 @@ func _ready() -> void:
 		if _loaded_save != null:
 			GameConfig.match_seed = int(_loaded_save.get("seed", GameConfig.match_seed))
 			_restore_militia_config(_loaded_save)
+	_wmap = (GameConfig.historical == "waterloo")   # the Waterloo battlefield, not the campaign province
+	_arty_range = 880.0 if _wmap else ARTY_RANGE    # the guns bombard across the valley, not advance into it
+	_cav_men = 480 if _wmap else CAV_MEN            # full-strength historical regiments, not campaign squadrons
 	_build_world()
-	if not hosted:
+	if not hosted and not _wmap:
 		_build_scenery()            # host uses the province's own woods & fields
-	_build_ocean()                  # the sea anchors the eastern flank
+	if GameConfig.historical == "":
+		_build_ocean()              # the sea anchors the eastern flank (campaign province only)
 	if not hosted:
 		_build_clouds()             # a drifting cloud sheet overhead, driven by the wind
-	_spawn_ships()                  # shipping and a running sea-fight, out beyond the shore
-	_build_field_settlements()      # the province's towns, spread across the wider map
-	_build_province_sites()         # forts & depots: a garrison home per brigade, plus roads
+	if GameConfig.historical == "":
+		_spawn_ships()              # shipping and a running sea-fight, out beyond the shore
+		_build_field_settlements()  # the province's towns, spread across the wider map
+		_build_province_sites()     # forts & depots: a garrison home per brigade, plus roads
 	_build_homesteads()             # farmsteads, fields, fences and stock across the country
 	_build_farmland()               # crop fields in varied colours, hedgerows along roads & fields
 	_build_field_forests()          # province-wide forest stands, pine-biased toward the coast
+	if _wmap:
+		_build_waterloo()           # the ridge, the road, and the famous farms & villages
 	_build_officer()
 	_build_wounded_layer()
+	_build_falling_layer()
 	_spawn_armies()
 	_build_guns()
 	_spawn_cavalry()
@@ -1130,36 +1358,33 @@ func _build_world() -> void:
 	for i in range(BATT_PER_TEAM * 2):
 		officer_mm.set_instance_transform(i, _zero_xf())
 
-	# brigade commanders — mounted generals riding behind the centre of their brigade.
-	# A dark horse (a capsule laid along the facing) under a bright gold rider.
-	var bn := BRIGADES_PER_TEAM * 2
+	# The three mounted-leadership tiers (brigadier / general / colonel) ride the SAME detailed
+	# box-and-cylinder horse + rider as the cavalry — built in the soldiers' idiom (origin at the
+	# horse's feet, facing +Z) so they read as the same stylised men, not bare capsules. Rank shows
+	# by SCALE (set in _render_commanders) and coat/trim colour (painted per tier below).
+	var mount_horse := _mount_horse_mesh()
+	var mount_rider := _mount_rider_mesh()
+
+	# brigade commanders — mounted generals riding behind the centre of their brigade, in a solid
+	# gold coat with dark lace so the brigadier stands out.
+	var bn := BRIGADES_PER_TEAM * 2 + 64   # headroom: a full historical OOB fields many more brigades than the campaign field
 	var hmi := MultiMeshInstance3D.new()
 	cmd_horse_mm = MultiMesh.new()
 	cmd_horse_mm.transform_format = MultiMesh.TRANSFORM_3D
-	var hcap := CapsuleMesh.new()
-	hcap.radius = 0.34
-	hcap.height = 1.9
-	cmd_horse_mm.mesh = hcap
+	cmd_horse_mm.mesh = mount_horse
+	cmd_horse_mm.use_colors = true                 # the shabraque carries the army's colour
 	cmd_horse_mm.instance_count = bn
 	hmi.multimesh = cmd_horse_mm
-	var hmat := StandardMaterial3D.new()
-	hmat.albedo_color = Color(0.20, 0.13, 0.08)
-	hmat.roughness = 0.9
-	hmi.material_override = hmat
+	hmi.material_override = _mount_horse_shader()
 	add_child(hmi)
 	var rmi := MultiMeshInstance3D.new()
 	cmd_rider_mm = MultiMesh.new()
 	cmd_rider_mm.transform_format = MultiMesh.TRANSFORM_3D
-	var rcap := CapsuleMesh.new()
-	rcap.radius = 0.26
-	rcap.height = 1.5
-	cmd_rider_mm.mesh = rcap
+	cmd_rider_mm.mesh = mount_rider
+	cmd_rider_mm.use_colors = true                 # coat colour set per instance in _render_commanders
 	cmd_rider_mm.instance_count = bn
 	rmi.multimesh = cmd_rider_mm
-	var rmat := StandardMaterial3D.new()
-	rmat.albedo_color = Color(1.0, 0.82, 0.30)   # gold — stands out as the brigadier
-	rmat.metallic = 0.2
-	rmi.material_override = rmat
+	rmi.material_override = _mount_rider_shader(Color(0.22, 0.17, 0.10))   # dark lace for the brigadier
 	add_child(rmi)
 	for i in range(bn):
 		cmd_horse_mm.set_instance_transform(i, _zero_xf())
@@ -1171,31 +1396,20 @@ func _build_world() -> void:
 	var ghmi := MultiMeshInstance3D.new()
 	gen_horse_mm = MultiMesh.new()
 	gen_horse_mm.transform_format = MultiMesh.TRANSFORM_3D
-	var ghcap := CapsuleMesh.new()
-	ghcap.radius = 0.40
-	ghcap.height = 2.2
-	gen_horse_mm.mesh = ghcap
+	gen_horse_mm.mesh = mount_horse
+	gen_horse_mm.use_colors = true
 	gen_horse_mm.instance_count = dn
 	ghmi.multimesh = gen_horse_mm
-	var ghmat := StandardMaterial3D.new()
-	ghmat.albedo_color = Color(0.10, 0.07, 0.05)
-	ghmat.roughness = 0.9
-	ghmi.material_override = ghmat
+	ghmi.material_override = _mount_horse_shader()
 	add_child(ghmi)
 	var grmi := MultiMeshInstance3D.new()
 	gen_rider_mm = MultiMesh.new()
 	gen_rider_mm.transform_format = MultiMesh.TRANSFORM_3D
-	var grcap := CapsuleMesh.new()
-	grcap.radius = 0.30
-	grcap.height = 1.7
-	gen_rider_mm.mesh = grcap
+	gen_rider_mm.mesh = mount_rider
+	gen_rider_mm.use_colors = true
 	gen_rider_mm.instance_count = dn
 	grmi.multimesh = gen_rider_mm
-	var grmat := StandardMaterial3D.new()
-	grmat.albedo_color = Color(0.95, 0.95, 0.98)   # white — the general, seen from afar
-	grmat.metallic = 0.35
-	grmat.roughness = 0.4
-	grmi.material_override = grmat
+	grmi.material_override = _mount_rider_shader(Color(0.85, 0.85, 0.90))   # silver lace for the general
 	add_child(grmi)
 	for i in range(dn):
 		gen_horse_mm.set_instance_transform(i, _zero_xf())
@@ -1207,31 +1421,20 @@ func _build_world() -> void:
 	var colhmi := MultiMeshInstance3D.new()
 	colonel_horse_mm = MultiMesh.new()
 	colonel_horse_mm.transform_format = MultiMesh.TRANSFORM_3D
-	var colhcap := CapsuleMesh.new()
-	colhcap.radius = 0.30
-	colhcap.height = 1.7
-	colonel_horse_mm.mesh = colhcap
+	colonel_horse_mm.mesh = mount_horse
+	colonel_horse_mm.use_colors = true
 	colonel_horse_mm.instance_count = coln
 	colhmi.multimesh = colonel_horse_mm
-	var colhmat := StandardMaterial3D.new()
-	colhmat.albedo_color = Color(0.18, 0.12, 0.07)
-	colhmat.roughness = 0.9
-	colhmi.material_override = colhmat
+	colhmi.material_override = _mount_horse_shader()
 	add_child(colhmi)
 	var colrmi := MultiMeshInstance3D.new()
 	colonel_rider_mm = MultiMesh.new()
 	colonel_rider_mm.transform_format = MultiMesh.TRANSFORM_3D
 	colonel_rider_mm.use_colors = true
-	var colrcap := CapsuleMesh.new()
-	colrcap.radius = 0.22
-	colrcap.height = 1.35
-	colonel_rider_mm.mesh = colrcap
+	colonel_rider_mm.mesh = mount_rider
 	colonel_rider_mm.instance_count = coln
 	colrmi.multimesh = colonel_rider_mm
-	var colrmat := StandardMaterial3D.new()
-	colrmat.vertex_color_use_as_albedo = true
-	colrmat.roughness = 0.55
-	colrmi.material_override = colrmat
+	colrmi.material_override = _mount_rider_shader(Color(0.86, 0.69, 0.24))   # gold lace, the army's coat
 	add_child(colrmi)
 	for i in range(coln):
 		colonel_horse_mm.set_instance_transform(i, _zero_xf())
@@ -1367,6 +1570,7 @@ func _build_world() -> void:
 	snd_melee = _load_first(["MeleeCombat.wav", "Melee Combat.mp3", "MeleeCombat.mp3"])
 	snd_cannon = _load_first(["CannonFire.mp3", "CannonFire.wav"])
 	snd_reload = _load_first(["MusketReload1.wav", "MusketReload.wav", "MusketReload.mp3"])
+	snd_cock = _load_first(["MusketCock.wav", "MusketCock.mp3", "MusketCock1.wav"])
 	snd_ball_land = _load_first(["CannonballLanding.wav", "CannonballLanding.mp3"])
 	snd_ball_over = _load_first(["CannonballOverhead.wav", "CannonballOverhead.mp3", "CannonballOverhear.wav"])
 	snd_drum = _load_first(["Drum.mp3", "Drum.wav"])     # optional morale-cadence drum
@@ -1498,7 +1702,7 @@ func _build_bill_panel(cl: CanvasLayer) -> void:
 # drops into the same per-man transform as the old capsule.
 # Pack a battalion's dress into one byte stored in COLOR.a: coat + belt*3 + pants*9 + hat*36.
 # AI battalions roll a random crossbelt / trouser / hat; the player's unit wears his militia.
-func _dress_packed(coat: int, idx: int, is_player: bool) -> float:
+func _dress_packed(coat: int, idx: int, is_player: bool, belt_o: int = -1, pants_o: int = -1, hat_o: int = -1) -> float:
 	var belt: int
 	var pants: int
 	var hat: int
@@ -1511,7 +1715,15 @@ func _dress_packed(coat: int, idx: int, is_player: bool) -> float:
 		belt = h % 3
 		pants = (h / 3) % 4
 		hat = (h / 12) % 3
-	var packed := clampi(coat, 0, 2) + belt * 3 + pants * 9 + hat * 36
+	# authored per-battalion overrides (e.g. a rifle regiment's black crossbelts) take precedence
+	if belt_o >= 0:
+		belt = clampi(belt_o, 0, 2)
+	if pants_o >= 0:
+		pants = clampi(pants_o, 0, 3)
+	if hat_o >= 0:
+		hat = clampi(hat_o, 0, 2)
+	# coat now has 4 slots (the 4th = rifle/jäger green), so it carries 2 bits: coat + belt*4 + pants*12 + hat*48
+	var packed := clampi(coat, 0, 3) + belt * 4 + pants * 12 + hat * 48
 	return float(packed) / 255.0
 
 # Pull the first mesh out of an imported .glb scene (so a Blender model can stand in for a
@@ -1539,6 +1751,11 @@ func _load_glb_mesh(path: String) -> Mesh:
 # shader colours and animates by (game coords: +Z front, Y up). ~30 primitives, one mesh,
 # instanced across the whole army; the shader paints each part by position.
 func _coats_for(team: int) -> Array:
+	if _wmap:
+		if team == 0:
+			return COATS_W0
+		elif team == 1:
+			return COATS_W1
 	if team == 0:
 		return COATS_0
 	elif team == 1:
@@ -1548,27 +1765,32 @@ func _coats_for(team: int) -> Array:
 func _soldier_mesh() -> ArrayMesh:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	# --- legs: white overalls over dark gaiters, with shoes ---
+	# --- legs: ROUNDED overalls over dark gaiters (tapered cylinders — round limbs, smooth-shaded,
+	# instead of the old blocks; same y-extents so the colour bands are unchanged), with blunt shoes ---
 	for sx in [-0.105, 0.105]:
-		_add_box(st, Vector3(sx, -0.285, 0.0), Vector3(0.155, 0.46, 0.18))   # overalls (vy -0.52..-0.06)
-		_add_box(st, Vector3(sx, -0.68, 0.0), Vector3(0.165, 0.32, 0.19))    # gaiter (vy -0.84..-0.52)
-		_add_box(st, Vector3(sx, -0.86, 0.05), Vector3(0.165, 0.10, 0.24))   # shoe
-	# --- coat: body, short tails behind, a stand collar and a faced plastron down the breast ---
+		_add_cyl(st, Vector3(sx, -0.285, 0.0), 0.076, 0.088, 0.46, 6)        # overalls (vy -0.515..-0.055), thigh fuller than knee
+		_add_cyl(st, Vector3(sx, -0.68, 0.0), 0.072, 0.092, 0.32, 6)         # gaiter (vy -0.84..-0.52), calf fuller than ankle
+		_add_box(st, Vector3(sx, -0.86, 0.05), Vector3(0.165, 0.10, 0.24))   # shoe (kept blunt — feet read better squared off)
+	# --- coat: body, short tails behind, a stand collar and a faced plastron down the breast.
+	# KEPT as boxes — the crossbelt / plastron / collar colour bands are tuned to their flat faces ---
 	_add_box(st, Vector3(0, 0.175, 0.0), Vector3(0.40, 0.49, 0.24))          # coat body (vy -0.07..0.42)
 	_add_box(st, Vector3(0, -0.04, -0.085), Vector3(0.36, 0.22, 0.13))       # coat tails (back)
 	_add_box(st, Vector3(0, 0.435, 0.0), Vector3(0.345, 0.075, 0.245))       # collar (facing)
 	_add_box(st, Vector3(0, 0.20, 0.125), Vector3(0.22, 0.40, 0.035))        # plastron / lapels (front, facing)
-	# --- arms: sleeves with faced cuffs and bare hands ---
+	# --- arms: ROUNDED sleeves (tapered cylinders) with faced cuffs and bare hands; centres/extents
+	# match the old blocks so the |x|>0.215 swing band and the cuff/hand colour bands still hit ---
 	for sx in [-0.265, 0.265]:
-		_add_box(st, Vector3(sx, 0.18, 0.0), Vector3(0.115, 0.46, 0.13))     # sleeve (|x|>0.215 -> swings)
-		_add_box(st, Vector3(sx, -0.03, 0.0), Vector3(0.125, 0.075, 0.145))  # cuff (facing)
-		_add_box(st, Vector3(sx, -0.13, -0.01), Vector3(0.10, 0.10, 0.11))   # hand (skin)
-	# --- knapsack & rolled blanket slung on the back ---
+		_add_cyl(st, Vector3(sx, 0.18, 0.0), 0.050, 0.063, 0.46, 6)          # sleeve (|x| ~0.21..0.33 -> swings), shoulder fuller than wrist
+		_add_cyl(st, Vector3(sx, -0.03, 0.0), 0.062, 0.062, 0.075, 6)        # cuff (facing)
+		var hand := SphereMesh.new()
+		hand.radius = 0.050; hand.height = 0.10; hand.radial_segments = 6; hand.rings = 3
+		st.append_from(hand, 0, Transform3D(Basis(), Vector3(sx, -0.13, -0.01)))   # hand (skin, |x|~0.215..0.315)
+	# --- knapsack & rolled blanket slung on the back (boxes) ---
 	_add_box(st, Vector3(0, 0.15, -0.185), Vector3(0.30, 0.30, 0.14))        # pack (leather)
 	_add_box(st, Vector3(0, 0.31, -0.19), Vector3(0.32, 0.07, 0.12))         # rolled blanket on top
-	# --- head ---
+	# --- head (a smoother sphere — more segments so it reads round, not faceted) ---
 	var head := SphereMesh.new()
-	head.radius = 0.128; head.height = 0.236; head.radial_segments = 8; head.rings = 4   # a touch bigger head
+	head.radius = 0.128; head.height = 0.236; head.radial_segments = 12; head.rings = 6
 	st.append_from(head, 0, Transform3D(Basis(), Vector3(0, 0.55, 0)))       # skin (vy 0.43..0.67)
 	# --- shako: tapered cap with a brass band & front peak, surmounted by a plume. The shader
 	# MORPHS this block (vy>0.655) per battalion into a round hat or a bicorne, from COLOR.a. ---
@@ -2137,7 +2359,7 @@ func _soldier_glb_shader(team: int) -> ShaderMaterial:
 	var sh := Shader.new()
 	sh.code = """
 shader_type spatial;
-uniform vec3 coats[3];
+uniform vec3 coats[4];
 uniform vec3 belt_pal[3];
 uniform vec3 pants_pal[4];
 uniform vec3 hat_pal[3];
@@ -2153,7 +2375,7 @@ void vertex() {
 	region = round(UV.x * 16.0);          // baked region id (0 coat 1 facing 2 belt 3 trousers...)
 	facing = COLOR.rgb;                    // the battalion's facing colour
 	int p = int(round(COLOR.a * 255.0));   // packed dress: coat + belt*3 + pants*9 + hat*36
-	v_coat = p % 3; p /= 3;
+	v_coat = p % 4; p /= 4;
 	v_belt = p % 3; p /= 3;
 	v_pants = p % 4; p /= 4;
 	v_hat = p % 3;
@@ -2249,7 +2471,7 @@ func _troop_lod_shader(team: int, ttype: int) -> ShaderMaterial:
 	var sh := Shader.new()
 	sh.code = """
 shader_type spatial;
-uniform vec3 coats[3];
+uniform vec3 coats[4];
 uniform vec3 belt_pal[3];
 uniform vec3 pants_pal[4];
 uniform vec3 skin = vec3(0.76, 0.58, 0.46);
@@ -2267,7 +2489,7 @@ void vertex() {
 	vy = VERTEX.y; vx = VERTEX.x; vz = VERTEX.z;
 	facing = COLOR.rgb;
 	int p = int(round(COLOR.a * 255.0));
-	v_coat = p % 3; p /= 3;
+	v_coat = p % 4; p /= 4;
 	v_belt = p % 3; p /= 3;
 	v_pants = p % 4;
 	wear = INSTANCE_CUSTOM.r;
@@ -2333,7 +2555,7 @@ func _soldier_shader(team: int) -> ShaderMaterial:
 	var sh := Shader.new()
 	sh.code = """
 shader_type spatial;
-uniform vec3 coats[3];
+uniform vec3 coats[4];
 uniform vec3 hat_pal[3];
 uniform vec3 belt_pal[3];
 uniform vec3 pants_pal[4];
@@ -2355,7 +2577,7 @@ void vertex() {
 	wear = INSTANCE_CUSTOM.r;
 	// DECODE the per-man dress packed into COLOR.a: coat + belt*3 + pants*9 + hat*36
 	int p = int(round(COLOR.a * 255.0));
-	v_coat = p % 3; p /= 3;
+	v_coat = p % 4; p /= 4;
 	v_belt = p % 3; p /= 3;
 	v_pants = p % 4; p /= 4;
 	v_hat = p % 3;
@@ -2373,7 +2595,9 @@ void vertex() {
 	}
 	float phase = INSTANCE_CUSTOM.g;
 	float march = INSTANCE_CUSTOM.b;
-	float armp = INSTANCE_CUSTOM.a;      // 0 at rest .. ~0.6 reloading .. 1 presenting/firing
+	float armp = INSTANCE_CUSTOM.a;      // 0 at rest .. ~0.6 reloading .. 1 presenting .. >1 = firing recoil
+	float recoil_kick = max(0.0, armp - 1.0);   // the overflow past 1 is the sharp kick of his own shot
+	armp = min(armp, 1.0);                       // the pose logic runs on 0..1
 	// IMPERFECTION: no two men keep identical time. Each man's stride CADENCE and LENGTH are
 	// jittered off his phase seed (so legs no longer all swing at one clockwork frequency) —
 	// the ranks ripple and break lockstep like real marching men instead of a metronome.
@@ -2384,7 +2608,17 @@ void vertex() {
 	float hip = -0.05;
 	if (VERTEX.y < hip && march > 0.001) {
 		float legside = (VERTEX.x < 0.0) ? 1.0 : -1.0;          // left & right out of phase
-		float ang = sin(t6) * march * stride * legside;
+		// KNEE: the shin (below the knee) folds back as the leg lifts through its forward swing,
+		// so each pace reads as a real bending leg, not a stiff plank pivoting only at the hip
+		float knee = -0.50;
+		if (VERTEX.y < knee) {
+			float kang = max(0.0, sin(t6) * legside) * march * 0.7;   // fold most at the top of the lift
+			float ky = VERTEX.y - knee;
+			float kc = cos(kang); float ks = sin(kang);
+			VERTEX.y = ky * kc - VERTEX.z * ks + knee;
+			VERTEX.z = ky * ks + VERTEX.z * kc;
+		}
+		float ang = sin(t6) * march * stride * legside;          // HIP: swing the whole leg fore-and-aft
 		float yy = VERTEX.y - hip;
 		float cs = cos(ang); float sn = sin(ang);
 		VERTEX.y = yy * cs - VERTEX.z * sn + hip;
@@ -2400,7 +2634,7 @@ void vertex() {
 		float nx = VERTEX.x * cr - yy * sr;
 		yy = VERTEX.x * sr + yy * cr;
 		VERTEX.x = nx;
-		float lean = march * (0.05 + sin(t6 * 2.0) * 0.018);    // forward lean + a faint per-stride trudge nod
+		float lean = march * (0.05 + sin(t6 * 2.0) * 0.018) - recoil_kick * 0.22;   // forward lean; the shot rocks the upper body BACK
 		float cl = cos(lean); float sl = sin(lean);
 		VERTEX.y = yy * cl - VERTEX.z * sl + hip;
 		VERTEX.z = yy * sl + VERTEX.z * cl;
@@ -2413,9 +2647,23 @@ void vertex() {
 		// the other steadies the piece
 		float ram = sin(TIME * 8.0 + phase * 6.28318);
 		ram = ram * abs(ram);                                                         // sharper push than draw
+		// ELBOW: the forearm (below the elbow) articulates on its own — it pumps the ramrod down the
+		// barrel when loading, lifts toward the lock when presenting, and keeps a natural bend on the
+		// march, so the arm is no longer one rigid rod from shoulder to hand
+		float elbow = 0.13;
+		if (VERTEX.y < elbow) {
+			float load_e = (armp > 0.4 && armp < 0.85) ? (ram * 0.55 * (armside < 0.0 ? 1.0 : 0.25)) : 0.0;
+			float present_e = clamp(armp, 0.0, 1.0) * 0.35;
+			float march_e = (march > 0.001 && armp < 0.15) ? 0.16 : 0.0;
+			float eang = load_e + present_e + march_e;
+			float ey = VERTEX.y - elbow;
+			float ec = cos(eang); float es = sin(eang);
+			VERTEX.y = ey * ec - VERTEX.z * es + elbow;
+			VERTEX.z = ey * es + VERTEX.z * ec;
+		}
 		float ramrod = (armp > 0.4 && armp < 0.85) ? (ram * 0.6 * (armside < 0.0 ? 1.0 : 0.3)) : 0.0;
 		float swing = (march > 0.001 && armp < 0.15) ? (sin(t6) * march * (0.35 + (phase - 0.5) * 0.12) * -armside) : 0.0;
-		float ang = raise + ramrod + swing;
+		float ang = raise + ramrod + swing + recoil_kick * 0.5;   // the musket kicks back into the shoulder on firing
 		float sh = 0.45;                                                              // shoulder pivot
 		float yy = VERTEX.y - sh;
 		float cs = cos(ang); float sn = sin(ang);
@@ -2595,7 +2843,8 @@ func _build_tod_palette() -> void:
 
 # Drive the sun, sky, ambient, fog and weather from the time of day, every frame.
 func _update_environment(delta: float) -> void:
-	_time_of_day = fposmod(_time_of_day + delta * DAY_RATE, 24.0)
+	if authoritative:
+		_time_of_day = fposmod(_time_of_day + delta * DAY_RATE, 24.0)   # clients take the clock from the host
 	var t := _time_of_day
 	var u := t / 24.0
 	var h := sin((t - 6.0) / 12.0 * PI)          # sun height: -1..1 (0 at 6 & 18)
@@ -2934,15 +3183,13 @@ func _update_map() -> void:
 	var scl: float = minf(plot.size.x / wsize.x, plot.size.y / wsize.y)
 	var drawn := wsize * scl
 	var origin := plot.position + (plot.size - drawn) * 0.5
-	var flip: bool = player != null and player.team == 0   # keep your own country toward the bottom
-	# a 180° ROTATION (flip BOTH axes), not a vertical mirror — a mirror reverses handedness, which
-	# put east on the wrong side and made the map's turn sense run OPPOSITE to the compass.
+	# The strategic map is NORTH-UP, EAST-RIGHT (standard) so it matches the compass exactly: +Z
+	# (north) flies to the top, +X (east, toward the coast) to the right. ONLY the Z axis is flipped
+	# (north up); flipping X as well — as a previous version did — put east on the wrong side and
+	# rotated the whole map 180°, so a heading of SE on the compass read as NW here.
 	var P := func(w: Vector3) -> Vector2:
 		var nx := (w.x - wmin.x) / wsize.x
-		var nz := (w.z - wmin.y) / wsize.y
-		if flip:
-			nx = 1.0 - nx
-			nz = 1.0 - nz
+		var nz := 1.0 - (w.z - wmin.y) / wsize.y
 		return origin + Vector2(nx * drawn.x, nz * drawn.y)
 	var field := map_panel.get_node("field") as ColorRect
 	if field != null:
@@ -3029,20 +3276,33 @@ func _update_map() -> void:
 	for b in battalions:
 		if b.figs.is_empty():
 			continue
-		if not reveal and player != null and b.team != player.team:
-			continue                                  # the enemy is fogged on the strategic map
-		var sp: Vector2 = P.call(b.pos)
+		# FOG OF WAR on the map: your own forces always; an enemy shows where SEEN (live), or as a
+		# fading GHOST at its last-known place once lost from sight, then is forgotten entirely.
+		var is_enemy := player != null and b.team != player.team
+		var ghost := false
+		var dpos := b.pos
+		if is_enemy and not reveal and not PLAYER_SEES_ALL:
+			if b._spotted:
+				pass                                  # in sight — live position
+			elif _t - b._intel_t < GHOST_FADE:
+				ghost = true
+				dpos = b._intel_pos
+			else:
+				continue                              # never seen, or long lost — not on the map
+		var sp: Vector2 = P.call(dpos)
 		var dot := _map_dot(di); di += 1
 		var base: Color = team_color(b.team).lightened(0.45 if b.team == 0 else (0.32 if b.team == 1 else 0.4))
 		if b.broken or b.state == "routing":
 			base = base.darkened(0.45)
 		var is_me: bool = b == player
 		dot.color = Color(1.0, 0.88, 0.3) if is_me else base
+		if ghost:
+			dot.color.a = clampf(0.65 * (1.0 - (_t - b._intel_t) / GHOST_FADE), 0.12, 0.65)   # fades as it ages
 		var sz := Vector2(11, 5) if is_me else (Vector2(8, 4) if not b.spent else Vector2(5, 3))
 		dot.size = sz
 		dot.pivot_offset = sz * 0.5
 		dot.position = sp - sz * 0.5
-		dot.rotation = b.facing + (PI if flip else 0.0)   # 180° rotated map -> arrow turns 180° too (not mirrored)
+		dot.rotation = atan2(sin(b.facing), -cos(b.facing))   # north-up map: the arrow points the unit's heading
 		dot.visible = true
 	# a bright marker for where YOU ride
 	if player != null:
@@ -4680,6 +4940,8 @@ func _coast_x(z: float) -> float:
 # match. Faded to sea level near the shore so the beach and coast stay flat; beyond the local
 # coastline it slopes gently down into a shallow seabed so bays sink under the ocean cleanly. ----
 func _gh(x: float, z: float) -> float:
+	if _wmap:
+		return _gh_waterloo(x, z)
 	var cx := _coast_x(z)
 	var c := clampf((cx - x) / 350.0, 0.0, 1.0)   # flatten only the immediate shore
 	if c <= 0.0:
@@ -4692,6 +4954,97 @@ func _gh(x: float, z: float) -> float:
 
 func _gh3(p: Vector3) -> Vector3:
 	return Vector3(p.x, _gh(p.x, p.z), p.z)
+
+# WATERLOO terrain: the two ridges run east-west (along x), so height is mostly a function of z.
+# The Anglo-Allied ridge of Mont-Saint-Jean (the higher one) lies at z≈+560 with a REVERSE SLOPE
+# falling away behind it (where Wellington sheltered his line); the French ridge by La Belle Alliance
+# is lower, at z≈-560; a shallow valley lies between. The ground rises into wooded country to the
+# east, where the Prussians debouch. (smoothstep bumps — cheap, no exp, called per-man per-frame.)
+func _gh_waterloo(x: float, z: float) -> float:
+	var allied := 15.0 * _bump(z, 560.0, 360.0)                  # the Mont-Saint-Jean ridge
+	var french := 9.0 * _bump(z, -560.0, 400.0)                  # the La Belle Alliance ridge
+	var reverse := -6.0 * clampf((z - 700.0) / 700.0, 0.0, 1.0)  # the reverse slope behind the Allied crest
+	var roll := sin(x * 0.0016 + 0.4) * 2.4 + sin(x * 0.0044 - 1.0) * 1.1 + sin(z * 0.0030) * 1.4
+	var east := 5.0 * clampf((x - 1600.0) / 1500.0, 0.0, 1.0)    # rising wooded ground to the east
+	return allied + french + reverse + roll + east
+
+# a smooth 0..1 bump centred on `center`, falling to 0 at ±halfwidth (smoothstep, cheap)
+func _bump(v: float, center: float, halfwidth: float) -> float:
+	var t := clampf(absf(v - center) / halfwidth, 0.0, 1.0)
+	return 1.0 - t * t * (3.0 - 2.0 * t)
+
+# The Waterloo battlefield's landmarks: the Brussels road up the centre, and the farms & villages
+# that anchored the day — La Haye Sainte and Hougoumont (the fought-over strongpoints), Papelotte on
+# the Allied left, Mont-Saint-Jean behind the centre, La Belle Alliance at the French centre, and
+# Plancenoit on the French right where the Prussians came in.
+func _build_waterloo() -> void:
+	var stone := StandardMaterial3D.new(); stone.albedo_color = Color(0.71, 0.67, 0.58); stone.roughness = 1.0
+	var brick := StandardMaterial3D.new(); brick.albedo_color = Color(0.56, 0.35, 0.27); brick.roughness = 1.0
+	var tile := StandardMaterial3D.new(); tile.albedo_color = Color(0.45, 0.24, 0.18); tile.roughness = 1.0
+	var slate := StandardMaterial3D.new(); slate.albedo_color = Color(0.33, 0.35, 0.40); slate.roughness = 1.0
+	var wallm := StandardMaterial3D.new(); wallm.albedo_color = Color(0.66, 0.62, 0.54); wallm.roughness = 1.0
+	# the Brussels–Charleroi road: a pale ribbon running N–S through the centre, past La Haye Sainte
+	var roadm := StandardMaterial3D.new(); roadm.albedo_color = Color(0.58, 0.54, 0.46); roadm.roughness = 1.0
+	var zz := -1000.0
+	while zz < 1050.0:
+		var r := MeshInstance3D.new()
+		r.mesh = _box(9.0, 0.14, 44.0)
+		r.position = Vector3(0, _gh(0, zz) + 0.07, zz)
+		r.material_override = roadm
+		add_child(r)
+		zz += 42.0
+	_wfarm(Vector3(-20, 0, 300), 60, 46, stone, tile, wallm)     # La Haye Sainte — on the road, before the centre
+	_wfarm(Vector3(-680, 0, 200), 86, 74, stone, slate, wallm)   # Hougoumont — the fortified château on the right
+	_wfarm(Vector3(880, 0, 320), 54, 44, brick, tile, wallm)     # Papelotte — the farm on the left
+	_wfarm(Vector3(0, 0, 820), 64, 50, stone, slate, wallm)      # Mont-Saint-Jean — behind the centre
+	_wbuilding(Vector3(36, 0, -560), 24, 9, 14, stone, tile)     # La Belle Alliance — the inn at the French centre
+	_wvillage(Vector3(1120, 0, -760), stone, tile)               # Plancenoit — the village on the French right
+
+# a single building: a box with a pitched roof, planted on the slope
+func _wbuilding(c: Vector3, w: float, h: float, d: float, wallmat: Material, roofmat: Material) -> void:
+	var gy := _gh(c.x, c.z)
+	var body := MeshInstance3D.new()
+	body.mesh = _box(w, h, d)
+	body.position = Vector3(c.x, gy + h * 0.5, c.z)
+	body.material_override = wallmat
+	add_child(body)
+	var roof := MeshInstance3D.new()
+	roof.mesh = _prism(w + 1.0, h * 0.6, d + 1.0)
+	roof.position = Vector3(c.x, gy + h + h * 0.3, c.z)
+	roof.material_override = roofmat
+	add_child(roof)
+
+# a walled farm/château complex: a perimeter wall round a yard, with buildings inside
+func _wfarm(c: Vector3, w: float, d: float, wallmat: Material, roofmat: Material, fencemat: Material) -> void:
+	var gy := _gh(c.x, c.z)
+	var wh := 3.2
+	var th := 1.2
+	for zf in [d * 0.5, -d * 0.5]:                              # north & south walls
+		var seg := MeshInstance3D.new()
+		seg.mesh = _box(w, wh, th)
+		seg.position = Vector3(c.x, gy + wh * 0.5, c.z + zf)
+		seg.material_override = fencemat
+		add_child(seg)
+	for xf in [w * 0.5, -w * 0.5]:                              # east & west walls
+		var seg := MeshInstance3D.new()
+		seg.mesh = _box(th, wh, d)
+		seg.position = Vector3(c.x + xf, gy + wh * 0.5, c.z)
+		seg.material_override = fencemat
+		add_child(seg)
+	_wbuilding(Vector3(c.x - w * 0.26, 0, c.z - d * 0.30), w * 0.40, 9.0, d * 0.30, wallmat, roofmat)   # the house
+	_wbuilding(Vector3(c.x + w * 0.28, 0, c.z + d * 0.26), w * 0.36, 7.5, d * 0.30, wallmat, roofmat)   # a barn
+	_wbuilding(Vector3(c.x + w * 0.05, 0, c.z + d * 0.30), w * 0.28, 6.5, d * 0.22, wallmat, roofmat)   # an outbuilding
+
+# a village: a church and a scatter of cottages
+func _wvillage(c: Vector3, wallmat: Material, roofmat: Material) -> void:
+	_build_church(c)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 18150618
+	for i in range(11):
+		var off := Vector3(rng.randf_range(-95, 95), 0, rng.randf_range(-90, 90))
+		if off.length() < 22.0:
+			continue                                            # keep clear of the church
+		_wbuilding(c + off, rng.randf_range(10, 16), rng.randf_range(6, 9), rng.randf_range(9, 15), wallmat, roofmat)
 
 # ---- terrain & movement: roads quicken the march, the river off a bridge is a slow ford ----
 func _dist_point_seg(p: Vector3, a: Vector3, b: Vector3) -> float:
@@ -5949,6 +6302,19 @@ func _update_ships(delta: float) -> void:
 	if ships.is_empty():
 		return
 	for s in ships:
+		# CLIENT: the host owns ship movement & gunnery — just ride the synced hull on the swell
+		# (pos/heading arrive via _apply_world), so every player sees the same shipping.
+		if not authoritative:
+			var hd0 := Vector3(sin(s["heading"]), 0, cos(s["heading"]))
+			var node0: Node3D = s["node"]
+			var sx0: float = s["pos"].x
+			var sz0: float = s["pos"].z
+			var wy0 := _sea_y(sx0, sz0)
+			var up0 := _sea_normal(sx0, sz0)
+			var fwd0 := (hd0 - up0 * hd0.dot(up0)).normalized()
+			var right0 := up0.cross(fwd0).normalized()
+			node0.transform = Transform3D(Basis(right0, up0, fwd0), Vector3(sx0, wy0 + 0.2, sz0))
+			continue
 		# --- decide where to steer ---
 		var foe = _nearest_enemy_ship(s)
 		var fdist := 1.0e9
@@ -6206,8 +6572,9 @@ func _build_help(cl: CanvasLayer) -> void:
 	rt.text = "[center][b][color=#ffd773]CONTROLS[/color][/b][/center]\n" + \
 		"[color=#%s]MOVE[/color]   [color=#%s]WASD[/color] move · [color=#%s]Shift[/color] run · [color=#%s]R[/color] autorun · mouse look · [color=#%s]scroll[/color] zoom\n" % [c, k, k, k, k] + \
 		"[color=#%s]LOOK[/color]   [color=#%s]RMB[/color] spyglass · [color=#%s]E[/color] hail sergeant / general · [color=#%s]Esc[/color] free cursor\n" % [c, k, k, k] + \
-		"[color=#%s]ORDERS[/color] [color=#%s]Q[/color] courier order menu (a despatch rides to your battalion)\n" % [c, k] + \
-		"[color=#%s]SELF[/color]   [color=#%s]LMB[/color] sabre/fire · [color=#%s]G[/color] pistol · [color=#%s]V[/color] present · [color=#%s]F[/color] fire/charge · [color=#%s]T[/color] bring up the guns\n" % [c, k, k, k, k, k] + \
+		"[color=#%s]SELF[/color]   [color=#%s]LMB[/color] sabre/fire · [color=#%s]G[/color] pistol · [color=#%s]T[/color] bring up the guns · [color=#%s]B[/color] send scouts\n" % [c, k, k, k, k] + \
+		"[color=#%s]BATT[/color]   [color=#%s]1/2/3/4[/color] advance 5/15/25/50yd · [color=#%s]5[/color] halt · [color=#%s]6/7[/color] wheel L 45/90 · [color=#%s]8/9[/color] wheel R 45/90\n" % [c, k, k, k, k] + \
+		"[color=#%s]FIRE[/color]   [color=#%s]V[/color] present · [color=#%s]F[/color] fire volley · [color=#%s]0[/color] independent fire (each man presents then fires)\n" % [c, k, k, k] + \
 		"[color=#%s]ARM[/color]    [color=#%s]1[/color] foot · [color=#%s]2[/color] guns ([color=#%s]E[/color] sight the barrel · LMB fires) · [color=#%s]3[/color] horse (F charges) — at the step-off\n" % [c, k, k, k, k] + \
 		"[color=#%s]CAMP[/color]   [color=#%s]C[/color] camp & companies — a mouse GUI [color=#6f7888](while standing in one of your towns)[/color]\n" % [c, k] + \
 		"[color=#%s]WORLD[/color]  [color=#%s]N[/color] push the clock on · [color=#%s]M[/color] province map  [color=#6f7888](dusk ends the day)[/color]\n" % [c, k, k] + \
@@ -6269,6 +6636,13 @@ func _build_officer() -> void:
 	# saddle's shabraque take the FACING colour chosen when the force was raised.
 	var coat_col: Color = GameConfig.UNIFORM_COLS[clampi(GameConfig.militia_uniform, 0, GameConfig.UNIFORM_COLS.size() - 1)]
 	var facing_col: Color = GameConfig.militia_facing
+	# a historical battle: the hero wears the nationality of the battalion the player chose to command
+	if _wmap and GameConfig.setup != null:
+		for u in GameConfig.setup.units:
+			if u.human_slot == GameConfig.local_slot:
+				coat_col = _coats_for(u.team)[clampi(int(u.coat_idx), 0, 3)]
+				facing_col = u.facing_col
+				break
 	_build_horse(officer)                          # the charger (origin at its hooves, faces +Z)
 	_build_officer_colonel(coat_col, facing_col)   # the Colonel in the saddle
 
@@ -6292,17 +6666,18 @@ func _hero_part(mesh: Mesh, pos: Vector3, mat: Material, rot := Vector3.ZERO, sc
 	officer.add_child(mi)
 	return mi
 
-func _cap(radius: float, height: float) -> CapsuleMesh:
-	var c := CapsuleMesh.new(); c.radius = radius; c.height = height; c.radial_segments = 10; c.rings = 4; return c
-
 func _sph(radius: float) -> SphereMesh:
 	var s := SphereMesh.new(); s.radius = radius; s.height = radius * 2.0; s.radial_segments = 10; s.rings = 6; return s
+
+func _hcyl(r_bottom: float, r_top: float, h: float) -> CylinderMesh:
+	var c := CylinderMesh.new(); c.bottom_radius = r_bottom; c.top_radius = r_top; c.height = h; c.radial_segments = 8; c.rings = 0; return c
 
 # The Colonel in the saddle: built on the mounted-rider layout (seat ≈ y1.35, head ≈ y2.38,
 # bicorne ≈ y2.55), in the player's militia colours, with the full marks of a field officer —
 # gorget, crimson sash, gold fringed epaulettes both shoulders, an aiguillette, and a
-# gold-piped, tall-plumed bicorne. Round volumes (torso/limbs/head) are capsules/spheres for a
-# less box-man silhouette; genuinely flat parts (collar, lapels, sash, tack) stay boxes.
+# gold-piped, tall-plumed bicorne. Built in the INFANTRY idiom — box body/limbs, a sphere head and
+# a cylinder plume, like _soldier_mesh / _mount_rider_mesh — so the hero reads as the same stylised
+# low-poly man as the troops he leads (just richer, being a single instance and not a MultiMesh).
 func _build_officer_colonel(coat_col: Color, facing_col: Color) -> void:
 	var coat := _hero_mat(coat_col.lightened(0.06), 0.6)
 	var facing := _hero_mat(facing_col, 0.6)
@@ -6319,12 +6694,12 @@ func _build_officer_colonel(coat_col: Color, facing_col: Color) -> void:
 	_hero_part(_box(0.30, 0.14, 0.46), Vector3(0, 1.32, -0.02), leather)            # saddle
 	_hero_part(_box(0.50, 0.025, 0.64), Vector3(0, 1.14, -0.46), gold)              # shabraque trim
 	_hero_part(_box(0.46, 0.05, 0.58), Vector3(0, 1.17, -0.46), facing)             # shabraque (facing)
-	# --- legs astride: buff breeches into tall black boots ---
+	# --- legs astride: buff breeches into tall black boots (box, like the troops' legs) ---
 	for sx in [-0.24, 0.24]:
-		_hero_part(_cap(0.10, 0.62), Vector3(sx, 1.40, 0.06), buff, Vector3(0.30, 0, sx * 0.9))   # thigh
-		_hero_part(_cap(0.095, 0.46), Vector3(sx, 1.02, 0.20), boot)                               # riding boot
-	# --- torso: coat body (capsule) with longer tails behind ---
-	_hero_part(_cap(0.21, 0.64), Vector3(0, 1.95, 0), coat, Vector3.ZERO, Vector3(1, 1, 0.62))     # coat body
+		_hero_part(_box(0.17, 0.66, 0.18), Vector3(sx, 1.40, 0.08), buff)               # thigh (breeches)
+		_hero_part(_box(0.17, 0.46, 0.19), Vector3(sx, 1.04, 0.20), boot)               # riding boot
+	# --- torso: box coat body with longer tails behind ---
+	_hero_part(_box(0.42, 0.64, 0.26), Vector3(0, 1.95, 0), coat)                         # coat body
 	_hero_part(_box(0.36, 0.32, 0.14), Vector3(0, 1.66, -0.16), coat)                     # coat tails
 	# --- facings: stand collar, lapels down the breast, crimson sash ---
 	_hero_part(_box(0.30, 0.10, 0.10), Vector3(0, 2.20, 0.10), facing)                    # collar
@@ -6332,25 +6707,25 @@ func _build_officer_colonel(coat_col: Color, facing_col: Color) -> void:
 	_hero_part(_box(0.45, 0.11, 0.30), Vector3(0, 1.72, 0), crim)                         # waist sash
 	_hero_part(_box(0.07, 0.24, 0.07), Vector3(-0.21, 1.55, 0.06), crim)                  # sash tassel
 	_hero_part(_box(0.13, 0.06, 0.02), Vector3(0, 2.27, 0.135), gold)                     # gorget at the throat
-	# --- arms: sleeves (capsules), faced cuffs, bare hands, gold epaulettes ---
+	# --- arms: box sleeves, faced cuffs, box hands, gold epaulettes ---
 	for sx in [-0.30, 0.30]:
-		_hero_part(_cap(0.075, 0.50), Vector3(sx, 1.92, 0.04), coat)                               # sleeve
+		_hero_part(_box(0.15, 0.50, 0.15), Vector3(sx, 1.92, 0.04), coat)                 # sleeve
 		_hero_part(_box(0.16, 0.10, 0.17), Vector3(sx, 1.70, 0.05), facing)               # cuff (facing)
-		_hero_part(_sph(0.075), Vector3(sx * 0.85, 1.62, 0.16), skin)                              # hand
+		_hero_part(_box(0.10, 0.10, 0.11), Vector3(sx * 0.9, 1.63, 0.12), skin)           # hand
 		_hero_part(_box(0.18, 0.05, 0.17), Vector3(sx, 2.18, 0), gold)                    # epaulette
 		_hero_part(_box(0.05, 0.05, 0.17), Vector3(sx * 0.97, 2.20, 0.04), gold)          # epaulette fringe
 	# --- aiguillette: gold cords looped on the right shoulder ---
 	_hero_part(_box(0.03, 0.36, 0.03), Vector3(0.20, 1.97, 0.16), gold, Vector3(0, 0, -0.2))  # cord
 	_hero_part(_box(0.04, 0.09, 0.04), Vector3(0.23, 1.74, 0.17), gold)                   # cord tip
-	# --- head (a touch bigger) ---
+	# --- head: a sphere, like the soldiers' (a touch bigger) ---
 	_hero_part(_sph(0.135), Vector3(0, 2.39, 0), skin)
 	# --- the bicorne: black felt, gold-piped, a facing-coloured cockade and a tall plume ---
 	_hero_part(_box(0.55, 0.12, 0.22), Vector3(0, 2.56, 0), black)                        # bicorne body
 	_hero_part(_box(0.58, 0.03, 0.25), Vector3(0, 2.50, 0), gold)                         # gold piping
 	_hero_part(_box(0.07, 0.08, 0.03), Vector3(0, 2.58, 0.11), facing)                    # cockade (facing)
 	_hero_part(_box(0.04, 0.05, 0.03), Vector3(0, 2.585, 0.115), gold)                    # cockade button
-	_hero_part(_cap(0.04, 0.10), Vector3(0, 2.66, -0.04), gold)                                    # plume base
-	_hero_part(_cap(0.03, 0.36), Vector3(0, 2.88, -0.05), plume)                                   # plume
+	_hero_part(_hcyl(0.045, 0.04, 0.10), Vector3(0, 2.66, -0.04), gold)                   # plume base (cylinder, like the shako plume)
+	_hero_part(_hcyl(0.035, 0.015, 0.36), Vector3(0, 2.88, -0.05), plume)                 # plume (cylinder)
 	# --- the sabre on the right, a horse-pistol holstered on the left ---
 	sabre = _hero_part(_box(0.05, 0.05, 0.85), Vector3(0.34, 1.90, 0.25), steel)
 	_hero_part(_box(0.08, 0.10, 0.14), Vector3(0.34, 1.90, -0.17), gold)                  # sabre hilt
@@ -6571,18 +6946,41 @@ func _build_horse(parent: Node3D) -> void:
 
 # ------------------------------------------------------------------ armies
 
+# In multiplayer a lobby slot is an abstract PLAYER INDEX; map it to a real battalion in the OOB —
+# a brigade-lead, even index → Crown (team 0), odd → Continental (team 1) — so the players spread
+# across the field on opposing sides and take their orders from the command chain like any battalion.
+func _mp_player_gidx(pidx: int) -> int:
+	if pidx < 0:
+		return -1
+	var team := pidx % 2
+	var nth := pidx / 2                                    # the nth commander on that side
+	var lead := (nth * BATTS_PER_BRIGADE) % BATT_PER_TEAM  # lead battalion of successive brigades
+	return team * BATT_PER_TEAM + lead
+
+# The battalion index a given slot commands: in single-player local_slot IS the index; in MP it's a
+# player index that maps through _mp_player_gidx.
+func _player_gidx(slot: int) -> int:
+	if GameConfig.mode == "single":
+		return slot
+	return _mp_player_gidx(slot)
+
 func _spawn_armies() -> void:
 	if _inflated:
 		_spawn_from_setup()
 		return
-	# which battalion indices are human-led (host knows all; single = just you)
-	var humans: Array = [GameConfig.local_slot]
+	# which battalion indices are human-led (host knows everyone; a client only itself)
+	var human_slots: Array = [GameConfig.local_slot]
 	if GameConfig.mode == "host":
-		humans = Net.human_slots()
+		human_slots = Net.human_slots()
+	var humans: Array = []
+	for ps in human_slots:
+		humans.append(_player_gidx(int(ps)))
+	var my_gidx := _player_gidx(GameConfig.local_slot)
 	# a founded militia rides INDEPENDENT of the order of battle (see _spawn_independent_militia) —
-	# no slot in the standard 100-per-team OOB is the player's, so none should be marked human/player
+	# no slot in the standard OOB is the player's, so none should be marked human/player
 	if GameConfig.has_militia:
 		humans = []
+		my_gidx = -1
 	for team in [0, 1]:
 		var z := -360.0 if team == 0 else 360.0   # deploy further apart: a deeper field, a real march
 		var face := 0.0 if team == 0 else PI    # team 0 faces +Z, team 1 faces -Z
@@ -6612,14 +7010,18 @@ func _spawn_armies() -> void:
 			var fpal: Array = FACINGS_0 if team == 0 else FACINGS_1
 			var fc: Color = fpal[brig % fpal.size()]
 			var coat_idx := 1 if kb == BATTS_PER_BRIGADE - 1 else 0
-			b.inst_col = Color(fc.r, fc.g, fc.b, _dress_packed(coat_idx, gidx, gidx == GameConfig.local_slot and not GameConfig.has_militia))
+			b.inst_col = Color(fc.r, fc.g, fc.b, _dress_packed(coat_idx, gidx, gidx == my_gidx))
 			b.spawn = b.pos
 			b.facing = face
 			b.formation = "column"               # advance in column, deploy on contact
 			b.off_facing = face
 			b.off_pos = b.pos + Vector3(sin(face), 0, cos(face)) * 14.0
 			b.human = gidx in humans
-			b.is_player = (gidx == GameConfig.local_slot) and not GameConfig.has_militia
+			b.is_player = (gidx == my_gidx)
+			for ps in human_slots:                # tag which lobby slot commands this battalion
+				if _player_gidx(int(ps)) == gidx:
+					b.human_slot = int(ps)
+					break
 			b.companies = 6 if team == 0 else 10  # French 6-coy, Allied 10-coy
 			b.ammo = START_ROUNDS
 			b.last_pos = b.pos
@@ -6640,7 +7042,7 @@ func _spawn_armies() -> void:
 				b.ammo = u.ammo
 				b.morale = u.morale
 				_apply_seam_skills(b, u)
-				b.inst_col = Color(u.facing_col.r, u.facing_col.g, u.facing_col.b, _dress_packed(int(u.coat_idx), gidx, gidx == GameConfig.local_slot and not GameConfig.has_militia))
+				b.inst_col = Color(u.facing_col.r, u.facing_col.g, u.facing_col.b, _dress_packed(int(u.coat_idx), gidx, gidx == my_gidx))
 				while b.figs.size() > u.men and b.figs.size() > 0:
 					b.figs.pop_back()          # losses are forever
 			b.start_men = b.figs.size()
@@ -6727,6 +7129,11 @@ func _spawn_from_setup() -> void:
 		var b := Batt.new()
 		b.team = team
 		b.idx = ui
+		b.oob_corps = u.corps              # carry the authored order of battle through to the command tier
+		b.oob_division = u.division
+		b.oob_brigade = u.brigade
+		b.nation = u.nation                # nationality → national doctrine in the command AI
+		b.weapon_id = u.weapon             # weapon id → range/reload/accuracy via weapons/<id>.tres
 		b.pos = u.pos
 		b.spawn = b.pos
 		b.facing = face
@@ -6734,6 +7141,7 @@ func _spawn_from_setup() -> void:
 		b.off_facing = face
 		b.off_pos = b.pos + Vector3(sin(face), 0, cos(face)) * 14.0
 		b.human = (u.human_slot >= 0)                          # any player-commanded unit
+		b.human_slot = u.human_slot                            # so the host can route this slot's orders here
 		# the one THIS peer drives — guard local_slot >= 0 so a dedicated server (slot -1)
 		# doesn't claim every AI unit (whose human_slot is also -1) as its own
 		b.is_player = (GameConfig.local_slot >= 0 and u.human_slot == GameConfig.local_slot)
@@ -6741,7 +7149,7 @@ func _spawn_from_setup() -> void:
 		b.ammo = u.ammo
 		b.morale = u.morale
 		b.rname = u.name
-		b.inst_col = Color(u.facing_col.r, u.facing_col.g, u.facing_col.b, _dress_packed(int(u.coat_idx), ui, b.is_player))
+		b.inst_col = Color(u.facing_col.r, u.facing_col.g, u.facing_col.b, _dress_packed(int(u.coat_idx), ui, b.is_player, u.belt_idx, u.pants_idx, u.hat_idx))
 		b.last_pos = b.pos
 		var mp := AudioStreamPlayer3D.new()
 		mp.max_distance = 700.0
@@ -6749,11 +7157,11 @@ func _spawn_from_setup() -> void:
 		mp.volume_db = 4.0
 		add_child(mp)
 		b.march_player = mp
-		_fill_figs(b)
+		_fill_figs(b, maxi(1, u.men))        # the battalion's REAL strength — not capped at the campaign 700
 		_assign_battalion_skills(b)
 		_apply_seam_skills(b, u)             # carry the regiment's real skills from the world
 		while b.figs.size() > u.men and b.figs.size() > 0:
-			b.figs.pop_back()                # the survivors who marched here, no more
+			b.figs.pop_back()                # trim to exact strength (no-op once filled to u.men)
 		b.start_men = b.figs.size()
 		if b.is_player:
 			_build_roster(b)
@@ -6777,100 +7185,266 @@ func _spawn_from_setup() -> void:
 	# an inflated meeting engagement needs no long deployment lull
 	_deploy_t = minf(_deploy_t, 12.0)
 
-func _make_flag(b: Batt, team: int) -> void:
+# The French colour: the tricolore (blue/white/red vertical bands) under Napoleon's gilt aigle —
+# the eagle the regiment guarded above all. One Node3D per battalion (free of the affordability
+# keystone, like the other flags); the cloth wrapper is `b.flag_cloth` so the existing sway animation
+# drives the whole assembly.
+func _make_flag_french(b: Batt) -> void:
 	b.flag = Node3D.new()
 	add_child(b.flag)
+	var gold := Color(0.94, 0.78, 0.28)
+	var goldmat := StandardMaterial3D.new()
+	goldmat.albedo_color = gold
+	goldmat.metallic = 0.6
+	goldmat.roughness = 0.28
 	var pole := MeshInstance3D.new()
 	var pcyl := CylinderMesh.new()
-	pcyl.top_radius = 0.025
-	pcyl.bottom_radius = 0.025
-	pcyl.height = 2.0
+	pcyl.top_radius = 0.032
+	pcyl.bottom_radius = 0.040
+	pcyl.height = 3.1
 	pole.mesh = pcyl
-	pole.position = Vector3(0, 1.15, 0)        # pole spans the line's height, not towering over it
+	pole.position = Vector3(0, 1.65, 0)
 	var pmat := StandardMaterial3D.new()
-	pmat.albedo_color = Color(0.25, 0.16, 0.08)
+	pmat.albedo_color = Color(0.22, 0.14, 0.07)
+	pmat.roughness = 0.8
 	pole.material_override = pmat
 	b.flag.add_child(pole)
+	# the eagle: a plinth, an upright body, a head, and spread wings — all gilt
+	var plinth := MeshInstance3D.new()
+	plinth.mesh = _box(0.17, 0.11, 0.06)
+	plinth.position = Vector3(0, 3.20, 0)
+	plinth.material_override = goldmat
+	b.flag.add_child(plinth)
+	var body := MeshInstance3D.new()
+	body.mesh = _box(0.10, 0.21, 0.08)
+	body.position = Vector3(0, 3.40, 0)
+	body.material_override = goldmat
+	b.flag.add_child(body)
+	var head := MeshInstance3D.new()
+	var hsph := SphereMesh.new()
+	hsph.radius = 0.052
+	hsph.height = 0.104
+	head.mesh = hsph
+	head.position = Vector3(0.03, 3.55, 0)
+	head.material_override = goldmat
+	b.flag.add_child(head)
+	for sgn in [-1.0, 1.0]:
+		var wing := MeshInstance3D.new()
+		wing.mesh = _box(0.17, 0.22, 0.04)
+		wing.position = Vector3(sgn * 0.12, 3.43, 0)
+		wing.rotation = Vector3(0, 0, sgn * 0.55)
+		wing.material_override = goldmat
+		b.flag.add_child(wing)
+	# the cloth — three vertical bands, blue at the hoist, white, red at the fly
+	var cloth := Node3D.new()
+	cloth.position = Vector3(0.66, 2.50, 0)
+	b.flag.add_child(cloth)
+	b.flag_cloth = cloth
+	var bands := [
+		[Color(0.13, 0.20, 0.50), -0.467],   # hoist — blue
+		[Color(0.93, 0.91, 0.85), 0.0],      # centre — white
+		[Color(0.72, 0.12, 0.12), 0.467],    # fly — red
+	]
+	for bnd in bands:
+		var seg := MeshInstance3D.new()
+		seg.mesh = _box(0.466, 1.00, 0.018)
+		seg.position = Vector3(bnd[1], 0, 0.0)
+		var m := StandardMaterial3D.new()
+		m.albedo_color = bnd[0]
+		m.cull_mode = BaseMaterial3D.CULL_DISABLED
+		seg.material_override = m
+		cloth.add_child(seg)
+	# a gold wreath device on the white centre
+	var wreath := MeshInstance3D.new()
+	var tor := TorusMesh.new()
+	tor.inner_radius = 0.13
+	tor.outer_radius = 0.19
+	tor.rings = 16
+	tor.ring_segments = 8
+	wreath.mesh = tor
+	wreath.rotation_degrees = Vector3(90, 0, 0)
+	wreath.position = Vector3(0, 0, 0.015)
+	wreath.material_override = goldmat
+	cloth.add_child(wreath)
+	# a gold fringe along the top and bottom edges
+	for fy in [0.525, -0.525]:
+		var fringe := MeshInstance3D.new()
+		fringe.mesh = _box(1.41, 0.05, 0.02)
+		fringe.position = Vector3(0, fy, 0)
+		fringe.material_override = goldmat
+		cloth.add_child(fringe)
 
-	# a gold spearhead finial atop the staff, the mark of a proper stand of colours
-	var gold := Color(0.83, 0.68, 0.21)
+func _make_flag(b: Batt, team: int) -> void:
+	if _wmap and team == 0:
+		_make_flag_french(b)            # the French carry the tricolore under a gilt eagle
+		return
+	b.flag = Node3D.new()
+	add_child(b.flag)
+	var gold := Color(0.94, 0.78, 0.28)
+	var goldmat := StandardMaterial3D.new()
+	goldmat.albedo_color = gold
+	goldmat.metallic = 0.6
+	goldmat.roughness = 0.28
+	# --- the staff: a tall turned pole that carries the colours WELL above the line ---
+	var pole := MeshInstance3D.new()
+	var pcyl := CylinderMesh.new()
+	pcyl.top_radius = 0.032
+	pcyl.bottom_radius = 0.040
+	pcyl.height = 3.1
+	pole.mesh = pcyl
+	pole.position = Vector3(0, 1.65, 0)        # butt near the ground, head up at ~3.2m
+	var pmat := StandardMaterial3D.new()
+	pmat.albedo_color = Color(0.22, 0.14, 0.07)
+	pmat.roughness = 0.8
+	pole.material_override = pmat
+	b.flag.add_child(pole)
+	# --- an ornate gilt finial: a boss, a tall spearhead and a cross-bar ---
+	var boss := MeshInstance3D.new()
+	var bsph := SphereMesh.new()
+	bsph.radius = 0.062
+	bsph.height = 0.124
+	boss.mesh = bsph
+	boss.position = Vector3(0, 3.18, 0)
+	boss.material_override = goldmat
+	b.flag.add_child(boss)
 	var finial := MeshInstance3D.new()
 	var fcone := CylinderMesh.new()
 	fcone.top_radius = 0.0
-	fcone.bottom_radius = 0.04
-	fcone.height = 0.16
+	fcone.bottom_radius = 0.07
+	fcone.height = 0.36
 	finial.mesh = fcone
-	finial.position = Vector3(0, 2.23, 0)
-	var finmat := StandardMaterial3D.new()
-	finmat.albedo_color = gold
-	finmat.metallic = 0.6
-	finmat.roughness = 0.3
-	finial.material_override = finmat
+	finial.position = Vector3(0, 3.42, 0)
+	finial.material_override = goldmat
 	b.flag.add_child(finial)
+	var xbar := MeshInstance3D.new()
+	var xb := BoxMesh.new()
+	xb.size = Vector3(0.26, 0.045, 0.045)
+	xbar.mesh = xb
+	xbar.position = Vector3(0, 3.22, 0)
+	xbar.material_override = goldmat
+	b.flag.add_child(xbar)
+	# --- gold cords looping down from the head, ending in heavy tassels ---
+	for sgn in [-1.0, 1.0]:
+		var cord := MeshInstance3D.new()
+		var ccyl := CylinderMesh.new()
+		ccyl.top_radius = 0.013
+		ccyl.bottom_radius = 0.013
+		ccyl.height = 0.52
+		cord.mesh = ccyl
+		cord.position = Vector3(sgn * 0.11, 2.92, 0.05)
+		cord.rotation = Vector3(0, 0, sgn * 0.42)
+		cord.material_override = goldmat
+		b.flag.add_child(cord)
+		var tass := MeshInstance3D.new()
+		var tcyl := CylinderMesh.new()
+		tcyl.top_radius = 0.022
+		tcyl.bottom_radius = 0.055
+		tcyl.height = 0.17
+		tass.mesh = tcyl
+		tass.position = Vector3(sgn * 0.22, 2.64, 0.05)
+		tass.material_override = goldmat
+		b.flag.add_child(tass)
 
 	var nat := ARMY_BLUE if team == 0 else ARMY_RED
+	if _wmap:
+		nat = _coats_for(team)[int(round(b.inst_col.a * 255.0)) % 4]   # the flag field takes the nationality's coat (4-coat packing)
 	var fac := Color(b.inst_col.r, b.inst_col.g, b.inst_col.b)
-
 	# the cloth assembly: one wrapper node so the existing sway/flap animation
-	# (which rotates b.flag_cloth as a whole) still drives every part together
+	# (which rotates b.flag_cloth as a whole) still drives every part together. Larger now, and
+	# flown high near the head of the staff so it streams above the men's heads, not at them.
 	var cloth := Node3D.new()
-	cloth.position = Vector3(0.5, 1.85, 0)      # the colours fly just above the men's heads
+	cloth.position = Vector3(0.66, 2.50, 0)
 	b.flag.add_child(cloth)
 	b.flag_cloth = cloth
-
-	# the field — the regiment's facing colour quartered with the national one
+	# the field — the regiment's facing colour blended with the national one
 	var field := MeshInstance3D.new()
 	var cbox := BoxMesh.new()
-	cbox.size = Vector3(0.95, 0.62, 0.018)
+	cbox.size = Vector3(1.40, 1.00, 0.018)
 	field.mesh = cbox
 	var cmat := StandardMaterial3D.new()
 	cmat.albedo_color = nat.lerp(fac, 0.5)
 	cmat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	field.material_override = cmat
 	cloth.add_child(field)
-
-	# a hoist canton in the facing colour, by the staff edge
+	# a bold cross device in a cream silk, quartering the field
+	var cream := StandardMaterial3D.new()
+	cream.albedo_color = Color(0.94, 0.91, 0.83)
+	cream.cull_mode = BaseMaterial3D.CULL_DISABLED
+	var vbar := MeshInstance3D.new()
+	var vb := BoxMesh.new()
+	vb.size = Vector3(0.15, 1.00, 0.02)
+	vbar.mesh = vb
+	vbar.position = Vector3(0.04, 0, 0.004)
+	vbar.material_override = cream
+	cloth.add_child(vbar)
+	var hbar := MeshInstance3D.new()
+	var hb := BoxMesh.new()
+	hb.size = Vector3(1.40, 0.15, 0.02)
+	hbar.mesh = hb
+	hbar.position = Vector3(0, 0, 0.004)
+	hbar.material_override = cream
+	cloth.add_child(hbar)
+	# a hoist canton in the facing colour, up by the staff
 	var canton := MeshInstance3D.new()
 	var canbox := BoxMesh.new()
-	canbox.size = Vector3(0.34, 0.29, 0.02)
+	canbox.size = Vector3(0.42, 0.40, 0.02)
 	canton.mesh = canbox
-	canton.position = Vector3(-0.30, 0.16, 0.0015)
+	canton.position = Vector3(-0.47, 0.27, 0.007)
 	var canmat := StandardMaterial3D.new()
 	canmat.albedo_color = fac
 	canmat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	canton.material_override = canmat
 	cloth.add_child(canton)
-
-	# a gold roundel at the centre, standing for the regimental badge
+	# a gilt laurel wreath ringing the central badge
+	var wreath := MeshInstance3D.new()
+	var tor := TorusMesh.new()
+	tor.inner_radius = 0.14
+	tor.outer_radius = 0.20
+	tor.rings = 16
+	tor.ring_segments = 8
+	wreath.mesh = tor
+	wreath.rotation_degrees = Vector3(90, 0, 0)
+	wreath.position = Vector3(0.04, 0, 0.015)
+	wreath.material_override = goldmat
+	cloth.add_child(wreath)
+	# the central roundel badge, gold-on-facing
 	var roundel := MeshInstance3D.new()
 	var rcyl := CylinderMesh.new()
-	rcyl.top_radius = 0.13
-	rcyl.bottom_radius = 0.13
+	rcyl.top_radius = 0.125
+	rcyl.bottom_radius = 0.125
 	rcyl.height = 0.012
 	roundel.mesh = rcyl
 	roundel.rotation_degrees = Vector3(90, 0, 0)
-	roundel.position = Vector3(0.05, 0, 0.013)
+	roundel.position = Vector3(0.04, 0, 0.013)
 	var rolmat := StandardMaterial3D.new()
-	rolmat.albedo_color = gold
-	rolmat.metallic = 0.4
+	rolmat.albedo_color = fac.lerp(gold, 0.45)
+	rolmat.metallic = 0.35
 	roundel.material_override = rolmat
 	cloth.add_child(roundel)
-
-	# a gold fringe along the top, bottom and fly edge
-	var fringe_mat := StandardMaterial3D.new()
-	fringe_mat.albedo_color = gold
+	# a heavy gold bullion fringe all the way round
 	for fr in [
-		[Vector3(0, 0.325, 0), Vector3(0.99, 0.03, 0.02)],   # top edge
-		[Vector3(0, -0.325, 0), Vector3(0.99, 0.03, 0.02)],  # bottom edge
-		[Vector3(0.49, 0, 0), Vector3(0.03, 0.65, 0.02)],    # fly edge
+		[Vector3(0, 0.525, 0), Vector3(1.47, 0.055, 0.02)],   # top edge
+		[Vector3(0, -0.525, 0), Vector3(1.47, 0.055, 0.02)],  # bottom edge
+		[Vector3(0.725, 0, 0), Vector3(0.055, 1.05, 0.02)],   # fly edge
 	]:
 		var fr_mi := MeshInstance3D.new()
 		var fr_box := BoxMesh.new()
 		fr_box.size = fr[1]
 		fr_mi.mesh = fr_box
 		fr_mi.position = fr[0]
-		fr_mi.material_override = fringe_mat
+		fr_mi.material_override = goldmat
 		cloth.add_child(fr_mi)
+	# heavy tassels at the two fly corners
+	for cy in [0.5, -0.5]:
+		var ct := MeshInstance3D.new()
+		var ctc := CylinderMesh.new()
+		ctc.top_radius = 0.022
+		ctc.bottom_radius = 0.055
+		ctc.height = 0.15
+		ct.mesh = ctc
+		ct.position = Vector3(0.725, cy, 0)
+		ct.material_override = goldmat
+		cloth.add_child(ct)
 
 	b.flag.visible = false
 
@@ -6973,6 +7547,16 @@ func _aim_factor(b: Batt) -> float:
 	return lerpf(0.7, 1.34, clampf(_sk(b, "aim") / 100.0, 0.0, 1.0))
 func _melee_factor(b: Batt) -> float:
 	return lerpf(0.72, 1.36, clampf(_sk(b, "melee") / 100.0, 0.0, 1.0))
+
+# How many men a unit can bring to bear at the SEAM — its front-rank frontage (a square fights on one
+# face). The melee is fought by these men, not the whole battalion, so a narrow line isn't swamped by
+# a deep column's full numbers — only the overlap fights, and the wider line laps the flank.
+func _contact_men(b: Batt) -> int:
+	return maxi(1, int(_dims(b.figs.size(), b.formation).x))
+
+# A man's quality in the press: his bayonet skill, steadied by morale, dulled by weariness.
+func _melee_quality(b: Batt) -> float:
+	return _melee_factor(b) * clampf(b.morale / 100.0, 0.15, 1.2) * (1.0 - clampf(b.fatigue / 100.0, 0.0, 1.0) * 0.3)
 # fatigue tells: tired hands fumble the cartridge and the aim wanders
 func _fatigue_reload_mul(b: Batt) -> float:
 	return 1.0 + clampf(b.fatigue / 100.0, 0.0, 1.0) * 0.55
@@ -7296,11 +7880,16 @@ func _build_guns() -> void:
 		var face := 0.0 if team == 0 else PI
 		var fwd := Vector3(sin(face), 0, cos(face))
 		var rightv := Vector3(fwd.z, 0, -fwd.x)
-		var nbat: int = 2 if _inflated else BATTERIES_PER_TEAM   # a couple of batteries in a small action
+		var nbat: int = (int(_setup.guns_per_team[team]) if GameConfig.historical != "" else (2 if _inflated else BATTERIES_PER_TEAM))   # historical: the OOB's batteries
 		var sites: Array = _team_sites[team]
 		for bi in range(nbat):
 			var base: Vector3
-			if _inflated or sites.is_empty():
+			if GameConfig.historical != "":
+				# the grand battery / massed guns deployed FORWARD, within bombarding range of the
+				# enemy line across the valley (the French battery ahead of d'Erlon's corps)
+				var bx2 := (float(bi) - (nbat - 1) * 0.5) * 130.0
+				base = Vector3(bx2, 0, -320.0 if team == 0 else 470.0)
+			elif _inflated or sites.is_empty():
 				var bx := (float(bi) - (nbat - 1) * 0.5) * 300.0
 				base = Vector3(bx, 0, -384.0 if team == 0 else 384.0)
 			else:
@@ -7557,7 +8146,7 @@ func _make_gun(g: Gun) -> void:
 func _gun_target(g: Gun) -> Batt:
 	if g.brigade != null and g.brigade.fire_mission != null:
 		var fm: Batt = g.brigade.fire_mission
-		if not fm.spent and fm.figs.size() >= 60 and g.pos.distance_to(fm.pos) <= ARTY_RANGE:
+		if not fm.spent and fm.figs.size() >= 60 and g.pos.distance_to(fm.pos) <= _arty_range:
 			return fm
 	var best: Batt = null
 	var best_score := 1.0e18
@@ -7565,7 +8154,7 @@ func _gun_target(g: Gun) -> Batt:
 		if b.team == g.team or b.figs.size() < 60:
 			continue
 		var d := g.pos.distance_to(b.pos)
-		if d > ARTY_RANGE:
+		if d > _arty_range:
 			continue
 		var score := d * (1.8 if b.skirmish else 1.0)
 		if score < best_score:
@@ -7714,7 +8303,7 @@ func _gun_serve(g: Gun, delta: float) -> void:
 # A blast of canister into horse at close range — saddles empty by the half-dozen.
 func _gun_fire_cav(g: Gun, c: Cav) -> void:
 	var fwd := Vector3(sin(g.facing), 0, cos(g.facing))
-	var muzzle := g.pos + fwd * 1.5 + Vector3(0, 0.95, 0)
+	var muzzle := g.pos + fwd * 1.5 + Vector3(0, 0.95 + _gh(g.pos.x, g.pos.z), 0)
 	g.recoil = 0.55
 	var near := cam != null and cam.position.distance_to(g.pos) < LOD_VFAR
 	if g.node and near:
@@ -7756,26 +8345,32 @@ func _animate_gun_crew(g: Gun) -> void:
 			var sway := sin(_t * 3.0 + float(ci) + float(g.team)) * 0.05
 			node.position = Vector3(base.x + sway, base.y, base.z - step)
 
-func _gun_fire(g: Gun, foe: Batt) -> void:
-	var fwd := Vector3(sin(g.facing), 0, cos(g.facing))
-	var muzzle := g.pos + fwd * 1.5 + Vector3(0, 0.95, 0)
-	var d := g.pos.distance_to(foe.pos)
-	# muzzle blast: a deep gout of flame and smoke, a stab of light, a heavy report
-	g.recoil = 0.55
-	if g.node and cam.position.distance_to(g.pos) < LOD_VFAR:
+# The cannon's muzzle blast — flame, a bank of smoke, a stab of light, the report and the
+# ground-shake. Shared by the host (firing for real) and the client (reproducing an FX_GUN event).
+func _gun_muzzle_fx(muzzle: Vector3, fwd: Vector3) -> void:
+	if cam != null and cam.position.distance_to(muzzle) < LOD_VFAR:
 		_emit_flash(muzzle)
 		_emit_flash(muzzle)
 		_emit_fire(muzzle, fwd)
 		_emit_fire(muzzle, fwd)
-		# a gun jettisons a huge bank of smoke straight out of the muzzle
 		for s in range(18):
 			_emit_gun_smoke(muzzle + fwd * randf_range(0.0, 0.8), fwd)
 		_muzzle_light(muzzle)
 	_play_cannon(muzzle)
-	var prox := clampf(1.0 - cam.position.distance_to(g.pos) / 160.0, 0.0, 1.0)
+	var prox := clampf(1.0 - (cam.position.distance_to(muzzle) if cam != null else 1e9) / 160.0, 0.0, 1.0)
 	if prox > 0.0:
 		_shake = minf(_shake + prox * 0.6, SHAKE_MAX)
 		_flash_amt = minf(_flash_amt + prox * 0.14, 0.32)
+
+func _gun_fire(g: Gun, foe: Batt) -> void:
+	var fwd := Vector3(sin(g.facing), 0, cos(g.facing))
+	var muzzle := g.pos + fwd * 1.5 + Vector3(0, 0.95 + _gh(g.pos.x, g.pos.z), 0)
+	var d := g.pos.distance_to(foe.pos)
+	# muzzle blast: a deep gout of flame and smoke, a stab of light, a heavy report
+	g.recoil = 0.55
+	_gun_muzzle_fx(muzzle, fwd)
+	if GameConfig.mode == "host":
+		_fx.append([FX_GUN, muzzle.x, muzzle.y, muzzle.z, fwd.x, fwd.z])   # clients reproduce it
 	if d <= CANISTER_RANGE:
 		_canister(muzzle, fwd, g.team)        # close work: a wall of balls, instantly
 	else:
@@ -7948,7 +8543,7 @@ func _process(delta: float) -> void:
 		_player_order_cd = maxf(0.0, _player_order_cd - delta)
 		_update_brigades(delta)          # commanders set every AI battalion's task first
 		_update_raiders(delta)           # native war-bands set their own task, hostile to both sides
-		_commander_task(delta)           # the General sends you on tasks / summons you to the push
+		# _commander_task(delta)  [removed for now] the General sends you on tasks / summons you to the push
 		# SLEEP/WAKE: near the eye every battalion ticks each frame; far away they bank time
 		# and tick in bursts — so ONE scene can carry a whole province of men for the cost of
 		# the few around the player. (The player's own battalion never sleeps.)
@@ -7986,6 +8581,7 @@ func _process(delta: float) -> void:
 			else:
 				_sim_ai(b, bd)
 		_musket_snd_left = MUSKET_SND_BUDGET   # refresh the per-frame shot-voice budget
+		_cock_snd_left = COCK_SND_BUDGET
 		for b in battalions:
 			if b._active:
 				_update_firing(b, b._tick_dt)
@@ -8022,6 +8618,7 @@ func _process(delta: float) -> void:
 		# client: no sim — battalions come from the host via _apply_state. We still
 		# generate the continuous fire-at-will crackle locally from synced state.
 		_musket_snd_left = MUSKET_SND_BUDGET   # refresh the per-frame shot-voice budget (client too)
+		_cock_snd_left = COCK_SND_BUDGET
 		for b in battalions:
 			b.flinch = maxf(0.0, b.flinch - delta * 2.2)
 			_client_firing_fx(b, delta)
@@ -8030,12 +8627,14 @@ func _process(delta: float) -> void:
 		_shake = maxf(_shake, player.flinch * 0.4)   # you FEEL your unit get hit
 	_update_ragdolls(delta)
 	_update_wounded(delta)
+	_update_falling(delta)
 	_update_camp_scene(delta)         # pitch/strike the bivouac; the firelight flickers
 	_update_drill(delta)              # the volley drill: targets re-set, safety watched
 	_update_maneuver_drill(delta)     # the manoeuvre drill: watch for the called formation
 	_update_shots(delta)
 	_update_drums(delta)
 	_update_marching_drums(delta)
+	_update_vision(delta)             # fog of war: what the army can see (drives the render + map)
 	_render(delta)
 	_decay_cinematic(delta)
 	_update_cam(delta)
@@ -8157,21 +8756,22 @@ func _sim_far(b: Batt) -> bool:
 func _abstract_fire(b: Batt, delta: float, moving: bool) -> void:
 	if b.spent or b.state == "routing" or b.ammo <= 0.0:
 		return
-	var foe := _nearest_enemy_in_range(b, FIRE_RANGE)
+	var wpn := _wpn(b)
+	var foe := _nearest_enemy_in_range(b, wpn.max_range)
 	if foe == null:
 		return
 	var d := b.pos.distance_to(foe.pos)
 	b.has_target = true
 	if moving:
 		return                                  # no firing on the march, same as the line
-	var rounds := float(b.figs.size()) * 0.5 * (delta / RELOAD_TIME)   # ~half the men firing
+	var rounds := float(b.figs.size()) * 0.5 * (delta / wpn.reload_time)   # ~half the men firing
 	b.ammo = maxf(0.0, b.ammo - rounds * AMMO_PER_SHOT)
 	# the distant rumble of this far fight — heard across the map, ridden toward
 	b._far_audio_cd -= delta
 	if b._far_audio_cd <= 0.0:
 		b._far_audio_cd = randf_range(1.4, 3.2)
 		_play_distant_battle(b.pos)
-	var hit := clampf(_hit_chance(d) * _aim_factor(b) * _fatigue_aim_mul(b), 0.0, 0.95)
+	var hit := clampf(_hit_chance(d, wpn) * _aim_factor(b) * _fatigue_aim_mul(b), 0.0, 0.95)
 	b._far_fire_acc += rounds * hit
 	var k := int(b._far_fire_acc)
 	if k > 0:
@@ -8205,19 +8805,20 @@ func _update_firing(b: Batt, delta: float) -> void:
 	# run the per-musket loop — the battalion trades fire at BATTALION RESOLUTION instead.
 	# (A firefight is always wholly near or wholly far: musket range is ~82m, this gate is
 	#  1400m, so there is never a half-and-half engagement to get wrong.)
+	var wpn := _wpn(b)
 	if _sim_far(b):
 		_abstract_fire(b, delta, batt_moving)
 		return
-	var foe := _nearest_enemy_in_range(b, FIRE_RANGE)
+	var foe := _nearest_enemy_in_range(b, wpn.max_range)
 	# guns are targets too: if a live enemy battery is nearer than any battalion in
 	# front of us, the line turns its fire on the gunners (a tactical objective)
-	var gun_foe := _nearest_enemy_gun_in_range(b, FIRE_RANGE)
+	var gun_foe := _nearest_enemy_gun_in_range(b, wpn.max_range)
 	var aim_gun := false
 	if gun_foe != null and (foe == null or b.pos.distance_to(gun_foe.pos) <= b.pos.distance_to(foe.pos)):
 		aim_gun = true
 	# and CAVALRY: horse in musket range to the front takes priority over everything —
 	# the charge must ride through the fire to reach the line
-	var cav_foe := _nearest_enemy_cav_in_range(b, FIRE_RANGE)
+	var cav_foe := _nearest_enemy_cav_in_range(b, wpn.max_range)
 	var aim_cav := false
 	if cav_foe != null:
 		var dc := b.pos.distance_to(cav_foe.pos)
@@ -8242,7 +8843,7 @@ func _update_firing(b: Batt, delta: float) -> void:
 	if b.has_target:
 		tpos = cav_foe.pos if aim_cav else (gun_foe.pos if aim_gun else foe.pos)
 	else:
-		tpos = b.pos + Vector3(sin(b.facing), 0, cos(b.facing)) * (FIRE_RANGE * 0.55)
+		tpos = b.pos + Vector3(sin(b.facing), 0, cos(b.facing)) * (wpn.max_range * 0.55)
 	b.masked = _fire_masked(b, tpos)
 	if b.masked:
 		b.has_target = false             # friends in the lane — the muskets come up
@@ -8288,7 +8889,19 @@ func _update_firing(b: Batt, delta: float) -> void:
 				b.volley_seq = 2.4
 				_play_voice(snd_v_ready, b.off_pos)
 	var atwill := (not b.volley_fire) and (not b.rolling) and b.has_target   # no at-will fire into the open
-	var commanded := b.fire_now and (not b.rolling)
+	# STAGGERED VOLLEY: on the officer's word the men don't all fire as one — the shots ripple out over
+	# a window set by the battalion's DRILL. Each loaded front-rank man gets his own fire delay; crack
+	# troops crash out almost together, raw troops straggle over up to VOLLEY_SPREAD_MAX seconds. The
+	# fire_now flag is the one-frame trigger; volley_window then keeps the volley live as it plays out.
+	if b.fire_now and not b.rolling and b.volley_window <= 0.0:
+		var drill := _sk(b, "reload")                  # the "Drill" skill
+		var spread := lerpf(VOLLEY_SPREAD_MAX, VOLLEY_SPREAD_MIN, clampf(drill / 100.0, 0.0, 1.0))
+		for f0 in b.figs:
+			if (f0["slot"] as Vector2).y >= fire_band:
+				# weighted toward the front of the window: a crash, then trailing shots
+				f0["volley_t"] = (pow(randf(), 1.6) * spread) if float(f0["reload"]) <= 0.0 else 999.0
+		b.volley_window = spread + 0.12
+	var commanded := (b.volley_window > 0.0) and (not b.rolling)
 	# a HELD volley — loaded, levelled, released on the officer's word — strikes home and
 	# shatters nerve. At point-blank it is the deadliest fire on the field.
 	var held_close := commanded and b.volley_fire and not b.auto_volley and b.pos.distance_to(tpos) < HELD_VOLLEY_RANGE
@@ -8328,15 +8941,34 @@ func _update_firing(b: Batt, delta: float) -> void:
 			fire = false                 # halt to fire — no shooting on the march
 		elif b.rolling:
 			fire = int(f["company"]) == firing_company
-		elif atwill or commanded:
-			fire = true
+		elif atwill:
+			if b.indep_fire:
+				# INDEPENDENT fire: a loaded man comes to the present (cocks his lock), holds 1–2 s by
+				# his DRILL, then fires — then reloads and does it all again, each man in his own time
+				var pt := float(f.get("present_t", -1.0))
+				if pt < 0.0:
+					var dr: float = _sk(b, "reload")
+					f["present_t"] = lerpf(2.0, 1.0, clampf(dr / 100.0, 0.0, 1.0)) * randf_range(0.85, 1.15)
+					if vis:
+						_play_cock(f["wpos"])
+					fire = false
+				else:
+					pt -= delta
+					f["present_t"] = pt
+					fire = pt <= 0.0
+			else:
+				fire = true
+		elif commanded:
+			var vt := float(f.get("volley_t", 0.0)) - delta   # his place in the ragged ripple
+			f["volley_t"] = vt
+			fire = vt <= 0.0
 		if fire:
 			if _wet > 0.0 and randf() < _wet * 0.4:
 				f["reload"] = RELOAD_TIME * 0.45 * randf_range(0.7, 1.2)   # damp powder — misfire, re-prime
 				continue
 			shots += 1
 			var w: Vector3 = f["wpos"]
-			var mp := w + Vector3(0, 1.35, 0) + right * 0.14 + fwd * 1.1   # musket muzzle tip
+			var mp := w + Vector3(0, 1.35 + _gh(w.x, w.z), 0) + right * 0.14 + fwd * 1.1   # musket muzzle tip (on the slope)
 			if atwill:
 				if vis:
 					_emit_flash(mp)
@@ -8371,7 +9003,7 @@ func _update_firing(b: Batt, delta: float) -> void:
 					pm = randfn(0.0, 14.0)
 					f["marks"] = pm
 				maim = clampf(b_aim + pm, 6.0, 99.0)
-			var mhc := _hit_chance(mfwd) * enf_mult * lerpf(0.7, 1.34, maim / 100.0) * fat_aim
+			var mhc := _hit_chance(mfwd, wpn) * enf_mult * lerpf(0.7, 1.34, maim / 100.0) * fat_aim
 			if held_close:
 				mhc *= HELD_VOLLEY_HIT
 			var felled0 := felled
@@ -8387,8 +9019,8 @@ func _update_firing(b: Batt, delta: float) -> void:
 				else:
 					# a real ball with a cone of dispersion: it strikes the FIRST enemy
 					# body in its path — whichever unit that is — or flies clean past
-					var sd := _scatter_dir(fwd, MUSKET_YAW_SD, MUSKET_PITCH_SD)
-					var hit := _ray_hit_world(Vector3(w.x, 1.3, w.z), sd, FIRE_RANGE, b.team)
+					var sd := _scatter_dir(fwd, wpn.yaw_sd, wpn.pitch_sd)
+					var hit := _ray_hit_world(Vector3(w.x, 1.3, w.z), sd, wpn.max_range, b.team)
 					if not hit.is_empty():
 						kills += 1
 						felled += 1
@@ -8402,10 +9034,14 @@ func _update_firing(b: Batt, delta: float) -> void:
 				else:
 					f["marks"] = minf(float(f.get("marks", 0.0)) + 0.06, 30.0)
 			var rmul := INDEP_RELOAD_MUL if atwill else 1.0   # at-will fire loads more raggedly
-			f["reload"] = RELOAD_TIME * shaken * b.exp_mul * _fatigue_reload_mul(b) * rmul * randf_range(0.78, 1.3)
+			f["reload"] = wpn.reload_time * shaken * b.exp_mul * _fatigue_reload_mul(b) * rmul * randf_range(0.78, 1.3)
+			f["present_t"] = -1.0        # he's fired — reload, then come to the present again (independent fire)
+			f["flinch"] = maxf(float(f["flinch"]), randf_range(0.7, 1.0))   # FIRING RECOIL: the kick of his own shot jolts him
 		else:
 			f["reload"] = 0.0            # stand loaded, musket levelled, waiting
-	b.fire_now = false
+	b.fire_now = false                   # the trigger is one-frame; volley_window now drives the ripple
+	b.volley_window = maxf(0.0, b.volley_window - delta)
+	b._volley_boom_cd = maxf(0.0, b._volley_boom_cd - delta)
 	b.fire_forward = false               # the forward volley is spent
 	# the line working its ramrods — a sprinkle of reload sounds while men load near you
 	b._reload_snd_cd = maxf(0.0, b._reload_snd_cd - delta)
@@ -8419,18 +9055,23 @@ func _update_firing(b: Batt, delta: float) -> void:
 	if shots > 0:
 		b.ammo = maxf(0.0, b.ammo - float(shots) * AMMO_PER_SHOT)   # spend the cartridges
 	var massed := massed_men > 0
-	# the report, smoke-wash and screen shake of a volley fire regardless of target
-	if massed and vis and not volley_pts.is_empty():
-		var sources := clampi(volley_pts.size() / 16, 3, 12)
-		for k in range(sources):
-			_play_volley(volley_pts[int((float(k) + 0.5) / float(sources) * volley_pts.size())])
-		_volley_cinematic(b, volley_pts)
-		# YOUR own volley lands as a punch — bigger when you held it to point-blank
-		if b.is_player:
-			_shake = minf(_shake + (0.5 if held_close else 0.28), SHAKE_MAX)
-			_flash_amt = minf(_flash_amt + (0.3 if held_close else 0.12), 0.6)
-	if massed and GameConfig.mode == "host":
-		_fx.append([FX_VOLLEY, b.idx])       # clients reproduce the volley locally
+	# the CRASH — the report, smoke-wash and screen-shake of a volley — only when a real mass fires
+	# together this frame (a well-drilled, tight volley), and throttled so its handful of frames read
+	# as ONE crack. A ragged volley never trips the threshold, so it's heard as the crackle of its
+	# individual shots (the per-man _play_shot_line above) — exactly the loose, undrilled fire we want.
+	if massed and b._volley_boom_cd <= 0.0:
+		b._volley_boom_cd = 0.2
+		if vis and not volley_pts.is_empty() and massed_men >= VOLLEY_CRASH_MIN:
+			var sources := clampi(volley_pts.size() / 16, 3, 12)
+			for k in range(sources):
+				_play_volley(volley_pts[int((float(k) + 0.5) / float(sources) * volley_pts.size())])
+			_volley_cinematic(b, volley_pts)
+			# YOUR own volley lands as a punch — bigger when you held it to point-blank
+			if b.is_player:
+				_shake = minf(_shake + (0.5 if held_close else 0.28), SHAKE_MAX)
+				_flash_amt = minf(_flash_amt + (0.3 if held_close else 0.12), 0.6)
+		if GameConfig.mode == "host":
+			_fx.append([FX_VOLLEY, b.idx])       # clients reproduce the volley locally
 	# morale shock only lands on a battalion (gun crews and troopers just bleed men)
 	if not aim_gun and not aim_cav and foe != null:
 		if massed:
@@ -8483,11 +9124,17 @@ func _ripple_flinch(b: Batt, intensity: float) -> void:
 		var f: Dictionary = b.figs[randi() % b.figs.size()]
 		f["flinch"] = minf(1.5, float(f.get("flinch", 0.0)) + randf_range(0.4, 1.1) * intensity)
 
-func _hit_chance(d: float) -> float:
-	if d >= FIRE_RANGE:
+# the weapon a battalion carries — lazily resolved from its weapon_id and cached on the Batt
+func _wpn(b: Batt) -> Weapon:
+	if b.wpn == null:
+		b.wpn = Weapon.get_weapon(b.weapon_id)
+	return b.wpn
+
+func _hit_chance(d: float, wpn: Weapon) -> float:
+	if d >= wpn.max_range:
 		return 0.0
-	var t := 1.0 - d / FIRE_RANGE          # 1 at the muzzle, 0 at max range
-	return HIT_POINT_BLANK * pow(t, HIT_FALLOFF)
+	var t := 1.0 - d / wpn.max_range       # 1 at the muzzle, 0 at max range
+	return wpn.hit_point_blank * pow(t, wpn.hit_falloff)
 
 func _update_morale(b: Batt, delta: float) -> void:
 	# BROKEN is terminal: the men are past recall, streaming off the field. Nothing here
@@ -9042,8 +9689,9 @@ func _score_drill_volley() -> void:
 	var b := player
 	var total := maxi(1, b.figs.size())
 	var ready := 0
+	var w_aim := _wpn(b).aim_lead
 	for f in b.figs:
-		if float(f["reload"]) <= AIM_LEAD:
+		if float(f["reload"]) <= w_aim:
 			ready += 1
 	var sync := float(ready) / float(total)               # the fraction loaded & firing as one
 	var dt := _t - _drill_present_t
@@ -9337,6 +9985,7 @@ func _detach_skirmishers(b: Batt) -> void:
 	det.morale = b.morale
 	det.ammo = b.ammo
 	det.inst_col = b.inst_col          # the company wears its regiment's dress
+	det.weapon_id = b.weapon_id        # ...and carries the regiment's weapon (skirmishing riflemen!)
 	var fwd := Vector3(sin(b.facing), 0, cos(b.facing))
 	det.pos = b.pos + fwd * 14.0
 	det.spawn = det.pos
@@ -9536,7 +10185,7 @@ func _spawn_cavalry() -> void:
 	# keystone still holds, there are just four buckets per team instead of one).
 	var types_per_team: Array = []
 	for team in [0, 1]:
-		var ncav: int = 4 if _inflated else CAV_PER_TEAM   # a regiment on each wing
+		var ncav: int = (int(_setup.cav_per_team[team]) if GameConfig.historical != "" else (4 if _inflated else CAV_PER_TEAM))   # historical: the OOB's regiments
 		var types: Array = []
 		for r in range(ncav):
 			types.append(r % ntypes)
@@ -9559,7 +10208,7 @@ func _spawn_cavalry() -> void:
 			var nreg: int = types.count(ct)
 			# size EVERY arm (even one with no starting regiments) with spare slots, so a Stables
 			# can raise fresh regiments of any arm mid-campaign (see _muster_cavalry)
-			var n := (nreg + CAV_REINFORCE_HEADROOM) * CAV_MEN
+			var n := (nreg + CAV_REINFORCE_HEADROOM) * _cav_men
 			var hmi := MultiMeshInstance3D.new()
 			var hmm := MultiMesh.new()
 			hmm.transform_format = MultiMesh.TRANSFORM_3D
@@ -9603,7 +10252,12 @@ func _spawn_cavalry() -> void:
 			c.cav_type = types[r]
 			var side := -1.0 if r < half else 1.0
 			var rank := r % half
-			if _inflated or sites.is_empty():
+			if GameConfig.historical != "":
+				# the cavalry reserve, ranked up in lines of 8 behind the army's centre
+				var col := r % 8
+				var ln := r / 8
+				c.pos = Vector3((float(col) - 3.5) * 165.0, 0, z - fwd.z * (220.0 + float(ln) * 105.0))
+			elif _inflated or sites.is_empty():
 				c.pos = Vector3(side * (wing - float(rank) * 200.0), 0, z + float(rank) * (40.0 if team == 1 else -40.0))
 			else:
 				# the horse waits on the flank of a garrison, ready to ride out
@@ -9624,10 +10278,10 @@ func _spawn_cavalry() -> void:
 
 func _fill_troopers(c: Cav) -> void:
 	c.troopers.clear()
-	var files := int(ceil(CAV_MEN / 2.0))
+	var files := int(ceil(_cav_men / 2.0))
 	var fwd := Vector3(sin(c.facing), 0, cos(c.facing))
 	var right := Vector3(fwd.z, 0, -fwd.x)
-	for i in range(CAV_MEN):
+	for i in range(_cav_men):
 		var fi := i % files
 		var ra := i / files
 		var slot := Vector2((float(fi) - (files - 1) * 0.5) * CAV_SP + randf_range(-0.12, 0.12),
@@ -9669,12 +10323,27 @@ func _update_cavalry(delta: float) -> void:
 			_update_player_cav(c, delta)
 			continue
 		c.decide_cd -= delta
+		c.scout_cd = maxf(0.0, c.scout_cd - delta)
 		match c.state:
 			"reserve":
 				_cav_move(c, c.reserve_pos, _cav_trot(c), delta)
 				if _battle_begun and c.decide_cd <= 0.0:
 					c.decide_cd = CAV_DECIDE * randf_range(0.8, 1.2)
 					_cav_decide(c)
+					# AUTO-PICKETS: a light regiment with no charge to make ranges forward to screen
+					# the army's front, so the side isn't blind. Heavier horse stay back as the punch.
+					if c.state == "reserve" and c.scout_cd <= 0.0 \
+							and float(CAV_TYPE_DATA[c.cav_type]["scout"]) >= 1.05:
+						c.scout_cd = randf_range(14.0, 26.0)
+						_cav_begin_scout(c, c.reserve_pos + _team_front(c.team) * SCOUT_DIST)
+			"scouting":
+				# ride out to the scout point sweeping vision; turn for home if enemy horse closes
+				if _nearest_enemy_cav_dist(c.pos, c.team) < SCOUT_THREAT:
+					c.state = "retiring"
+				else:
+					_cav_move(c, c.scout_goal, _cav_trot(c) * 1.15, delta)
+					if Vector2(c.pos.x - c.scout_goal.x, c.pos.z - c.scout_goal.z).length() < 14.0:
+						c.state = "retiring"      # reached the vantage — ride back (vision swept en route)
 			"charging":
 				var tp := _cav_target_pos(c)
 				if tp == Vector3.INF:
@@ -9685,6 +10354,7 @@ func _update_cavalry(delta: float) -> void:
 					_cav_move(c, tp, _cav_gallop(c), delta)
 					if Vector2(c.pos.x - tp.x, c.pos.z - tp.z).length() < CAV_CONTACT + 4.0:
 						_cav_resolve(c)
+						c.state = "retiring"   # the shock is delivered — peel off and re-form, don't ride through
 			"retiring":
 				_cav_move(c, c.reserve_pos, _cav_trot(c), delta)
 				if Vector2(c.pos.x - c.reserve_pos.x, c.pos.z - c.reserve_pos.z).length() < 8.0:
@@ -9744,6 +10414,54 @@ func _cav_move(c: Cav, goal: Vector3, speed: float, delta: float) -> void:
 			p.y = _gh(p.x, p.z) + 0.05
 			_emit_dust(p, fwd)
 
+# the direction toward the enemy for a team (team 0 deploys at -Z facing +Z; team 1 the reverse)
+func _team_front(team: int) -> Vector3:
+	return Vector3(0, 0, 1) if team == 0 else Vector3(0, 0, -1)
+
+# send a regiment ranging to a vantage point (clamped to the province), sweeping vision en route
+func _cav_begin_scout(c: Cav, goal: Vector3) -> void:
+	c.scout_goal = Vector3(
+		clampf(goal.x, _MAP_WMIN.x, _MAP_WMAX.x), 0.0,
+		clampf(goal.z, _MAP_WMIN.y, _MAP_WMAX.y))
+	c.state = "scouting"
+
+# PLAYER ORDER (B): send the nearest free light-cavalry regiment to scout toward where you look.
+# Host/single does it directly; a client routes the request to the host through the net channel.
+func _send_scouts() -> void:
+	if player == null:
+		return
+	var fwd := -Vector3(sin(_cam_yaw), 0, cos(_cam_yaw))   # your line of sight, flattened
+	var goal := off_pos + fwd * SCOUT_DIST
+	if authoritative:
+		_host_send_scouts(player.team, goal, off_pos, true)
+	else:
+		_pending_net_order = { "kind": "scout", "x": goal.x, "z": goal.z }   # the host carries it out
+
+# HOST: pick the nearest free light-cav regiment of `team` to `ref_pos` and send it scouting to `goal`.
+func _host_send_scouts(team: int, goal: Vector3, ref_pos: Vector3, tell: bool) -> void:
+	var best: Cav = null
+	var bd := 1.0e9
+	for c in cavalry:
+		if c.team != team or c.spent or c.player:
+			continue
+		if c.state != "reserve" and c.state != "rallying":
+			continue
+		if float(CAV_TYPE_DATA[c.cav_type]["scout"]) < 1.05:
+			continue                                       # light horse only — the army's eyes
+		var d := c.pos.distance_to(ref_pos)
+		if d < bd:
+			bd = d
+			best = c
+	var mine: bool = player != null and team == player.team
+	if best == null:
+		if tell and mine:
+			_send_player_despatch("[color=#ffe9a8]No light horse free to scout.[/color]", {})
+		return
+	best.scout_cd = 30.0                                    # don't auto-retask it straight away
+	_cav_begin_scout(best, goal)
+	if tell and mine:
+		_send_player_despatch("[color=#9fe0a0]%s ride out to scout ahead.[/color]" % String(CAV_TYPE_DATA[best.cav_type]["name"]), {})
+
 func _cav_target_pos(c: Cav) -> Vector3:
 	match c.target_kind:
 		"batt":
@@ -9800,7 +10518,7 @@ func _cav_decide(c: Cav) -> void:
 		elif b.melee_foe != null:
 			s2 = 1.4                        # locked fighting — take them in the rear
 		else:
-			s2 = 0.25                       # a steady line: only if nothing better offers
+			s2 = 1.25                       # a steady LINE is charge-worthy — ride in to break it or force square
 		match c.cav_type:
 			0, 1:   # hussars / light dragoons: keenest on a rout or a skirmish screen
 				if b.state == "routing" or b.skirmish:
@@ -9852,22 +10570,26 @@ func _cav_resolve(c: Cav) -> void:
 				_client_volley(t)                       # the square's face delivers its fire
 				t.morale -= 2.0
 			else:
-				# closing fire from the defenders, then the shock goes home
+				# closing fire from the defenders, then the shock goes home. The DEFENDER'S melee
+				# quality (bayonet skill × nerve) decides the exchange the same way it does on foot:
+				# a steady, well-drilled line resists the sabres and bites the horse; a poor one is
+				# ridden down. (resist ~1 for an average defender; >1 tough, <1 ragged.)
+				var resist := clampf(_melee_quality(t) / 0.85, 0.55, 1.6)
 				if t.ammo > 0.0 and t.state != "routing" and not t.skirmish:
 					_client_volley(t)
-					_cav_lose(c, int(c.troopers.size() * randf_range(0.06, 0.12) / sturdy), near)
+					_cav_lose(c, int(c.troopers.size() * randf_range(0.06, 0.12) * resist / sturdy), near)
 				var weak := t.state != "steady" or t.skirmish or t.morale < 48.0
 				var frac := 0.42 if weak else 0.22
-				var inf_kills := mini(int(c.troopers.size() * frac * shock), t.figs.size() - 1)
+				var inf_kills := mini(int(c.troopers.size() * frac * shock / resist * randf_range(0.8, 1.2)), t.figs.size() - 1)
 				t.kills_pending += inf_kills
 				t.shot_from = c.pos
-				t.morale -= (34.0 if weak else 22.0) * shock
+				t.morale -= (34.0 if weak else 22.0) * shock / resist
 				t.flinch = minf(t.flinch + 1.4, 1.6)
 				t.calm_t = 0.0
 				if weak:
 					t.morale = minf(t.morale, 22.0)     # broken under the sabres
 				else:
-					_cav_lose(c, int(c.troopers.size() * randf_range(0.05, 0.09) / sturdy), near)
+					_cav_lose(c, int(c.troopers.size() * randf_range(0.05, 0.09) * resist / sturdy), near)
 		"gun":
 			var g: Gun = c.target
 			while not g.dead:
@@ -9913,19 +10635,40 @@ func _render_cavalry(delta: float) -> void:
 		for c in cavalry:
 			if c.team != team or c.spent:
 				continue
+			if not PLAYER_SEES_ALL and player != null and c.team != player.team and not c._spotted:
+				continue                     # fog of war: unseen enemy horse isn't drawn
 			var hmm: MultiMesh = cav_horse_mm[team][c.cav_type]
 			var rmm: MultiMesh = cav_rider_mm[team][c.cav_type]
 			if hmm == null:
 				continue
 			var i: int = counts[c.cav_type]
+			# DISTANCE CULLING: cavalry are far higher-poly than the foot (a horse + a rider each), so
+			# cull whole regiments past the impression range and thin the ranks hard with distance —
+			# a back-of-field squadron draws a fraction of its troopers. (Render only — no sim effect.)
+			var cd := cam.position.distance_to(c.pos) if cam != null else 0.0
+			# HYSTERESIS: a wide dead-band on the cull boundary (drop at VFAR+90, re-show at VFAR) so a
+			# regiment hovering at the edge doesn't strobe in and out of existence frame to frame.
+			if cd > LOD_VFAR + (90.0 if c._drawn else 0.0):
+				c._drawn = false
+				continue                     # too far to bother — its instances stay zeroed below
+			c._drawn = true
+			var cstep := 1
+			if cd > LOD_FAR + LOD_HYST:
+				cstep = clampi(3 + int((cd - LOD_FAR) / 70.0), 3, 14)
+			elif cd > LOD_MID + LOD_HYST:
+				cstep = 2
 			var fwd := Vector3(sin(c.facing), 0, cos(c.facing))
 			var right := Vector3(fwd.z, 0, -fwd.x)
 			var galloping := c.state == "charging" or c.state == "fled"
 			var spd := _cav_gallop(c) if galloping else _cav_trot(c)
 			var mscale: float = CAV_TYPE_DATA[c.cav_type]["mount_scale"]
+			var ti := -1
 			for tr in c.troopers:
 				if i >= hmm.instance_count:
 					break
+				ti += 1
+				if ti % cstep != 0:
+					continue                 # thinned out at this range
 				var slot: Vector2 = tr["slot"]
 				var tgt := c.pos + right * slot.x + fwd * slot.y
 				var w: Vector3 = (tr["wpos"] as Vector3).move_toward(tgt, spd * 1.35 * delta)
@@ -9993,6 +10736,17 @@ func _nearest_enemy_cav_dist(p: Vector3, team: int) -> float:
 		bd = minf(bd, Vector2(p.x - c.pos.x, p.z - c.pos.z).length())
 	return bd
 
+# distance to the nearest enemy horse that is ACTUALLY CHARGING (a real, imminent threat — the cue
+# to throw square). A regiment merely standing in reserve nearby is NOT counted, so the line doesn't
+# freeze every time loose cavalry wanders past.
+func _nearest_charging_cav_dist(p: Vector3, team: int) -> float:
+	var bd := 1.0e9
+	for c in cavalry:
+		if c.team == team or c.spent or c.state != "charging":
+			continue
+		bd = minf(bd, Vector2(p.x - c.pos.x, p.z - c.pos.z).length())
+	return bd
+
 # ================================================================== brigade command
 
 func _build_dead_horses() -> void:
@@ -10019,39 +10773,89 @@ func _add_dead_horse(pos: Vector3, yaw: float, _team: int) -> void:
 	dead_horse_mm.set_instance_transform(dead_horse_idx, Transform3D(basis, Vector3(pos.x, 0.34 + _gh(pos.x, pos.z), pos.z)))
 	dead_horse_idx = (dead_horse_idx + 1) % DEAD_HORSE_MAX
 
+# Build the brigades straight from the AUTHORED OOB indices: one Brigade per (team, oob_brigade); the
+# engine "division" is a unique (corps, division) so the divisional AI commands the real divisions.
+# (The army → division → brigade tiers map the OOB's army → corps/division → brigade; corps is kept on
+# the brigade for reference.) So at Waterloo the formations fight as d'Erlon's I Corps, Picton's
+# division, the Guard, etc., not as proximity-chunked blocks.
+func _brigades_from_oob() -> void:
+	var bcount := [0, 0, 0]                  # brigades placed per team -> br.idx
+	var div_idx: Array = [{}, {}, {}]        # per team: (corps*1000+division) -> sequential division
+	var brig_map := {}                       # team*100000 + oob_brigade -> Brigade
+	for b in battalions:
+		if b.independent or b.oob_brigade < 0:
+			continue
+		var team: int = b.team
+		var bkey: int = team * 100000 + b.oob_brigade
+		var br: Brigade = brig_map.get(bkey, null)
+		if br == null:
+			br = Brigade.new()
+			br.team = team
+			br.corps = b.oob_corps
+			var dmap: Dictionary = div_idx[team]
+			var dkey: int = b.oob_corps * 1000 + b.oob_division
+			if not dmap.has(dkey):
+				dmap[dkey] = dmap.size()
+			br.division = int(dmap[dkey])
+			br.idx = team * BRIGADES_PER_TEAM + bcount[team]
+			bcount[team] += 1
+			br.line2 = false
+			brig_map[bkey] = br
+			brigades.append(br)
+		b.brigade = br
+		br.battalions.append(b)
+		if b.is_player:
+			br.is_player = true
+	for br in brigades:
+		if br.battalions.is_empty():
+			continue
+		br.anchor = _live_center(br.battalions)
+		br.objective = br.anchor
+		br.facing = (br.battalions[0] as Batt).facing   # each formation keeps its authored facing (Prussians face west)
+		br.face_want = br.facing
+
 func _assign_brigades() -> void:
 	_build_dead_horses()
 	brigades.clear()
-	# data-driven: chunk each team's battalions (in spawn order) into brigades. For
-	# the 70k field this reproduces the fixed-index OOB exactly; for an inflated
-	# campaign force of any size it just works from whatever spawned.
-	for team in [0, 1]:
-		var mine: Array = []
-		for b in battalions:
-			if b.team == team and not b.independent:
-				mine.append(b)
-		var nbri: int = int(ceil(float(mine.size()) / float(BATTS_PER_BRIGADE)))
-		for bri in range(nbri):
-			var br := Brigade.new()
-			br.team = team
-			br.idx = team * BRIGADES_PER_TEAM + bri
-			br.division = bri / BRIGADES_PER_DIVISION
-			br.corps = br.division / DIVISIONS_PER_CORPS
-			br.line2 = (br.division % DIVISIONS_PER_CORPS) == 1   # the corps' second line
-			for k in range(BATTS_PER_BRIGADE):
-				var gi: int = bri * BATTS_PER_BRIGADE + k
-				if gi < mine.size():
-					var b: Batt = mine[gi]
-					b.brigade = br
-					br.battalions.append(b)
-					if b.is_player:
-						br.is_player = true
-			if br.battalions.is_empty():
-				continue
-			br.anchor = _live_center(br.battalions)
-			br.objective = br.anchor
-			br.facing = 0.0 if team == 0 else PI
-			brigades.append(br)
+	# build the brigades from the AUTHORED order of battle if one was set (historical battles), so the
+	# armies fight as their real corps/divisions/brigades; otherwise chunk each team's battalions in
+	# spawn order (the campaign field, which reproduces the fixed-index OOB).
+	var use_oob := false
+	for b in battalions:
+		if b.oob_brigade >= 0:
+			use_oob = true
+			break
+	if use_oob:
+		_brigades_from_oob()
+	else:
+		for team in [0, 1]:
+			var mine: Array = []
+			for b in battalions:
+				if b.team == team and not b.independent:
+					mine.append(b)
+			var nbri: int = int(ceil(float(mine.size()) / float(BATTS_PER_BRIGADE)))
+			for bri in range(nbri):
+				var br := Brigade.new()
+				br.team = team
+				br.idx = team * BRIGADES_PER_TEAM + bri
+				br.division = bri / BRIGADES_PER_DIVISION
+				br.corps = br.division / DIVISIONS_PER_CORPS
+				br.line2 = (br.division % DIVISIONS_PER_CORPS) == 1   # the corps' second line
+				for k in range(BATTS_PER_BRIGADE):
+					var gi: int = bri * BATTS_PER_BRIGADE + k
+					if gi < mine.size():
+						var b: Batt = mine[gi]
+						b.brigade = br
+						br.battalions.append(b)
+						if b.is_player:
+							br.is_player = true
+				if br.battalions.is_empty():
+					continue
+				br.anchor = _live_center(br.battalions)
+				br.objective = br.anchor
+				br.facing = 0.0 if team == 0 else PI
+				br.face_want = br.facing
+				brigades.append(br)
 	# attach every battery to the nearest friendly brigade
 	for g in guns:
 		var best: Brigade = null
@@ -10084,13 +10888,204 @@ func _assign_brigades() -> void:
 		dv.objective = _brigade_center(br)
 	for d2 in divisions:
 		d2.general_pos = _division_center(d2)
-	# the two army commanders — each gets a personality (one bolder than the other)
+	# the two army commanders
 	armies.clear()
 	for team in [0, 1]:
 		var army := Army.new()
 		army.team = team
-		army.aggression = randf_range(0.3, 0.85)
 		armies.append(army)
+	# NATIONAL DOCTRINE + TEMPERAMENT + ROLE — resolve each formation's nationality to the
+	# doctrine it fights by, roll its commander a temperament, then derive boldness and the
+	# strategic war aim. This replaces the old single random aggression knob.
+	_resolve_doctrine()
+	_build_key_points()        # terrain goals: strongpoints, ridges and woods the AI deploys on and fights for
+
+# TERRAIN KEY POINTS (Phase 2) — the ground that shapes a Napoleonic battle: strongpoints (farms,
+# villages, towns) to garrison, ridge crests to hold (the reverse slope sheltering the line behind),
+# and woods to rest a flank on. Built once per battle from the terrain; the command AI forms onto
+# them, anchors its flanks on them, and a defender clings to the high ground.
+func _build_key_points() -> void:
+	key_points.clear()
+	if _wmap:
+		var sp := [
+			[Vector3(-680, 0, 200), 1.00, "strongpoint"],   # Hougoumont — the fought-over château
+			[Vector3(-20, 0, 300), 1.00, "strongpoint"],    # La Haye Sainte — the farm on the road
+			[Vector3(1120, 0, -760), 0.75, "strongpoint"],  # Plancenoit — where the Prussians debouch
+			[Vector3(880, 0, 320), 0.70, "strongpoint"],    # Papelotte — the Allied-left farm
+			[Vector3(0, 0, 820), 0.55, "strongpoint"],      # Mont-Saint-Jean — behind the centre
+			[Vector3(36, 0, -560), 0.45, "strongpoint"],    # La Belle Alliance — the French centre
+		]
+		for s in sp:
+			key_points.append({"pos": _gh3(s[0] as Vector3), "value": float(s[1]), "kind": String(s[2]), "radius": 95.0, "owner": -1})
+		# the two ridges run east–west (along x); mark crest points along each
+		var kx := -1400.0
+		while kx <= 1500.0:
+			key_points.append({"pos": _gh3(Vector3(kx, 0, 560.0)), "value": 0.80, "kind": "ridge", "radius": 240.0, "owner": -1})   # Mont-Saint-Jean (Allied)
+			key_points.append({"pos": _gh3(Vector3(kx, 0, -560.0)), "value": 0.60, "kind": "ridge", "radius": 240.0, "owner": -1})  # La Belle Alliance (French)
+			kx += 350.0
+	else:
+		for t in field_towns:
+			key_points.append({"pos": t["pos"] as Vector3, "value": clampf(0.45 + float(t["size"]) * 0.18, 0.45, 1.0), "kind": "strongpoint", "radius": 150.0, "owner": int(t["owner"])})
+		for f in forest_clusters:
+			key_points.append({"pos": f["pos"] as Vector3, "value": 0.45, "kind": "wood", "radius": float(f["radius"]), "owner": -1})
+
+# the highest defensive ground within `radius` of `center` — a crest to form a line on. Samples a
+# ring at two radii plus the centre (cheap; only called at the army-decision cadence, not per frame).
+func _best_high_ground(center: Vector3, radius: float) -> Vector3:
+	var best := center
+	var bh := _gh(center.x, center.z)
+	for i in range(12):
+		var a := TAU * float(i) / 12.0
+		for r in [radius * 0.5, radius]:
+			var p := Vector3(center.x + cos(a) * r, 0.0, center.z + sin(a) * r)
+			var h := _gh(p.x, p.z)
+			if h > bh:
+				bh = h
+				best = p
+	return _gh3(best)
+
+# the nearest key point of the given kinds within max_d (kinds empty = any), or null
+func _nearest_key_point(pos: Vector3, kinds: Array, max_d: float):
+	var best = null
+	var bd := max_d
+	for kp in key_points:
+		if not kinds.is_empty() and not (String(kp["kind"]) in kinds):
+			continue
+		var d: float = pos.distance_to(kp["pos"] as Vector3)
+		if d < bd:
+			bd = d
+			best = kp
+	return best
+
+# Phase 2 — THE GROUND. The army commander tags each brigade's place in the line and picks the
+# ground it should form on: the flank brigades rest on the nearest strongpoint or wood out to
+# their open side, and a DEFENDING army forms on the best high ground (the crest, sheltering the
+# reverse slope). Stored on br.terrain_anchor/hold_high and honoured GENTLY by _brigade_decide so
+# it shapes where the line stands but never stops an attack going home.
+func _terrain_plan(army, mine: Array, _foe: Array) -> void:
+	if mine.is_empty():
+		return
+	var defend: bool = army.role == "defend"
+	for i in range(mine.size()):
+		var br = mine[i]
+		br.on_flank = -1 if i == 0 else (1 if i == mine.size() - 1 else 0)
+		br.hold_high = defend
+		br.terrain_anchor = Vector3.INF
+		var c: Vector3 = _brigade_center(br)
+		var anchor := Vector3.INF
+		# the flank brigades rest on the strongest terrain feature out to their open side
+		if br.on_flank != 0:
+			var kp = _nearest_key_point(c, ["strongpoint", "wood", "town"], 750.0)
+			if kp != null:
+				var kpp: Vector3 = kp["pos"]
+				if signf(kpp.x - c.x) == float(br.on_flank) or absf(kpp.x - c.x) < 120.0:
+					anchor = kpp
+		# a defender otherwise forms on the high ground near where it stands
+		if anchor == Vector3.INF and defend:
+			anchor = _best_high_ground(c, 220.0)
+		br.terrain_anchor = anchor
+
+# Gently bend a brigade's objective onto the ground the army chose for it (Phase 2). Lateral
+# only for a flank rest (keeps the advance going), and a depth clamp for a defender holding the
+# crest — never applied to an assault, so an attack still drives home.
+func _apply_terrain(br, _center: Vector3) -> void:
+	var ta = br.terrain_anchor
+	if ta == Vector3.INF:
+		return
+	# FLANK REST: once SETTLED (not while marching), ease the line laterally onto the strongpoint/
+	# wood, keeping its forward depth. Skipped while advancing so it never curves a marching column.
+	if br.on_flank != 0 and br.posture in ["engage", "hold"]:
+		br.objective.x = lerpf(br.objective.x, ta.x, 0.25)
+	# DEFENDER HOLDS THE HIGH GROUND: standing on the crest, don't advance off it into the valley
+	if br.hold_high and br.posture in ["engage", "hold", "refuse", "fix"] and br.enemy != null:
+		var to_foe: Vector3 = _brigade_center(br.enemy) - ta
+		to_foe.y = 0.0
+		if to_foe.length() > 1.0:
+			to_foe = to_foe.normalized()
+			var fwd: float = (br.objective - ta).dot(to_foe)   # how far forward of the crest the objective sits
+			if fwd > 0.0:
+				br.objective -= to_foe * fwd                   # pull it back onto the crest line
+
+# ANTICIPATION (Phase 2) — read where the enemy's WEIGHT is gathering and how committed his advance
+# is, from his observed momentum (not just his current position). Only KNOWN (scouted) enemy
+# brigades count, so the read is built on the army's lagged, fogged picture — a feint or a hidden
+# flank march goes unseen until cavalry sights it. `threat_x` = the lateral axis of his main effort;
+# `threat_mass` = the share of his strength actually bearing down on us (0..1 confidence).
+func _read_enemy_intent(army, mine: Array, foe: Array) -> void:
+	if mine.is_empty() or foe.is_empty():
+		return
+	var our_c := Vector3.ZERO
+	for b in mine:
+		our_c += _brigade_center(b)
+	our_c /= float(mine.size())
+	var sum_w := 0.0
+	var sum_wx := 0.0
+	var adv_str := 0.0
+	var tot_str := 0.0
+	for fb in foe:
+		if not _brigade_known(fb, army.team):
+			continue                                   # fog: an unscouted column can't be read
+		var c: Vector3 = _brigade_center(fb)
+		var vel := Vector3.ZERO
+		if fb.obs_prev != Vector3.INF:
+			vel = c - fb.obs_prev
+		fb.obs_prev = c
+		var toward: Vector3 = our_c - c
+		toward.y = 0.0
+		var closing := 0.0
+		if toward.length() > 1.0 and vel.length() > 0.01:
+			closing = vel.normalized().dot(toward.normalized())
+		var st := float(_brigade_strength(fb))
+		tot_str += st
+		if closing > 0.15:
+			adv_str += st
+		var w := st * (1.6 if closing > 0.15 else 0.6)   # an advancing enemy weighs more than a standing one
+		sum_w += w
+		sum_wx += w * c.x
+	if sum_w <= 0.0:
+		return
+	var tx := sum_wx / sum_w
+	army.threat_x = tx if army.threat_t <= 0.0 else lerpf(army.threat_x, tx, 0.4)   # smooth the lagged picture
+	army.threat_mass = clampf(adv_str / maxf(1.0, tot_str), 0.0, 1.0)
+	army.threat_t = _t
+
+# Resolve doctrine + temperament onto every brigade, division and army from the troops'
+# nationality, and set each army's boldness (doctrine + temper) and strategic role.
+func _resolve_doctrine() -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = (GameConfig.match_seed if GameConfig.match_seed != 0 else 1) ^ 0x5151d0c7
+	for br in brigades:
+		br.nation = _dominant_nation(br.battalions)
+		br.doctrine = _doctrine_for(br.nation)
+		br.temper = TEMPERS[rng.randi() % TEMPERS.size()]
+	for dv in divisions:
+		var dbatts: Array = []
+		for dbr in _division_brigades(dv):
+			dbatts.append_array(dbr.battalions)
+		dv.nation = _dominant_nation(dbatts)
+		dv.doctrine = _doctrine_for(dv.nation)
+		dv.temper = TEMPERS[rng.randi() % TEMPERS.size()]
+	for army in armies:
+		army.nation = _army_doctrine_group(army.team)        # the army's doctrine GROUP (e.g. "british")
+		army.doctrine = DOCTRINE.get(army.nation, DOCTRINE["line"])
+		army.temper = TEMPERS[rng.randi() % TEMPERS.size()]
+		army.aggression = clampf(float(army.doctrine["aggr"]) + float(army.temper["aggr"]) + rng.randf_range(-0.05, 0.05), 0.12, 0.95)
+	_assign_army_roles()
+
+# The strategic posture each army opens with. Phase 1 sets it from doctrine + boldness (a
+# bold, open-field doctrine takes the initiative; a defensive, reverse-slope one stands and
+# holds; otherwise a meeting engagement). Phase 2 refines this from terrain and who holds the
+# ground. The war aim leans on it but isn't ruled by it, so an approximate role is fine.
+func _assign_army_roles() -> void:
+	for army in armies:
+		var aggr := float(army.aggression)
+		var reverse: bool = bool(army.doctrine.get("reverse", false))
+		if aggr >= 0.66 or (aggr >= 0.55 and not reverse):
+			army.role = "attack"           # a genuinely bold commander, or an aggressive doctrine, takes the initiative
+		elif reverse and aggr < 0.60:
+			army.role = "defend"           # a firepower / reverse-slope army stands and holds its ground
+		else:
+			army.role = "meeting"
 
 func _live_center(batts: Array) -> Vector3:
 	var sum := Vector3.ZERO
@@ -10164,6 +11159,33 @@ func _nearest_enemy_brigade(br):
 			best = o
 	return best
 
+# FOG OF WAR for the AI: a brigade is KNOWN to `by_team` only if that side has lately SEEN one of
+# its battalions (b._spotted = "seen by my enemy" = seen by by_team, with AI_MEMORY of recall). So
+# an unscouted column is invisible to the enemy commander — feints and flank marches go unseen.
+func _brigade_known(o, by_team: int) -> bool:
+	for b in o.battalions:
+		if b.spent or b.figs.is_empty():
+			continue
+		if b._spotted or (_t - b._intel_t) < AI_MEMORY:
+			return true
+	return false
+
+# The nearest enemy brigade THIS brigade actually knows about (lately scouted), not omniscient truth.
+func _nearest_known_enemy_brigade(br):
+	var c := _brigade_center(br)
+	var best = null
+	var bd := 1.0e18
+	for o in brigades:
+		if o.team == br.team or _brigade_live(o) == 0:
+			continue
+		if not _brigade_known(o, br.team):
+			continue
+		var d := c.distance_to(_brigade_center(o))
+		if d < bd:
+			bd = d
+			best = o
+	return best
+
 # ---- army command: read the whole front, find the decisive point, assign missions ----
 
 func _update_armies(delta: float) -> void:
@@ -10206,14 +11228,14 @@ func _decide_divisions(army) -> void:
 			_division_assault(dv, brs, army)
 		else:
 			dv.directive = "fix"
-		dv.target = _nearest_enemy_brigade(brs[brs.size() / 2])
+		dv.target = _nearest_known_enemy_brigade(brs[brs.size() / 2])   # aim only at a scouted enemy
 		dv.objective = _division_center(dv)
 
 # The general's plan for his assaulting division: lead, supports, and a held reserve.
 func _division_assault(dv, brs: Array, army) -> void:
 	var tgt = army.main.mission_target if army.main != null else null
 	if tgt == null or _brigade_live(tgt) == 0:
-		tgt = _nearest_enemy_brigade(brs[0])
+		tgt = _nearest_known_enemy_brigade(brs[0])   # the spearhead aims at a scouted enemy only
 	if tgt == null:
 		return
 	var tc := _brigade_center(tgt)
@@ -10265,6 +11287,7 @@ func _army_decide(army) -> void:
 		return
 	mine.sort_custom(func(a, b): return _brigade_center(a).x < _brigade_center(b).x)
 	foe.sort_custom(func(a, b): return _brigade_center(a).x < _brigade_center(b).x)
+	_read_enemy_intent(army, mine, foe)   # ANTICIPATION: read where the enemy's weight is gathering
 	# THE APPRECIATION: the commander deduces his own goal from the field, then the
 	# goal chooses the doctrine play, the plan, and the decisive point
 	_appreciate(army, mine, foe)
@@ -10312,6 +11335,28 @@ func _army_decide(army) -> void:
 		ml.mission = "refuse"
 	if _brigade_center(foe[foe.size() - 1]).x > _brigade_center(mr).x + 130.0 and mr.mission == "fix":
 		mr.mission = "refuse"
+	# ANTICIPATION: refuse the flank his weight is GATHERING against (read from his momentum,
+	# threat_x) — bend the flank back before he physically overlaps it, not after.
+	if army.threat_t > 0.0 and army.threat_mass > 0.35:
+		if army.threat_x < _brigade_center(ml).x - 60.0 and ml.mission in ["fix", "attack"]:
+			ml.mission = "refuse"
+		elif army.threat_x > _brigade_center(mr).x + 60.0 and mr.mission in ["fix", "attack"]:
+			mr.mission = "refuse"
+	# ANTICIPATION: which corps' sector the enemy's main effort is bearing down on — its reserve
+	# is committed to MEET the blow, before its own first line has been bled white.
+	var threat_corps := -1
+	if army.threat_t > 0.0 and army.threat_mass > 0.40:
+		var bestd := 1.0e18
+		for cpn2 in range(CORPS_PER_TEAM):
+			var cx := 0.0
+			var cn := 0
+			for brc in mine:
+				if brc.corps == cpn2 and not brc.line2:
+					cx += _brigade_center(brc).x
+					cn += 1
+			if cn > 0 and absf(cx / float(cn) - army.threat_x) < bestd:
+				bestd = absf(cx / float(cn) - army.threat_x)
+				threat_corps = cpn2
 	# THE RESERVE GOES IN — each corps watches its own first line: when it is bleeding
 	# out it is RELIEVED; when the army is pressing and the weak point lies in this
 	# corps' sector, the second line is committed to EXPLOIT. Decisions, not scripts.
@@ -10332,7 +11377,8 @@ func _army_decide(army) -> void:
 		var fl_frac := float(fl_str) / float(BRIGADES_PER_DIVISION * BATTS_PER_BRIGADE * MEN)
 		var relieve := fl_frac < 0.5 or fl_live <= 2
 		var exploit: bool = army.plan == "press" and main != null and main.corps == cpn and best_w > 1.0
-		if relieve or exploit:
+		var threatened: bool = cpn == threat_corps and fl_frac < 0.92   # the anticipated point — reinforce early
+		if relieve or exploit or threatened:
 			for br3 in res:
 				br3.line2 = false           # they are first-line troops from this moment
 				br3.mission = "attack" if exploit else "fix"
@@ -10352,6 +11398,7 @@ func _army_decide(army) -> void:
 	# the town. (Value × weakness ÷ distance, biased by temperament — the campaign mind.)
 	army.target_town = _pick_target_town(army, mine)
 	_assign_strategic_tasks(army, mine)   # give each brigade a PLACE to take or hold (its primary task)
+	_terrain_plan(army, mine, foe)        # Phase 2: choose the ground — rest the flanks, hold the high ground
 	for cpn in range(CORPS_PER_TEAM):
 		var cc := Vector3.ZERO
 		var cn := 0
@@ -10378,6 +11425,125 @@ const INTEL_LAG := 12.0   # reports ride to HQ by courier — the picture lags r
 # THE APPRECIATION (step 1): candidate goals are generated from the situation and
 # scored value x feasibility; personality biases the values; the standing goal holds
 # a grip (hysteresis) so the commander commits rather than dithers.
+# ================= WATERLOO — the historical AI script ==================================
+# A timeline overlaid on the tactical sim: Wellington holds the ridge while the French batter the
+# centre, the Imperial Guard waits in reserve, and Blücher's Prussians stand off to the east until
+# their hour comes — then crash onto the French right while the Guard makes its doomed last attack.
+# The script issues army intents (scripted_goal), holds/releases formations (hold_until/scripted_obj)
+# and narrates each phase; the underlying brigade/battalion AI fights every contact as it falls.
+func _waterloo_begin() -> void:
+	_wat_t0 = _t
+	_wat_phase = -1
+	if armies.size() >= 2:
+		for a in armies:
+			if a.team == 0:
+				a.scripted_goal = "break_centre"   # the French press the Allied centre all day
+			else:
+				a.scripted_goal = "bleed"          # Wellington stands and bleeds them on the ridge
+	# the Prussians (anchored far east) and the Imperial Guard (reserve) stand fast until released
+	for br in brigades:
+		if _wat_is_prussian(br) or _wat_is_guard(br):
+			br.hold_until = 1.0e18
+
+func _wat_is_prussian(br) -> bool:
+	return br.team == 1 and br.anchor.x > 2000.0     # only the Prussians spawn that far to the east
+
+func _wat_is_guard(br) -> bool:
+	return br.team == 0 and not br.battalions.is_empty() and (br.battalions[0] as Batt).oob_division >= 97
+
+func _waterloo_script() -> void:
+	if not _battle_begun:
+		return
+	var bt := _t - _wat_t0
+	while _wat_phase + 1 < WAT_PHASES.size() and bt >= float(WAT_PHASES[_wat_phase + 1][0]):
+		_wat_phase += 1
+		_wat_fire_phase(String(WAT_PHASES[_wat_phase][1]))
+
+func _wat_fire_phase(name: String) -> void:
+	# the despatch is written from the player's own side — French (team 0) or Anglo-Allied (team 1)
+	var fr := (player != null and player.team == 0)
+	match name:
+		"hougoumont":
+			if fr:
+				_send_player_despatch("[color=#ffd773]11:30 — Hougoumont.[/color] The guns open and Jérôme's division goes in against the château wood on our left — the day begins.", {})
+			else:
+				_send_player_despatch("[color=#ffd773]11:30 — Hougoumont.[/color] Reille's guns open on the château wood; Jérôme's men storm the orchard on our right.", {})
+		"grand_battery":
+			if fr:
+				_send_player_despatch("[color=#ffd773]The grand battery.[/color] Our guns come into line and open on the ridge — the great cannonade begins.", {})
+			else:
+				_send_player_despatch("[color=#ffd773]The grand battery.[/color] The massed French guns come into line and the round-shot begins to plough the ridge.", {})
+		"derlon":
+			if fr:
+				_send_player_despatch("[color=#ffd773]Forward![/color] D'Erlon's corps advances in column against the enemy left-centre and La Haye Sainte.", {})
+			else:
+				_send_player_despatch("[color=#ffd773]D'Erlon attacks![/color] Great columns roll up the slope against the left-centre and La Haye Sainte.", {})
+		"cavalry":
+			if fr:
+				_send_player_despatch("[color=#ffd773]Ney leads the horse![/color] The squadrons sweep up against the enemy centre — ride them down!", {})
+			else:
+				_send_player_despatch("[color=#ffd773]Cavalry![/color] Ney's squadrons come on against the centre — form square!", {})
+			_wat_release_cavalry()
+		"prussians":
+			if fr:
+				_send_player_despatch("[color=#ff9d73]Prussians on the right![/color] Bülow's corps debouches from the Bois de Paris — the right must hold at Plancenoit!", {})
+			else:
+				_send_player_despatch("[color=#73ff97]The Prussians![/color] Bülow's corps debouches from the Bois de Paris onto the French right — Plancenoit is threatened.", {})
+			_wat_release_prussians()
+		"guard":
+			if fr:
+				_send_player_despatch("[color=#ffd773]La Garde au feu![/color] The Emperor commits the Guard — form column and climb the slope for the last throw of the day.", {})
+			else:
+				_send_player_despatch("[color=#ffd773]La Garde au feu![/color] The Imperial Guard forms column and climbs the slope into the centre — hold the crest!", {})
+			_wat_release_guard()
+
+# Ney's great cavalry charges: the French horse, idle in reserve far to the rear, advances into
+# charge range of the Allied centre; the Allied horse moves up to meet them. (The squadrons then
+# charge / break on the squares / retire to re-form on their own AI.)
+func _wat_release_cavalry() -> void:
+	var fi := 0
+	var ai := 0
+	for c in cavalry:
+		if c.player:
+			continue
+		if c.team == 0:
+			var lane := fi % 5
+			var rowf := fi / 5
+			# rally close under the British ridge (~100 m off) so they're within charge range of the line
+			c.reserve_pos = Vector3((float(lane) - 2.0) * 200.0, 0.0, 410.0 - float(rowf) * 55.0)
+			c.state = "reserve"
+			fi += 1
+		else:
+			var la := ai % 5
+			var rowa := ai / 5
+			c.reserve_pos = Vector3((float(la) - 2.0) * 200.0, 0.0, 230.0 + float(rowa) * 55.0)
+			ai += 1
+
+func _wat_release_prussians() -> void:
+	var si := 0
+	var ni := 0
+	for br in brigades:
+		if not _wat_is_prussian(br):
+			continue
+		br.hold_until = 0.0
+		# the southern brigades drive on Plancenoit and the French right-rear; the northern ones
+		# make for the junction with the Allied left at Papelotte — spread so they don't pile up.
+		if br.anchor.z < 150.0:
+			br.scripted_obj = Vector3(1000.0 + float(si) * 140.0, 0.0, -640.0 - float(si) * 60.0)
+			si += 1
+		else:
+			br.scripted_obj = Vector3(820.0 + float(ni) * 140.0, 0.0, 240.0)
+			ni += 1
+
+func _wat_release_guard() -> void:
+	var i := 0
+	for br in brigades:
+		if not _wat_is_guard(br):
+			continue
+		br.hold_until = 0.0
+		br.scripted_obj = Vector3(-220.0 + float(i) * 150.0, 0.0, 500.0)   # column up the centre, spread across it
+		i += 1
+
 func _appreciate(army, mine: Array, foe: Array) -> void:
 	army.goal_t += ARMY_DECIDE
 	# (4) intelligence: the enemy frontage as last REPORTED, not as it now is
@@ -10420,6 +11586,28 @@ func _appreciate(army, mine: Array, foe: Array) -> void:
 	cands["bleed"] = (0.8 - ag * 0.4) * clampf((0.95 - ratio) * 2.2, 0.0, 1.2)
 	cands["delay"] = (0.9 - ag * 0.45) * clampf((0.62 - ratio) * 3.0, 0.0, 1.5) \
 		+ (0.5 if my_mor < 38.0 else 0.0)
+	# the strategic ROLE leans the war aim: an attacker presses for a decision, a defender
+	# stands and bleeds them, a rearguard buys time. A meeting engagement leans neither way.
+	match army.role:
+		"attack":
+			cands["destroy"] *= 1.35
+			cands["break_centre"] *= 1.30
+			cands["turn_left"] *= 1.25
+			cands["turn_right"] *= 1.25
+			cands["bleed"] *= 0.50
+			cands["delay"] *= 0.40
+		"defend":
+			cands["bleed"] *= 1.50
+			cands["delay"] *= 1.15
+			cands["destroy"] *= 0.60
+			cands["break_centre"] *= 0.70
+		"rearguard":
+			cands["delay"] *= 1.90
+			cands["bleed"] *= 1.20
+			cands["destroy"] *= 0.40
+			cands["break_centre"] *= 0.40
+			cands["turn_left"] *= 0.50
+			cands["turn_right"] *= 0.50
 	# (5) terrain goals plug in here when key_points exist
 	# (7) the campaign may dictate the goal outright
 	if GameConfig.battle_goal != "" and cands.has(GameConfig.battle_goal):
@@ -10432,6 +11620,8 @@ func _appreciate(army, mine: Array, foe: Array) -> void:
 		if s > bs:
 			bs = s
 			best = String(k)
+	if army.scripted_goal != "":
+		best = army.scripted_goal       # the historical script dictates the army's intent
 	if best != army.goal:
 		army.goal = best
 		army.goal_t = 0.0
@@ -10447,8 +11637,8 @@ func _appreciate(army, mine: Array, foe: Array) -> void:
 	if army.plan != "defend":
 		if army.goal in ["turn_left", "turn_right"]:
 			army.play = "pin_envelop"      # fix the line, march onto the flank
-		elif my_mor > 45.0:
-			army.play = "grand_battery"    # mass the guns at the point before the assault
+		elif my_mor > 45.0 and float(army.doctrine.get("grand_bat", 0.5)) >= 0.45:
+			army.play = "grand_battery"    # mass the guns at the point — doctrines that favour it (French, Prussian)
 
 func _goal_text(g: String) -> String:
 	match g:
@@ -10534,9 +11724,15 @@ func _update_brigades(delta: float) -> void:
 				cnt[tm] += 1
 	for tm in [0, 1]:
 		_army_adv[tm] = sum[tm] / float(maxi(1, cnt[tm]))
+	if _wmap:
+		_waterloo_script()
 	for br in brigades:
 		_update_brigade(br, delta)
 	_update_brigade_couriers(delta)
+	# (a per-frame inter-battalion separation push was tried here but it fought the movement AI and the
+	#  formation — jittering units, and shoving the densely-packed advancing French back out of the
+	#  crowd, away from the enemy. Removed. Crowding is handled by the width-aware slots in
+	#  _brigade_assign_slots; deploying reserve brigades in DEPTH (line2) is the non-jittery next step.)
 
 func _update_brigade(br, delta: float) -> void:
 	if _brigade_live(br) == 0:
@@ -10552,6 +11748,8 @@ func _update_brigade(br, delta: float) -> void:
 		br.decide_cd = BRIG_DECIDE * randf_range(0.85, 1.15)
 		_brigade_decide(br)
 	_brigade_set_anchor(br, delta)        # ease the line toward its objective each frame
+	if absf(angle_difference(br.facing, br.face_want)) > 0.05:   # DEADBAND: ignore sub-degree jitter; wheel only for a real change (no slot orbit)
+		br.facing = lerp_angle(br.facing, br.face_want, clampf(delta * BRIG_TURN_RATE, 0.0, 1.0))
 	_brigade_assign_slots(br)             # dress the battalions on the brigade line
 	_brigade_position_guns(br)            # post the battery to support the line
 	_set_brigade_orders(br)               # put the mission into words for each battalion
@@ -10684,11 +11882,13 @@ func _assign_strategic_tasks(army, mine: Array) -> void:
 			var d: float = center.distance_to(tp)
 			var owner := int(t["owner"])
 			if owner == team:
-				# DEFEND a held town that an enemy force is bearing down on
+				# DEFEND a held town that a SCOUTED enemy force is bearing down on (an unseen approach
+				# can't be defended against — that's the price of failing to picket your front)
 				var threat := 0
 				for b in battalions:
 					if b.team != team and b.team != 2 and not b.spent and b.pos.distance_to(tp) < 1600.0:
-						threat += b.figs.size()
+						if b._spotted or (_t - b._intel_t) < AI_MEMORY:
+							threat += b.figs.size()
 				if threat < 250:
 					continue
 				var sc := val * (1.0 + float(threat) / 2500.0) / (1.0 + d / 2500.0)
@@ -10735,20 +11935,38 @@ func _brigade_pursue_task(br, center: Vector3) -> void:
 		br.mission = "seize"
 		br.objective = tp
 	if center.distance_to(br.objective) > 1.0:
-		br.facing = atan2((br.objective - center).x, (br.objective - center).z)
+		br.face_want = atan2((br.objective - center).x, (br.objective - center).z)
 
 func _brigade_decide(br) -> void:
 	var center := _brigade_center(br)
+	# historical script (Waterloo): a brigade ordered to hold stands fast; one given a scripted
+	# objective marches to it, then reverts to the tactical AI once arrived.
+	if br.hold_until > _t:
+		br.posture = "hold"
+		br.objective = br.anchor
+		br.enemy = null
+		br.fire_mission = null
+		return
+	if br.scripted_obj != Vector3.ZERO:
+		if center.distance_to(br.scripted_obj) < 240.0:
+			br.scripted_obj = Vector3.ZERO   # arrived — hand back to the tactical AI
+		else:
+			br.posture = "advance"
+			br.mission = "attack"
+			br.objective = br.scripted_obj
+			br.face_want = atan2((br.scripted_obj - center).x, (br.scripted_obj - center).z)
+			return
 	if not _battle_begun:
 		# the armies stand on their ground until the step-off
 		br.posture = "hold"
 		br.objective = br.anchor
 		br.fire_mission = null
 		return
-	# OPERATIONAL: give battle to an enemy brigade only when it is in CONTACT; otherwise pursue
-	# the strategic task (defend / assault / screen a town) — so brigades campaign across the
-	# province instead of all converging into one line. The tactical battle below runs on contact.
-	var near_enemy = _nearest_enemy_brigade(br)
+	# OPERATIONAL: give battle to an enemy brigade only when it is KNOWN and in CONTACT; otherwise
+	# pursue the strategic task (defend / assault / screen a town). With fog, an unscouted column
+	# isn't reacted to until your own forces sight it — so feints and flank marches go unseen, and a
+	# brigade can be caught on the march. The tactical battle below still runs once contact is real.
+	var near_enemy = _nearest_known_enemy_brigade(br)
 	var ndist: float = (_brigade_center(near_enemy).distance_to(center)) if near_enemy != null else 1.0e18
 	if near_enemy == null or ndist >= OPERATIONAL_CONTACT:
 		_brigade_pursue_task(br, center)
@@ -10771,7 +11989,7 @@ func _brigade_decide(br) -> void:
 		return
 	var ec := _brigade_center(enemy)
 	if center.distance_to(ec) > 1.0:
-		br.facing = atan2((ec - center).x, (ec - center).z)   # always face the enemy himself
+		br.face_want = atan2((ec - center).x, (ec - center).z)   # always face the enemy himself (eased)
 	var dfront := center.distance_to(ec)
 	var en_str := _brigade_strength(enemy)
 	var en_mor := _brigade_morale(enemy)
@@ -10782,7 +12000,7 @@ func _brigade_decide(br) -> void:
 		if tobj != Vector3.INF and center.distance_to(tobj) < dfront:
 			br.posture = "advance"
 			br.objective = tobj
-			br.facing = atan2((tobj - center).x, (tobj - center).z)
+			br.face_want = atan2((tobj - center).x, (tobj - center).z)
 			br.fire_mission = _brigade_fire_mission(br)
 			return
 	var bf := Vector3(sin(br.facing), 0, cos(br.facing))
@@ -10843,6 +12061,7 @@ func _brigade_decide(br) -> void:
 		_brigade_call_support(br)
 	if not br.commander_down and dfront < BRIG_ENGAGE_RANGE + 20.0 and randf() < BRIGADIER_HIT:
 		_brigadier_falls(br)
+	_apply_terrain(br, center)   # Phase 2: bend the line onto the chosen ground (flank rest / hold the crest)
 	br.fire_mission = _brigade_fire_mission(br)
 
 func _brigade_set_anchor(br, delta: float) -> void:
@@ -10869,20 +12088,34 @@ func _brigade_assign_slots(br) -> void:
 	var nr: int = live.size() - nf                  # reserve battalions
 	# while engaged or assaulting, the reserve HOLDS behind; on the march it moves up too
 	var rposture: String = "hold" if br.posture in ["engage", "assault"] else br.posture
-	for idx in range(live.size()):
+	# WIDTH-AWARE SPACING: post each battalion by its ACTUAL frontage (`_halfwidth`, which shrinks as
+	# casualties mount) edge-to-edge with a small interval — not a fixed step. A full battalion gets its
+	# whole width (no overlap); a mauled one closes up. The AI sees each unit's footprint, not a point.
+	var gap := 8.0
+	var ftot := 0.0
+	for idx in range(nf):
+		ftot += _halfwidth(live[idx]) * 2.0 + gap
+	var fcur := -ftot * 0.5
+	for idx in range(nf):
 		var b: Batt = live[idx]
-		if b.human:                      # the player keeps his own counsel
-			continue
-		if idx < nf:
-			var off: float = (float(idx) - (nf - 1) * 0.5) * BRIG_BATT_SPACING
-			b.ai_target = br.anchor + right * off
+		var w := _halfwidth(b) * 2.0 + gap
+		if not b.human:                  # the player keeps his own counsel
+			b.ai_target = br.anchor + right * (fcur + w * 0.5)
 			b.ai_posture = br.posture
-		else:
-			var ri := idx - nf
-			var roff: float = (float(ri) - (nr - 1) * 0.5) * BRIG_BATT_SPACING * 0.8
-			b.ai_target = br.anchor - bf * RESERVE_DEPTH + right * roff   # second line
+			b.ai_facing = br.facing
+		fcur += w
+	var rtot := 0.0
+	for ri in range(nr):
+		rtot += _halfwidth(live[nf + ri]) * 2.0 + gap
+	var rcur := -rtot * 0.5
+	for ri in range(nr):
+		var b: Batt = live[nf + ri]
+		var w := _halfwidth(b) * 2.0 + gap
+		if not b.human:
+			b.ai_target = br.anchor - bf * RESERVE_DEPTH + right * (rcur + w * 0.5)   # second line
 			b.ai_posture = rposture
-		b.ai_facing = br.facing
+			b.ai_facing = br.facing
+		rcur += w
 
 func _brigade_fire_mission(br):
 	var c := _brigade_center(br)
@@ -10956,17 +12189,25 @@ func _brigadier_falls(br) -> void:
 		_send_player_despatch("[color=#ff9a8a]The General is down![/color] The brigade is without a head — hold fast.", {})
 
 func _sim_ai(b: Batt, delta: float) -> void:
-	# CAVALRY! The drill that saves a battalion: form square when enemy horse closes,
-	# stand fast inside it, and re-form line only once the field is clear again.
+	# CAVALRY! The drill that saves a battalion: throw square when horse actually THREATENS — a
+	# charge bearing down (SQUARE_ALERT), or any horse right on top of it (SQUARE_PANIC) — stand
+	# fast inside it, and HOLD it a few seconds after the threat clears so it can't flicker square
+	# <->line as loose squadrons cross the line. (Loitering reserve cavalry no longer freezes it.)
+	var charge_d := _nearest_charging_cav_dist(b.pos, b.team)
 	var cav_d := _nearest_enemy_cav_dist(b.pos, b.team)
-	if cav_d < SQUARE_ALERT and b.melee_foe == null and not b.charging:
+	var horse_threat := (charge_d < SQUARE_ALERT or cav_d < SQUARE_PANIC) and b.melee_foe == null and not b.charging
+	if horse_threat:
 		if b.formation != "square":
 			b.skirmish = false
 			b.formation = "square"
 			_reslot(b)
-		return                             # stand fast — nothing else matters now
-	elif b.formation == "square" and cav_d > SQUARE_RELAX:
-		b.formation = "line"               # the horse is gone; re-form and carry on
+		b.square_t = SQUARE_HOLD            # keep refreshing the hold while the horse threatens
+		return                              # stand fast — nothing else matters now
+	if b.formation == "square":
+		b.square_t -= delta
+		if b.square_t > 0.0:
+			return                          # threat just passed — hold the square a moment longer (no flicker)
+		b.formation = "line"               # the horse is well clear — re-form and carry on
 		_reslot(b)
 	# a battalion fights its part of the brigade's plan, but reacts to an enemy that
 	# comes within killing distance whatever its orders
@@ -11016,18 +12257,25 @@ func _move_speed(b: Batt) -> float:
 	return BATT_SPEED * (MARCH_MUL if b.formation == "march" else 1.0) * _terrain_speed_mul(b.pos)
 
 func _ai_move_to(b: Batt, tgt: Vector3, face: float, delta: float, deploy_line: bool) -> void:
+	b.form_lock_t = maxf(0.0, b.form_lock_t - delta)   # formation-change cooldown ticks down
 	# on a long march, steer onto a bridge if the river lies across the path
 	if not bridges.is_empty() and b.pos.distance_to(tgt) > FORMUP_DIST:
 		tgt = _route_via_bridge(b.pos, tgt)
 	var to := tgt - b.pos
 	to.y = 0.0
 	var d := to.length()
-	if d > FORMUP_DIST:
+	# HYSTERESIS: break into a travelling column only to cross real ground; once formed in line, HOLD
+	# it across the small drift of an advancing slot (deadband to LINE_HOLD_DIST) so the formation and
+	# facing don't strobe. A line in the deadband still keeps the brigade's full pace to stay on its
+	# slot — it only slows to dress when settled right on the mark.
+	var break_dist := LINE_HOLD_DIST if b.formation == "line" else FORMUP_DIST
+	if d > break_dist:
 		# far to go: form the narrow MARCH column and make speed; closer in, the broad
 		# assault column for manoeuvre; in contact, deploy to line (below)
 		var want := "march" if d > MARCH_DIST else "column"
-		if not b.skirmish and b.formation != want:
+		if not b.skirmish and b.formation != want and b.form_lock_t <= 0.0:
 			b.formation = want
+			b.form_lock_t = FORM_LOCK_TIME
 			_reslot(b)
 		var dir := to / d
 		b.facing = atan2(dir.x, dir.z)
@@ -11035,14 +12283,16 @@ func _ai_move_to(b: Batt, tgt: Vector3, face: float, delta: float, deploy_line: 
 		b.off_pos = b.pos + dir * 14.0
 		b.off_facing = b.facing
 	else:
-		if deploy_line and not b.skirmish and b.formation != "line":
+		if deploy_line and not b.skirmish and b.formation != "line" and b.form_lock_t <= 0.0:
 			b.formation = "line"
+			b.form_lock_t = FORM_LOCK_TIME
 			_reslot(b)
 		b.facing = lerp_angle(b.facing, face, clampf(delta * 1.5, 0.0, 1.0))
 		if d > 0.4:
-			# dress at a half-pace only when settling in place; on the march, keep up with
-			# the brigade slot (which moves at the full pace) so the line doesn't stutter
-			b.pos += (to / d) * BATT_SPEED * (0.5 if deploy_line else 1.0) * delta
+			# keep the brigade's full pace while there's a gap to close; only dawdle to dress when
+			# settled right on the mark (else a line that fell a few metres behind never catches up)
+			var dress := d < 6.0 and deploy_line
+			b.pos += (to / d) * BATT_SPEED * (0.5 if dress else 1.0) * delta
 		var ff := Vector3(sin(b.facing), 0, cos(b.facing))
 		b.off_pos = b.pos + ff * 10.0
 		b.off_facing = b.facing
@@ -11102,28 +12352,55 @@ func _sim_charge(b: Batt, delta: float) -> void:
 # Hand-to-hand: both bleed men and morale; the steadier/larger unit prevails.
 func _sim_melee(b: Batt, delta: float) -> void:
 	var foe := b.melee_foe
-	if foe == null or foe.figs.size() < 60 or foe.state == "routing":
-		b.melee_foe = null
+	if foe == null or foe.figs.size() < MELEE_MIN or foe.state == "routing":
+		b.melee_foe = null                   # the foe broke or is destroyed — the press is over
 		b.charge_cool = CHARGE_COOL
 		return
-	# face each other, grind in place
+	# grind at the seam, facing the foe
 	var to := foe.pos - b.pos
 	to.y = 0.0
 	if to.length() > 0.01:
 		b.facing = atan2(to.x, to.z)
-	# b's fighting power presses on the foe (morale + numbers + bayonet skill, less weariness)
-	var power := (b.morale / 100.0) * sqrt(maxf(1.0, float(b.figs.size())))
-	power *= _melee_factor(b) * (1.0 - clampf(b.fatigue / 100.0, 0.0, 1.0) * 0.3)
-	foe.dmg_acc += MELEE_RATE * (power / 22.0) * delta
+	# Only the men at the SEAM fight — the narrower frontage caps the pairings; a wider line laps the
+	# flank. Each call resolves b's men pressing foe's men (the foe's own _sim_melee call handles the
+	# return blow), so the SKILL gap sets the exchange ratio: the better unit bleeds the enemy faster.
+	var b_front := _contact_men(b)
+	var foe_front := _contact_men(foe)
+	var pairs := mini(b_front, foe_front)
+	if pairs <= 0:
+		return
+	var b_q := _melee_quality(b)
+	var foe_q := _melee_quality(foe)
+	var edge := b_q / maxf(0.05, b_q + foe_q)        # b's share of the casualties traded (skill-led)
+	# GRINDING: a steady stream of losses, with a bit of luck per tick (upsets happen)
+	var inflict := MELEE_DUEL_RATE * float(pairs) * edge * randf_range(0.7, 1.3) * delta
+	if b_front > foe_front:                          # b overlaps — the surplus laps the foe's flank
+		inflict *= 1.0 + minf(float(b_front - foe_front) / maxf(1.0, float(foe_front)), 1.0) * MELEE_FLANK_LAP
+	foe.dmg_acc += inflict
 	var k := int(foe.dmg_acc)
 	if k > 0:
 		foe.dmg_acc -= k
-		foe.kills_pending += k
-		foe.shot_from = b.pos                # the press comes from the enemy's side
+		foe.kills_pending += k                       # _kill_some drops them from the contact edge (the seam)
+		foe.shot_from = b.pos                        # the press comes from b's side
 		if b.is_player:
-			prestige += k                    # bayonet work under your command counts too
-	foe.morale -= MELEE_MORALE * (b.morale / maxf(20.0, foe.morale)) * delta * 0.25
+			prestige += k                            # bayonet work under your command counts
+	# nerve erodes slowly — the loser is worn down over a long, bloody fight, not broken on contact
+	var mr := clampf(b_q / maxf(0.2, foe_q), 0.4, 2.5)
+	foe.morale -= MELEE_MORALE * mr * delta * MELEE_MORALE_SLOW
 	foe.calm_t = 0.0
+	# YOUR named men prove themselves in the press — the front rank hardens its bayonet work as it fights
+	# (and the weaker men are the ones _kill_some takes, so a good man both survives and improves)
+	if b.is_player:
+		b.xp += float(pairs) * delta * 0.02
+		var maxy := -1.0e9
+		for f0 in b.figs:
+			maxy = maxf(maxy, (f0["slot"] as Vector2).y)
+		var seam := maxy - SP * 1.6
+		for f0 in b.figs:
+			if (f0["slot"] as Vector2).y >= seam:
+				var m = f0.get("man", null)
+				if m != null:
+					m["melee"] = minf(99.0, float(m["melee"]) + MELEE_XP_GAIN * delta)
 
 func _nearest_enemy(b: Batt) -> Batt:
 	var best: Batt = null
@@ -11154,12 +12431,21 @@ func _kill_some(b: Batt, k: int) -> void:
 			_drop_dead(w, b.team, Vector3(randf_range(-1, 1), 0, randf_range(-1, 1)), b.visible)
 			b.figs.remove_at(idx)
 		return
-	# rank the men by distance to the incoming fire, drop the nearest k
+	# rank the men by distance to the incoming fire, drop the nearest k. IN THE PRESS (melee) the
+	# less-skilled men in the front rank are the ones who fall — a named soldier's bayonet skill keeps
+	# him on his feet, so your trained men (and only they carry individual skill) survive the longer.
+	var melee := b.melee_foe != null
+	var b_msk := _sk(b, "melee")
 	var order: Array = []
 	for i in range(b.figs.size()):
 		var sl: Vector2 = b.figs[i]["slot"]
 		var w := b.pos + right * sl.x + fwd * sl.y
-		order.append([w.distance_squared_to(from), i, w])
+		var score := w.distance_squared_to(from)
+		if melee:
+			var m = b.figs[i].get("man", null)
+			var msk: float = float(m["melee"]) if m != null else b_msk
+			score += (msk - 50.0) * MELEE_SKILL_PROTECT   # higher skill ranks LATER → survives
+		order.append([score, i, w])
 	order.sort_custom(func(a, c): return a[0] < c[0])
 	var n := mini(k, order.size())
 	var victims: Array = []
@@ -11311,10 +12597,153 @@ func _drop_fig(b: Batt, idx: int, dir: Vector3) -> void:
 
 # ------------------------------------------------------------------ render + LOD
 
-# returns render stride (1/2/3) or 0 to skip entirely (off-screen / too far)
+# FOG OF WAR: recompute, for BOTH armies, which enemy units that side can SEE — `_spotted` means
+# "seen by my enemy army". One flag serves the local player's render/map AND each AI's knowledge
+# (Phase 3). Render/knowledge only — the host still simulates the whole field, so it changes what
+# each side KNOWS, never what happens.
+func _update_vision(delta: float) -> void:
+	if cam == null:
+		return
+	if not authoritative:
+		_update_vision_client(delta)             # MP client: fog is host-fed; just age it out
+		return
+	_contact_cd = maxf(0.0, _contact_cd - delta)
+	_vision_cd -= delta
+	if _vision_cd > 0.0:
+		return
+	_vision_cd = VISION_TICK
+	# each army's eyes, plus a coarse AABB (eye-spread + max sight) as a cheap broad-phase
+	var eyes := [_gather_eyes(0), _gather_eyes(1)]
+	var bmin := [Vector2(1e12, 1e12), Vector2(1e12, 1e12)]
+	var bmax := [Vector2(-1e12, -1e12), Vector2(-1e12, -1e12)]
+	for a in [0, 1]:
+		for e in eyes[a]:
+			var p: Vector3 = e[0]
+			bmin[a] = Vector2(minf(bmin[a].x, p.x), minf(bmin[a].y, p.z))
+			bmax[a] = Vector2(maxf(bmax[a].x, p.x), maxf(bmax[a].y, p.z))
+		bmin[a] -= Vector2(SIGHT_CAV, SIGHT_CAV)
+		bmax[a] += Vector2(SIGHT_CAV, SIGHT_CAV)
+	var pteam: int = player.team if player != null else -1
+	var fresh := 0
+	var fresh_pos := Vector3.ZERO
+	for b in battalions:
+		if b.figs.is_empty():
+			continue
+		var saw := _vis_seen(b.pos, b.team, eyes, bmin, bmax)
+		if saw and not b._spotted and b.team != pteam:
+			fresh += 1                              # an enemy of the PLAYER just came into view
+			fresh_pos = b.pos
+		b._spotted = saw
+		if saw:
+			b._intel_pos = b.pos
+			b._intel_t = _t
+	for c in cavalry:
+		if c.spent:
+			continue
+		var sawc := _vis_seen(c.pos, c.team, eyes, bmin, bmax)
+		c._spotted = sawc
+		if sawc:
+			c._intel_pos = c.pos
+			c._intel_t = _t
+	for g in guns:
+		if g.dead:
+			continue
+		var sawg := _vis_seen(g.pos, g.team, eyes, bmin, bmax)
+		g._spotted = sawg
+		if sawg:
+			g._intel_t = _t
+		if g.node != null and pteam >= 0:
+			g.node.visible = (g.team == pteam) or sawg or PLAYER_SEES_ALL   # the player sees every gun (fog still feeds the AI via _spotted)
+	# a despatch on fresh contact for the PLAYER (throttled), naming the nearest town for bearings
+	if fresh > 0 and pteam >= 0 and _contact_cd <= 0.0:
+		_contact_cd = 9.0
+		var ti := _nearest_town_index(fresh_pos)
+		var where: String = (" near %s" % String(field_towns[ti]["name"])) if ti >= 0 and ti < field_towns.size() else ""
+		_send_player_despatch("[color=#ffd27f]Vedettes report enemy in the field%s.[/color]" % where, {})
+
+# MP CLIENT fog: the host streams only the enemies our side has scouted, so a RECEIVED enemy is a
+# sighting (marked in _apply_*). Here we just age those out — an enemy the host has stopped sending
+# has slipped our sight, so it drops from the 3D field and lingers only as a fading map ghost.
+func _update_vision_client(delta: float) -> void:
+	if player == null:
+		return
+	_vision_cd -= delta
+	if _vision_cd > 0.0:
+		return
+	_vision_cd = VISION_TICK
+	if PLAYER_SEES_ALL:
+		# the player sees everything — keep every streamed unit shown; don't let the fog tick hide it
+		for b in battalions:
+			b._spotted = true
+		for c in cavalry:
+			c._spotted = true
+		for g in guns:
+			g._spotted = true
+			if g.node != null:
+				g.node.visible = true
+		return
+	var pteam := player.team
+	for b in battalions:
+		if b.team != pteam and b._spotted and (_t - b._intel_t) > NET_FOG_EXPIRE:
+			b._spotted = false
+	for c in cavalry:
+		if c.team != pteam and c._spotted and (_t - c._intel_t) > NET_FOG_EXPIRE:
+			c._spotted = false
+	for g in guns:
+		if g.team != pteam and g._spotted and (_t - g._intel_t) > NET_FOG_EXPIRE:
+			g._spotted = false
+			if g.node != null:
+				g.node.visible = false
+
+# Build one army's sight sources: [centre, radius²]. Light cavalry range furthest; the local
+# player's officer (and his spyglass) is an extra eye for his own side.
+func _gather_eyes(a: int) -> Array:
+	var eyes: Array = []
+	for fb in battalions:
+		if fb.team == a and not fb.figs.is_empty() and fb.state != "routing":
+			eyes.append([fb.pos, SIGHT_INF * SIGHT_INF])
+	for fc in cavalry:
+		if fc.team == a and not fc.spent:
+			var rr := SIGHT_CAV * float(CAV_TYPE_DATA[fc.cav_type]["scout"])
+			eyes.append([fc.pos, rr * rr])
+	for fg in guns:
+		if fg.team == a and not fg.dead:
+			eyes.append([fg.pos, SIGHT_GUN * SIGHT_GUN])
+	if player != null and player.team == a:
+		var osr := SIGHT_OFFICER * (1.0 + _scope_amt * 1.6)
+		eyes.append([off_pos, osr * osr])
+	return eyes
+
+# Is a unit (of `team`) seen by its ENEMY army? team 0's enemy is army 1 and vice versa;
+# raiders (team 2) are seen if EITHER army has eyes on them.
+func _vis_seen(pos: Vector3, team: int, eyes: Array, bmin: Array, bmax: Array) -> bool:
+	if team == 0:
+		return _vis_army(pos, 1, eyes, bmin, bmax)
+	if team == 1:
+		return _vis_army(pos, 0, eyes, bmin, bmax)
+	return _vis_army(pos, 0, eyes, bmin, bmax) or _vis_army(pos, 1, eyes, bmin, bmax)
+
+func _vis_army(pos: Vector3, a: int, eyes: Array, bmin: Array, bmax: Array) -> bool:
+	var lo: Vector2 = bmin[a]
+	var hi: Vector2 = bmax[a]
+	if pos.x < lo.x or pos.x > hi.x or pos.z < lo.y or pos.z > hi.y:
+		return false                               # broad-phase: outside that army's possible-sight box
+	return _vis_test(pos, eyes[a])
+
+func _vis_test(pos: Vector3, eyes: Array) -> bool:
+	for e in eyes:
+		if pos.distance_squared_to(e[0] as Vector3) < float(e[1]):
+			return true
+	return false
+
+# returns render stride (1/2/3/6) or 0 to skip entirely (off-screen / too far).
+# Boundaries carry HYSTERESIS (a dead-band + a few-frame view grace) so units don't flicker out
+# at the screen edge or strobe between detailed men and the box-man impression at a fixed range.
 func _batt_lod(b: Batt) -> int:
+	if not PLAYER_SEES_ALL and player != null and b.team != player.team and not b._spotted:
+		return 0          # fog of war: an enemy your army hasn't sighted simply isn't drawn
 	var d := cam.position.distance_to(b.pos)
-	if d > LOD_VFAR:
+	if d > LOD_VFAR + (LOD_HYST if b._lod != 0 else 0.0):
 		return 0
 	var seen := d < 80.0
 	if not seen:
@@ -11336,8 +12765,24 @@ func _batt_lod(b: Batt) -> int:
 				if cam.is_position_in_frustum(b.pos + fwd * off2 + Vector3(0, 1.0, 0)):
 					seen = true
 					break
-	if not seen:
-		return 0
+	if seen:
+		b._seen_t = _t
+	elif _t - b._seen_t > SEEN_GRACE:
+		return 0          # off-screen long enough that the grace has lapsed — now safe to drop
+	return _lod_band(d, b._lod)
+
+# Distance → LOD level, holding the level it's already at across a small dead-band so a unit
+# hovering at a boundary doesn't switch representation every frame.
+func _lod_band(d: float, prev: int) -> int:
+	match prev:
+		1:
+			if d < LOD_NEAR + LOD_HYST: return 1
+		2:
+			if d > LOD_NEAR - LOD_HYST and d < LOD_MID + LOD_HYST: return 2
+		3:
+			if d > LOD_MID - LOD_HYST and d < LOD_FAR + LOD_HYST: return 3
+		6:
+			if d > LOD_FAR - LOD_HYST: return 6
 	if d < LOD_NEAR:
 		return 1
 	if d < LOD_MID:
@@ -11354,7 +12799,9 @@ func _render(delta: float) -> void:
 	var nco_i := 0
 	var drummer_i := 0
 	for b in battalions:
+		var prev_lod := b._lod
 		var stride := _batt_lod(b)
+		b._lod = stride
 		if stride == 0:
 			b.visible = false
 			if b.flag:
@@ -11362,9 +12809,11 @@ func _render(delta: float) -> void:
 			continue
 		var fwd := Vector3(sin(b.facing), 0, cos(b.facing))
 		var right := Vector3(fwd.z, 0, -fwd.x)
-		# men march to their dressed world spots (animate only what's on screen);
-		# snap into place the frame a battalion first comes into view to avoid catch-up
-		var snap := not b.visible
+		# men march to their dressed world spots (animate only what's on screen); snap into place
+		# the frame a battalion first comes into view — and ALSO the frame it drops from the far
+		# box-man impression (stride 6) to detailed men, since per-man wpos froze while it was the
+		# impression and would otherwise fly across the field to catch up to where the unit now is.
+		var snap := (not b.visible) or (prev_lod >= 6 and stride < 6)
 		b.visible = true
 		# FAR IMPRESSION (beyond LOD_FAR): the battalion is drawn as a static mass —
 		# every 6th man placed analytically, no per-man simulation, no muskets — so
@@ -11373,7 +12822,11 @@ func _render(delta: float) -> void:
 			var fmm: MultiMesh = team_mm[b.team]
 			var fgun: MultiMesh = musket_mm[b.team]
 			var fi6: int = idx[b.team]
-			for k6 in range(0, b.figs.size(), 6):
+			# the further out, the fewer men we bother placing — a back-of-field battalion is a faint
+			# sketch, a near-impression one almost full. This is the main distance-culling knob.
+			var fd := cam.position.distance_to(b.pos) if cam != null else LOD_FAR
+			var fstep := clampi(LOD_IMPRESSION_STEP + int((fd - LOD_FAR) / LOD_IMPRESSION_FALLOFF), LOD_IMPRESSION_STEP, LOD_IMPRESSION_MAX)
+			for k6 in range(0, b.figs.size(), fstep):
 				if fi6 >= MAX_PER_TEAM:
 					break
 				var sl6: Vector2 = b.figs[k6]["slot"]
@@ -11399,6 +12852,7 @@ func _render(delta: float) -> void:
 		# morale read-outs: a wavering unit fidgets, a shocked one lurches back
 		var unsteady := clampf((SHAKEN_THRESHOLD - b.morale) / SHAKEN_THRESHOLD, 0.0, 1.0)
 		var recoil := -fwd * (b.flinch * 0.55)
+		var w_aim := _wpn(b).aim_lead              # weapon's level-before-loaded lead (rifles aim longer)
 		var sway_amp := unsteady * 0.13 + b.flinch * 0.22
 		# every infantryman draws from soldier_troop.glb through the team MultiMesh (the path
 		# proven to render). Per-battalion dress + headgear shape come from the band shader.
@@ -11450,11 +12904,14 @@ func _render(delta: float) -> void:
 			var oz := w.z + rec.z + right.z * swx
 			var oy := CAP_HALF * bh + bob - mfl * 0.16 + _gh(ox, oz)   # his height + the rolling ground
 			var in_band := slot.y >= fire_band
-			var leveled := b.charging or b.melee_foe != null or b.melee_vis or (b.presenting and in_band) or (b.has_target and in_band and float(f["reload"]) <= AIM_LEAD)
-			# men only work the ramrod when the battalion is actually fighting (has a target);
-			# at rest they shoulder the musket. Front ranks load standing, not on the march.
-			var reloading := b.has_target and in_band and float(f["reload"]) > AIM_LEAD and not moving
+			# in a firing posture (an enemy to the front, OR presenting / independent / commanded fire)
+			# the men work the ramrod to load and level to fire; at rest they shoulder the musket.
+			var fp := b.has_target or b.presenting or b.indep_fire or b.volley_fire
+			var leveled := b.charging or b.melee_foe != null or b.melee_vis or (in_band and fp and float(f["reload"]) <= w_aim)
+			var reloading := in_band and fp and float(f["reload"]) > w_aim and not moving
 			var armp := 1.0 if leveled else (0.6 if reloading else 0.0)   # arm pose -> the leg/arm shader
+			if leveled and mfl > 0.05:
+				armp = 1.0 + mfl * 0.9     # FIRING RECOIL: push armp past 1 — the shader reads the overflow as the kick
 			mm.set_instance_transform(i, Transform3D(Basis(Vector3.UP, yaw).scaled(Vector3(bw, bh, bw)), Vector3(ox, oy, oz)))
 			mm.set_instance_color(i, b.inst_col)   # rgb = facings, a = packed dress
 			mm.set_instance_custom_data(i, Color(float(f["wear"]), ph / 6.28318, float(f["march"]), armp))
@@ -11597,6 +13054,8 @@ func _render(delta: float) -> void:
 # The brigade commanders: mounted generals posted behind the centre of their brigade.
 func _render_commanders() -> void:
 	for i in range(brigades.size()):
+		if i >= cmd_horse_mm.instance_count:
+			break                            # never index past the brigade-commander MultiMesh
 		var br = brigades[i]
 		if _brigade_live(br) == 0 or br.commander_down:
 			cmd_horse_mm.set_instance_transform(i, _zero_xf())   # the general is dead or down
@@ -11605,11 +13064,14 @@ func _render_commanders() -> void:
 		var yaw: float = br.facing
 		var bf := Vector3(sin(yaw), 0, cos(yaw))
 		var pos := _brigade_center(br) - bf * 18.0    # rides behind the line centre
-		# horse: a capsule laid horizontal, pointing along the brigade's facing
-		var hbasis := Basis(Vector3.UP, yaw) * Basis(Vector3.RIGHT, PI * 0.5)
-		cmd_horse_mm.set_instance_transform(i, Transform3D(hbasis, Vector3(pos.x, 0.95 + _gh(pos.x, pos.z), pos.z)))
-		# rider sits astride, head and shoulders above the infantry
-		cmd_rider_mm.set_instance_transform(i, Transform3D(Basis(Vector3.UP, yaw), Vector3(pos.x, 1.75 + _gh(pos.x, pos.z), pos.z)))
+		# feet-origin box horse+rider: place at ground, face the line, scale up by rank
+		var cs := 1.12
+		var cbasis := Basis(Vector3.UP, yaw).scaled(Vector3(cs, cs, cs))
+		var cseat := Vector3(pos.x, _gh(pos.x, pos.z), pos.z)
+		cmd_horse_mm.set_instance_transform(i, Transform3D(cbasis, cseat))
+		cmd_rider_mm.set_instance_transform(i, Transform3D(cbasis, cseat))
+		cmd_horse_mm.set_instance_color(i, team_color(br.team))           # shabraque = army colour
+		cmd_rider_mm.set_instance_color(i, Color(1.0, 0.82, 0.30))        # a gold-coated brigadier
 	# the divisional generals, one rank back behind their whole division
 	var dpt := CORPS_PER_TEAM * DIVISIONS_PER_CORPS
 	for dv in divisions:
@@ -11622,9 +13084,13 @@ func _render_commanders() -> void:
 			continue
 		var gp: Vector3 = dv.general_pos
 		var gyaw: float = 0.0 if dv.team == 0 else PI
-		var gh := Basis(Vector3.UP, gyaw) * Basis(Vector3.RIGHT, PI * 0.5)
-		gen_horse_mm.set_instance_transform(gi, Transform3D(gh, Vector3(gp.x, 1.05 + _gh(gp.x, gp.z), gp.z)))
-		gen_rider_mm.set_instance_transform(gi, Transform3D(Basis(Vector3.UP, gyaw), Vector3(gp.x, 1.95 + _gh(gp.x, gp.z), gp.z)))
+		var gs := 1.24
+		var gbasis := Basis(Vector3.UP, gyaw).scaled(Vector3(gs, gs, gs))
+		var gseat := Vector3(gp.x, _gh(gp.x, gp.z), gp.z)
+		gen_horse_mm.set_instance_transform(gi, Transform3D(gbasis, gseat))
+		gen_rider_mm.set_instance_transform(gi, Transform3D(gbasis, gseat))
+		gen_horse_mm.set_instance_color(gi, team_color(dv.team))
+		gen_rider_mm.set_instance_color(gi, Color(0.95, 0.95, 0.98))      # white-and-silver general
 	# the mounted colonels, one behind every battalion (the player rides his own)
 	var cmax: int = colonel_horse_mm.instance_count
 	for b in battalions:
@@ -11638,9 +13104,11 @@ func _render_commanders() -> void:
 		var cyaw: float = b.facing
 		var cfwd := Vector3(sin(cyaw), 0, cos(cyaw))
 		var cpos: Vector3 = b.pos - cfwd * 13.0   # rides behind his battalion's colours
-		var chb := Basis(Vector3.UP, cyaw) * Basis(Vector3.RIGHT, PI * 0.5)
-		colonel_horse_mm.set_instance_transform(ci, Transform3D(chb, Vector3(cpos.x, 0.85 + _gh(cpos.x, cpos.z), cpos.z)))
-		colonel_rider_mm.set_instance_transform(ci, Transform3D(Basis(Vector3.UP, cyaw), Vector3(cpos.x, 1.58 + _gh(cpos.x, cpos.z), cpos.z)))
+		var cbasis := Basis(Vector3.UP, cyaw)     # colonel rides the base-size mount (rank 1.0)
+		var cseat := Vector3(cpos.x, _gh(cpos.x, cpos.z), cpos.z)
+		colonel_horse_mm.set_instance_transform(ci, Transform3D(cbasis, cseat))
+		colonel_rider_mm.set_instance_transform(ci, Transform3D(cbasis, cseat))
+		colonel_horse_mm.set_instance_color(ci, team_color(b.team))
 		colonel_rider_mm.set_instance_color(ci, ARMY_BLUE.lightened(0.22) if b.team == 0 else ARMY_RED.lightened(0.14))
 
 # A command-group man WALKS to his post (officer, colours, drummer, sergeants,
@@ -11660,6 +13128,7 @@ func _place_flag(b: Batt, footpos: Vector3, yaw: float) -> void:
 	if not b.flag:
 		return
 	b.flag.visible = true
+	footpos.y = _gh(footpos.x, footpos.z)    # plant the colours on the slope, not at sea level
 	b.flag.position = footpos
 	if b.colours_down:
 		# the bearer is shot — the colours lie pitched over on the ground until raised
@@ -11693,6 +13162,7 @@ func _cg_dress(mm: MultiMesh, i: int, team: int, walking: bool, belts: bool) -> 
 # A man falls: ragdoll if he's on screen and the pool has room, else a static body.
 # A share of the fallen are wounded, not killed — they drag themselves rearward.
 func _drop_dead(pos: Vector3, team: int, knock_dir: Vector3, seen: bool) -> void:
+	pos.y = _gh(pos.x, pos.z)                 # the man falls onto the slope, not at sea level
 	# the expensive theatrics (blood, ragdolls, crawling wounded) are reserved for
 	# deaths NEAR the camera; the far battle still fills with corpses, cheaply
 	if seen and cam != null and cam.position.distance_to(pos) > 280.0:
@@ -11706,6 +13176,11 @@ func _drop_dead(pos: Vector3, team: int, knock_dir: Vector3, seen: bool) -> void
 			"t": WOUNDED_TIME * randf_range(0.5, 1.0), "team": team, "ph": randf() * TAU })
 		return
 	if seen and _spawn_ragdoll(pos, team, knock_dir):
+		return
+	# beyond the ragdoll budget but still in view: TOPPLE him over a beat rather than pop a corpse
+	if seen and falling.size() < FALLING_MAX * 2:
+		var ky := atan2(knock_dir.x, knock_dir.z) if knock_dir.length() > 0.05 else randf() * TAU
+		falling.append({ "pos": Vector3(pos.x, 0, pos.z), "dir": knock_dir, "t": 0.0, "team": team, "yaw": ky })
 		return
 	_add_corpse(pos, randf() * TAU, team)
 
@@ -11763,7 +13238,7 @@ func _update_wounded(delta: float) -> void:
 			var wiggle := sin(_t * 3.2 + ph) * 0.12 * effort
 			var basis := Basis(Vector3.UP, yaw + wiggle) * Basis(Vector3.RIGHT, PI * 0.5)
 			var mm: MultiMesh = wounded_mm[team]
-			mm.set_instance_transform(counts[team], Transform3D(basis, Vector3(p.x, CAP_RADIUS + 0.02, p.z)))
+			mm.set_instance_transform(counts[team], Transform3D(basis, Vector3(p.x, CAP_RADIUS + 0.02 + _gh(p.x, p.z), p.z)))
 			counts[team] += 1
 		i += 1
 	for team in [0, 1, 2]:
@@ -11771,6 +13246,61 @@ func _update_wounded(delta: float) -> void:
 		if mm2 == null:
 			continue
 		for j in range(counts[team], WOUNDED_MAX):
+			mm2.set_instance_transform(j, _zero_xf())
+
+func _build_falling_layer() -> void:
+	for team in [0, 1, 2]:
+		var mmi := MultiMeshInstance3D.new()
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		var cap := CapsuleMesh.new()
+		cap.radius = CAP_RADIUS
+		cap.height = CAP_HEIGHT
+		cap.radial_segments = 6
+		cap.rings = 2
+		mm.mesh = cap
+		mm.instance_count = FALLING_MAX
+		mmi.multimesh = mm
+		var mat := StandardMaterial3D.new()
+		mat.albedo_color = team_color(team).darkened(0.05)
+		mat.roughness = 1.0
+		mmi.material_override = mat
+		add_child(mmi)
+		falling_mm[team] = mm
+		for i in range(FALLING_MAX):
+			mm.set_instance_transform(i, _zero_xf())
+
+# A struck man doesn't pop into a corpse — he TOPPLES: pitched off his feet in the direction of the
+# ball, falling from upright to prone over a beat, then he lies still and joins the fallen. (Near the
+# camera he gets a full physics ragdoll instead; this catches the deaths beyond the ragdoll budget.)
+func _update_falling(delta: float) -> void:
+	var counts := [0, 0, 0]
+	var i := 0
+	while i < falling.size():
+		var fa: Dictionary = falling[i]
+		var t := float(fa["t"]) + delta
+		if t >= FALL_TIME:
+			_add_corpse(fa["pos"], float(fa["yaw"]), int(fa["team"]))   # he is down — bake the static corpse
+			falling.remove_at(i)
+			continue
+		fa["t"] = t
+		var team := int(fa["team"])
+		if counts[team] < FALLING_MAX:
+			var prog := clampf(t / FALL_TIME, 0.0, 1.0)
+			var fall := prog * prog * (3.0 - 2.0 * prog)        # smoothstep — slow topple, hard landing
+			var pitch := fall * (PI * 0.5)                      # upright -> flat on the ground
+			var basis := Basis(Vector3.UP, float(fa["yaw"])) * Basis(Vector3.RIGHT, pitch)
+			var p: Vector3 = fa["pos"]
+			var cy := lerpf(CAP_HEIGHT * 0.5, CAP_RADIUS + 0.02, fall) + _gh(p.x, p.z)
+			var mm: MultiMesh = falling_mm[team]
+			mm.set_instance_transform(counts[team], Transform3D(basis, Vector3(p.x, cy, p.z)))
+			counts[team] += 1
+		i += 1
+	for team in [0, 1, 2]:
+		var mm2: MultiMesh = falling_mm[team]
+		if mm2 == null:
+			continue
+		for j in range(counts[team], FALLING_MAX):
 			mm2.set_instance_transform(j, _zero_xf())
 
 func _add_corpse(pos: Vector3, yaw: float, team: int) -> void:
@@ -11968,6 +13498,8 @@ func _update_battle_flow(delta: float) -> void:
 func _begin_battle() -> void:
 	_battle_begun = true
 	_deploy_t = 0.0
+	if _wmap:
+		_waterloo_begin()
 	var ord := ("  [color=#cdd6e6]Your charge:[/color] %s" % _obj_text) if _obj_text != "" else ""
 	_send_player_despatch("[color=#ffd773]The army advances![/color] Drums beating, colours uncased.%s" % ord, {})
 
@@ -12359,11 +13891,12 @@ func _show_bill() -> void:
 	var pcol := "9fe0a0" if prestige >= 0 else "ff9a8a"
 	var txt := "[center][b]%s[/b]\n" % title
 	txt += "[color=#6f7888]——————————————————————[/color]\n"
-	var cav_start := (4 if _inflated else CAV_PER_TEAM) * CAV_MEN
+	var cstart_pt := (int(_setup.cav_per_team[pt]) if GameConfig.historical != "" else (4 if _inflated else CAV_PER_TEAM)) * _cav_men
+	var cstart_et := (int(_setup.cav_per_team[et]) if GameConfig.historical != "" else (4 if _inflated else CAV_PER_TEAM)) * _cav_men
 	txt += "[color=#cdd6e6]Our losses[/color]  [color=#ffe9a8]%d[/color] of %d men · %d horse · %d guns silenced\n" \
-		% [_start_strength[pt] - men_now[pt], _start_strength[pt], cav_start - horse_now[pt], guns_lost[pt]]
+		% [_start_strength[pt] - men_now[pt], _start_strength[pt], cstart_pt - horse_now[pt], guns_lost[pt]]
 	txt += "[color=#cdd6e6]Theirs[/color]  [color=#ffe9a8]%d[/color] of %d men · %d horse · %d guns silenced\n" \
-		% [_start_strength[et] - men_now[et], _start_strength[et], cav_start - horse_now[et], guns_lost[et]]
+		% [_start_strength[et] - men_now[et], _start_strength[et], cstart_et - horse_now[et], guns_lost[et]]
 	if field_towns.size() > 0:
 		txt += "[color=#cdd6e6]Towns held[/color]  [color=#9fe0a0]%d[/color] ours · [color=#ff9a8a]%d[/color] theirs · %d in contest\n" \
 			% [tc[pt], tc[et], tc[2]]
@@ -12573,6 +14106,7 @@ func _give_fire() -> void:
 	# Then they must reload before the next volley — a well-drilled (or fresh) battalion sooner.
 	b.volley_fire = true
 	b.auto_volley = false
+	b.indep_fire = false                        # a commanded volley supersedes independent fire
 	b.rolling = false
 	if b.volley_cd > 0.0:
 		_play_voice(snd_v_present, b.off_pos)   # still reloading — the men come to the present, not yet loaded
@@ -12598,10 +14132,54 @@ func _present() -> void:
 		return
 	player.presenting = true
 	player.present_t = 0.0
+	player.indep_fire = false               # a manual present cancels independent fire
+	player.volley_fire = true               # hold at the present until "Fire!"
 	if _drill_on:
 		_drill_present_t = _t               # mark the beat so the volley's cadence can be judged
 	_play_voice(snd_v_present, player.off_pos)
+	# every man in the firing ranks cocks his piece — a crackle of locks down the line (budgeted)
+	if player.visible:
+		var maxy := -1.0e9
+		for f in player.figs:
+			maxy = maxf(maxy, (f["slot"] as Vector2).y)
+		var band := maxy - SP * 1.6
+		for f in player.figs:
+			if (f["slot"] as Vector2).y >= band:
+				_play_cock(f["wpos"])
 	_send_player_despatch("[color=#ffe9a8]Present![/color] — the battalion brings its muskets up.", {})
+
+# ---- direct battalion keybinds (no courier menu): apply the order straight to your battalion ----
+func _self_order(o: Dictionary) -> void:
+	if player == null or player.figs.is_empty():
+		return
+	if authoritative:
+		_apply_net_order(player, o)
+	else:
+		_pending_net_order = o               # client: forward to the host
+
+func _self_advance(yds: int) -> void:
+	if player == null or player_arm == "cavalry" or player_arm == "artillery":
+		return
+	_self_order({ "kind": "advance_n", "yds": yds })
+	_send_player_despatch("[color=#ffe9a8]Advance %d yards.[/color]" % yds, {})
+
+func _self_halt() -> void:
+	if player == null:
+		return
+	_self_order({ "kind": "halt", "face": off_vis })
+	_send_player_despatch("[color=#ffe9a8]Halt![/color] — the line stands fast.", {})
+
+func _self_wheel(deg: float) -> void:
+	if player == null or player_arm == "cavalry" or player_arm == "artillery":
+		return
+	_self_order({ "kind": "wheel", "deg": deg })
+	_send_player_despatch("[color=#ffe9a8]Wheel %s %d°.[/color]" % ["left" if deg > 0.0 else "right", int(absf(deg))], {})
+
+func _independent_fire() -> void:
+	if player == null or player_arm == "cavalry" or player_arm == "artillery" or player.figs.is_empty():
+		return
+	_self_order({ "kind": "indep_fire" })
+	_send_player_despatch("[color=#ffe9a8]Fire at will![/color] — each man loads, comes to the present and fires in his own time.", {})
 
 # Bring the nearest friendly battery up to support you: it displaces to the ground
 # just behind your line and opens fire on the enemy to your front. (Press T.)
@@ -12843,7 +14421,7 @@ func _fire_player_battery() -> void:
 # Fire one piece at a ground point (your aim) rather than at an AI-chosen formation.
 func _gun_fire_at(g: Gun, aim_pos: Vector3) -> void:
 	var fwd := Vector3(sin(g.facing), 0, cos(g.facing))
-	var muzzle := g.pos + fwd * 1.5 + Vector3(0, 0.95, 0)
+	var muzzle := g.pos + fwd * 1.5 + Vector3(0, 0.95 + _gh(g.pos.x, g.pos.z), 0)
 	g.recoil = 0.55
 	if g.node and cam != null and cam.position.distance_to(g.pos) < LOD_VFAR:
 		_emit_flash(muzzle)
@@ -13093,7 +14671,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif event.pressed and event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 			if _scoped: _scope_zoom = clampf(_scope_zoom - 0.12, 0.0, 1.0)   # collapse the glass — wider field
 			elif _rts_cam: _rts_dist = clampf(_rts_dist * 1.18, 40.0, 6000.0)
-			else: _cam_dist = minf(220.0, _cam_dist + 3.0)
+			else: _cam_dist = minf(26.0, _cam_dist + 3.0)   # LOCKED: can pull back to the default view, no further out
 	elif event is InputEventKey and event.pressed and not event.echo:
 		# while the despatch pad is open: pick a category, then an order
 		if _cmd_on:
@@ -13188,11 +14766,28 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_Y:
 				_accept_escort()          # take the offered supply convoy under your escort
 			KEY_1:
-				_choose_arm("infantry")   # at the step-off, choose the arm you command
+				if not _battle_begun: _choose_arm("infantry")   # step-off: choose your arm
+				else: _self_advance(5)                          # in the field: a measured advance
 			KEY_2:
-				_choose_arm("artillery")
+				if not _battle_begun: _choose_arm("artillery")
+				else: _self_advance(15)
 			KEY_3:
-				_choose_arm("cavalry")
+				if not _battle_begun: _choose_arm("cavalry")
+				else: _self_advance(25)
+			KEY_4:
+				_self_advance(50)
+			KEY_5:
+				_self_halt()                  # stop where they stand
+			KEY_6:
+				_self_wheel(45.0)             # wheel left 45°
+			KEY_7:
+				_self_wheel(90.0)             # wheel left 90°
+			KEY_8:
+				_self_wheel(-45.0)            # wheel right 45°
+			KEY_9:
+				_self_wheel(-90.0)            # wheel right 90°
+			KEY_0:
+				_independent_fire()           # each man loads, presents and fires in his own time
 			KEY_N:
 				_time_of_day = fposmod(_time_of_day + 1.5, 24.0)   # push the clock forward
 			KEY_M:
@@ -13209,9 +14804,11 @@ func _unhandled_input(event: InputEvent) -> void:
 				_autorun = not _autorun   # ride forward hands-free; steer by looking, S to rein in
 				_send_player_despatch("[color=#ffe9a8]%s[/color]" % ("Autorun on — steer by looking, tap S to rein in." if _autorun else "Autorun off."), {})
 			KEY_Q:
-				_cmd_on = true
+				pass   # courier order book removed for now (see _cmd_on)
 			KEY_T:
 				_command_battery()        # bring the nearest friendly guns up to support you
+			KEY_B:
+				_send_scouts()            # send the nearest light horse forward to scout the front
 			KEY_TAB:
 				_help_on = not _help_on
 			KEY_F3:
@@ -13250,6 +14847,9 @@ func _order(o: Dictionary) -> void:
 # for orders forwarded from clients).
 func _apply_net_order(b: Batt, o: Dictionary) -> void:
 	match String(o.get("kind", "")):
+		"scout":
+			# a client asked for scouts — send that side's nearest light horse toward the point
+			_host_send_scouts(b.team, Vector3(float(o.get("x", b.pos.x)), 0.0, float(o.get("z", b.pos.z))), b.off_pos, false)
 		"move_to_me":
 			b.order = Order.FOLLOW           # form up on me and keep with me
 			b.advancing = false
@@ -13300,6 +14900,21 @@ func _apply_net_order(b: Batt, o: Dictionary) -> void:
 			b.wheeling = true
 			b.has_goal = false
 			b.wheel_to = b.facing - PI * 0.25
+		"wheel":
+			# a measured wheel: positive degrees turn LEFT (+yaw → toward -x), negative turn RIGHT
+			b.order = Order.IDLE
+			b.wheeling = true
+			b.has_goal = false
+			b.advancing = false
+			b.wheel_to = b.facing + deg_to_rad(float(o.get("deg", 45.0)))
+		"indep_fire":
+			# INDEPENDENT fire: hold no longer — every man loads, comes to the present and fires
+			# in his own time (see the fire loop, which makes each man present 1–2 s by drill, then fire)
+			b.indep_fire = true
+			b.volley_fire = false
+			b.auto_volley = false
+			b.rolling = false
+			b.presenting = false
 		"line":
 			b.skirmish = false
 			if b.formation != "line":
@@ -13627,10 +15242,14 @@ func _emit_dust(pos: Vector3, fwd: Vector3) -> void:
 func _emit_march_dust(b: Batt) -> void:
 	var fwd := Vector3(sin(b.facing), 0, cos(b.facing))
 	var right := Vector3(fwd.z, 0, -fwd.x)
-	var width := minf(float(b.figs.size()) * 0.9, 90.0)
-	var n := clampi(b.figs.size() / 50, 1, 3)
+	# the dust footprint follows the ACTUAL formation, not a fixed line-wide band: a deployed line
+	# throws a WIDE, shallow haze; a marching column a NARROW, deep one; a square a compact block.
+	var d := _dims(b.figs.size(), b.formation)
+	var half_w := float(d.x) * SP * 0.55       # half the frontage (files across)
+	var half_d := float(d.y) * SP * 0.55       # half the depth (ranks deep)
+	var n := clampi(b.figs.size() / 45, 1, 4)
 	for _i in range(n):
-		var p := b.pos - fwd * 1.5 + right * randf_range(-width * 0.5, width * 0.5)
+		var p := b.pos + right * randf_range(-half_w, half_w) + fwd * randf_range(-half_d, half_d)
 		p.y = _gh(p.x, p.z) + 0.05
 		_emit_dust(p, fwd)
 
@@ -13796,6 +15415,22 @@ func _play_shot_line(pos: Vector3) -> void:
 		return
 	_musket_snd_left -= 1
 	_play_shot(pos)
+
+# the click of a musket brought to the present (cocked) — budgeted per frame so a battalion coming
+# to the present reads as a quick crackle of locks, not 700 overlapping clicks.
+func _play_cock(pos: Vector3) -> void:
+	if snd_cock == null or cam == null or _cock_snd_left <= 0:
+		return
+	if cam.position.distance_to(pos) > 150.0:
+		return
+	_cock_snd_left -= 1
+	var ap: AudioStreamPlayer3D = _audio_pool[_audio_i]
+	_audio_i = (_audio_i + 1) % AUDIO_POOL
+	ap.stream = snd_cock
+	ap.global_position = to_global(pos + Vector3(0, 1.3, 0))
+	ap.volume_db = 0.0
+	ap.pitch_scale = randf_range(0.95, 1.06)
+	ap.play()
 
 # ------------------------------------------------------------------ couriers
 
@@ -14052,6 +15687,14 @@ func _batt_by_idx(slot: int) -> Batt:
 		return battalions[slot]
 	return null
 
+# The battalion a given MP lobby slot commands — found by the human_slot tag set at spawn (works for
+# both the authored OOB and the campaign field, where the slot maps to a brigade-lead gidx).
+func _batt_for_slot(slot: int) -> Batt:
+	for b in battalions:
+		if b.human_slot == slot:
+			return b
+	return _batt_by_idx(_player_gidx(slot))   # fallback to the index mapping
+
 func _state_code(s: String) -> int:
 	match s:
 		"shaken": return 1
@@ -14074,46 +15717,147 @@ func _net_broadcast(delta: float) -> void:
 	if _net_cd > 0.0:
 		return
 	_net_cd = 1.0 / NET_HZ
-	var data: Array = []
-	for b in battalions:
-		var fm := 2 if b.rolling else (1 if b.volley_fire else 0)
-		data.append([
-			b.pos.x, b.pos.z, b.facing, b.figs.size(), int(b.morale),
-			_state_code(b.state), 1 if b.formation == "line" else 0,
-			b.charging, b.melee_foe != null, b.flinch,
-			b.off_pos.x, b.off_pos.z, b.off_facing, b.human,
-			b.has_target, fm,
-		])
-	rpc("_apply_state", data)
+	# AREA-OF-INTEREST + FOG: the host simulates the WHOLE field but streams each team only what THAT
+	# side can see — its own units near a player (AoI) and the enemy units it has SCOUTED (`_spotted`).
+	# An unscouted enemy is never even SENT, so fog is host-authoritative and can't be peeked at.
+	var team_pids := {}                          # team -> [peer_id,…] (a slot's team is slot % 2)
+	for pid in multiplayer.get_peers():
+		var t: int = int(Net.lobby.get(pid, 0)) % 2
+		if not team_pids.has(t):
+			team_pids[t] = []
+		team_pids[t].append(pid)
+	for T in team_pids:
+		var pids: Array = team_pids[T]
+		var eyes: Array = []                     # this team's eyes — its own officers
+		for h in battalions:
+			if h.human and h.team == T and not h.spent:
+				eyes.append(h.off_pos)
+		# battalions: own units in-AoI (+a rolling far refresh so your whole army stays on the map),
+		# enemy units only where this side has scouted them
+		var sel: Array = []
+		var far: Array = []
+		for i in range(battalions.size()):
+			var b: Batt = battalions[i]
+			if b.team == T:
+				if b.human or _net_aoi(b.pos, eyes):
+					sel.append(i)
+				else:
+					far.append(i)
+			elif b._spotted:
+				sel.append(i)
+			elif PLAYER_SEES_ALL:
+				far.append(i)        # reveal-all: stream unscouted enemies too (rolling far-refresh)
+		if not far.is_empty():
+			var per_tick := maxi(1, ceili(float(far.size()) / (FAR_REFRESH * NET_HZ)))
+			for _k in range(per_tick):
+				sel.append(far[_net_far_cursor % far.size()])
+				_net_far_cursor += 1
+		var bi := 0
+		while bi < sel.size():
+			var bchunk: Array = []
+			for k in range(bi, mini(bi + NET_CHUNK, sel.size())):
+				var i: int = sel[k]
+				var b: Batt = battalions[i]
+				var fm := 2 if b.rolling else (1 if b.volley_fire else 0)
+				bchunk.append([i,
+					b.pos.x, b.pos.z, b.facing, b.figs.size(), int(b.morale),
+					_state_code(b.state), 1 if b.formation == "line" else 0,
+					b.charging, b.melee_foe != null, b.flinch,
+					b.off_pos.x, b.off_pos.z, b.off_facing, b.human,
+					b.has_target, fm,
+				])
+			for pid in pids:
+				rpc_id(pid, "_apply_state", bchunk)
+			bi += NET_CHUNK
+		# cavalry — own regiments always, enemy horse only where scouted
+		var csel: Array = []
+		for i in range(cavalry.size()):
+			var c: Cav = cavalry[i]
+			if c.spent:
+				continue
+			if c.team == T or c._spotted or PLAYER_SEES_ALL:
+				csel.append(i)
+		var ci := 0
+		while ci < csel.size():
+			var cchunk: Array = []
+			for k in range(ci, mini(ci + NET_CHUNK, csel.size())):
+				var i: int = csel[k]
+				var c: Cav = cavalry[i]
+				cchunk.append([i, c.pos.x, c.pos.z, c.facing, c.troopers.size(), c.state, c.spent])
+			for pid in pids:
+				rpc_id(pid, "_apply_cav_state", cchunk)
+			ci += NET_CHUNK
+		# guns — own batteries always, enemy guns only where scouted
+		var gsel: Array = []
+		for i in range(guns.size()):
+			var g: Gun = guns[i]
+			if g.dead and g.team != T:
+				continue
+			if g.team == T or g._spotted or PLAYER_SEES_ALL:
+				gsel.append(i)
+		var gi := 0
+		while gi < gsel.size():
+			var gchunk: Array = []
+			for k in range(gi, mini(gi + NET_CHUNK, gsel.size())):
+				var i: int = gsel[k]
+				var g: Gun = guns[i]
+				gchunk.append([i, g.pos.x, g.pos.z, g.facing, g.dead, g.crew.size(), g.limber_state, g.recoil])
+			for pid in pids:
+				rpc_id(pid, "_apply_gun_state", gchunk)
+			gi += NET_CHUNK
+	# the SHARED WORLD — clock, ships and town ownership — so every player rides the same province
+	var sdata: Array = []
+	for s in ships:
+		var sp: Vector3 = s["pos"]
+		sdata.append([sp.x, sp.z, float(s["heading"])])
+	var tdata: Array = []
+	for t in field_towns:
+		tdata.append([int(t["owner"]), float(t["cap_t"]), int(t["cap_team"])])
+	rpc("_apply_world", _time_of_day, _battle_begun, sdata, tdata)
 	if not _fx.is_empty():
 		rpc("_apply_fx", _fx.duplicate())
 		_fx.clear()
+
+# True if a point is within the area of interest of any of a team's eyes (its officers).
+func _net_aoi(pos: Vector3, eyes: Array) -> bool:
+	for e in eyes:
+		if pos.distance_to(e) < AOI_RANGE:
+			return true
+	return false
 
 @rpc("authority", "call_remote", "unreliable_ordered")
 func _apply_state(data: Array) -> void:
 	if not _got_state:
 		_got_state = true
-		print("[NET] client received first state (%d battalions)" % data.size())
-	for i in range(mini(data.size(), battalions.size())):
-		var e: Array = data[i]
-		var b: Batt = battalions[i]
-		b.pos = Vector3(e[0], 0.0, e[1])
-		b.facing = e[2]
-		b.morale = float(e[4])
-		b.state = _state_name(int(e[5]))
-		var form := "line" if int(e[6]) == 1 else "column"
+		print("[NET] client received first state (AOI; OOB %d)" % battalions.size())
+	for e in data:
+		var idx := int(e[0])                     # self-indexing: each entry carries its OOB index
+		if idx < 0 or idx >= battalions.size():
+			continue
+		var b: Batt = battalions[idx]
+		b.pos = Vector3(e[1], 0.0, e[2])
+		b.facing = e[3]
+		b.morale = float(e[5])
+		b.state = _state_name(int(e[6]))
+		var form := "line" if int(e[7]) == 1 else "column"
 		if b.formation != form:
 			b.formation = form
 			_reslot(b)
-		b.charging = bool(e[7])
-		b.melee_vis = bool(e[8])
-		b.flinch = float(e[9])
-		b.off_pos = Vector3(e[10], 0.0, e[11])
-		b.off_facing = e[12]
-		b.human = bool(e[13])
-		b.has_target = bool(e[14])
-		b.fx_firemode = int(e[15])
-		_net_set_strength(b, int(e[3]))
+		b.charging = bool(e[8])
+		b.melee_vis = bool(e[9])
+		b.flinch = float(e[10])
+		b.off_pos = Vector3(e[11], 0.0, e[12])
+		b.off_facing = e[13]
+		b.human = bool(e[14])
+		b.has_target = bool(e[15])
+		b.fx_firemode = int(e[16])
+		_net_set_strength(b, int(e[4]))
+		# CLIENT FOG: receiving an enemy unit IS the sighting (the host only sends scouted enemies) —
+		# mark it spotted/fresh so it draws; the client's fog tick lets it fade if updates stop.
+		if player != null and b.team != player.team:
+			b._spotted = true
+			b._intel_pos = b.pos
+			b._intel_t = _t
 
 # client: grow/trim a battalion's figures to match the host's reported strength,
 # dropping bodies where men fall so the field still fills with casualties.
@@ -14126,6 +15870,87 @@ func _net_set_strength(b: Batt, target: int) -> void:
 		_drop_dead(w, b.team, Vector3(randf_range(-1, 1), 0, randf_range(-1, 1)), b.visible)
 		b.figs.remove_at(idx)
 
+# HOST -> clients: every regiment of horse — pos/facing/strength/state. The troopers'
+# saddle positions interpolate locally toward the formation, so only the count is synced.
+@rpc("authority", "call_remote", "unreliable_ordered")
+func _apply_cav_state(cdata: Array) -> void:
+	for e in cdata:
+		var idx := int(e[0])                         # self-indexing
+		if idx < 0 or idx >= cavalry.size():
+			continue
+		var c: Cav = cavalry[idx]
+		c.pos = Vector3(e[1], 0.0, e[2])
+		c.facing = float(e[3])
+		c.state = String(e[5])
+		c.spent = bool(e[6])
+		_net_set_troopers(c, int(e[4]))
+		if player != null and c.team != player.team:
+			c._spotted = true                        # client fog: a received enemy regiment is sighted
+			c._intel_pos = c.pos
+			c._intel_t = _t
+
+func _net_set_troopers(c: Cav, target: int) -> void:
+	while c.troopers.size() > target and not c.troopers.is_empty():
+		c.troopers.pop_back()                    # saddles emptied on the host
+
+# HOST -> clients: every gun — pos/facing/dead/crew/limber. The client doesn't run the gun
+# sim, so we place the node ourselves, show the limber team when it's moving, and thin the crew.
+@rpc("authority", "call_remote", "unreliable_ordered")
+func _apply_gun_state(gdata: Array) -> void:
+	for e in gdata:
+		var idx := int(e[0])                         # self-indexing
+		if idx < 0 or idx >= guns.size():
+			continue
+		var g: Gun = guns[idx]
+		g.pos = Vector3(e[1], 0.0, e[2])
+		g.facing = float(e[3])
+		g.dead = bool(e[4])
+		g.limber_state = String(e[6])
+		g.recoil = float(e[7])
+		if g.node != null:
+			g.node.position = Vector3(g.pos.x, _gh(g.pos.x, g.pos.z), g.pos.z)
+			g.node.rotation.y = g.facing
+			g.node.visible = true                    # a received enemy gun is, by definition, sighted
+		if g.barrel != null:
+			g.barrel.position.z = 0.25 - g.recoil
+		_set_limber_visible(g, g.limber_state == "limbering" or g.limber_state == "moving")
+		_net_set_crew(g, int(e[5]))
+		if player != null and g.team != player.team:
+			g._spotted = true
+			g._intel_t = _t
+
+func _net_set_crew(g: Gun, target: int) -> void:
+	while g.crew.size() > target and not g.crew.is_empty():
+		var node: Node3D = g.crew.pop_back()
+		if not g.crew_base.is_empty():
+			g.crew_base.pop_back()
+		var wp: Vector3 = g.node.to_global(node.position) if g.node != null else node.position
+		node.queue_free()
+		_drop_dead(Vector3(wp.x, 0.0, wp.z), g.team, Vector3(randf_range(-1, 1), 0, randf_range(-1, 1)), true)
+
+# HOST -> clients: the shared world — the day/night clock, the battle's start, the shipping's
+# course and who holds each town — so every player rides the SAME living province, not a divergent
+# copy. (Clients no longer advance the clock or steer ships themselves; they take it from here.)
+@rpc("authority", "call_remote", "unreliable_ordered")
+func _apply_world(tod: float, bbegun: bool, sdata: Array, tdata: Array) -> void:
+	_time_of_day = tod
+	if bbegun and not _battle_begun:
+		_begin_battle()                          # step off together with the host
+	for i in range(mini(sdata.size(), ships.size())):
+		var sp: Vector3 = ships[i]["pos"]
+		ships[i]["pos"] = Vector3(sdata[i][0], sp.y, sdata[i][1])
+		ships[i]["heading"] = float(sdata[i][2])
+	var recolor := false
+	for i in range(mini(tdata.size(), field_towns.size())):
+		var t = field_towns[i]
+		if int(t["owner"]) != int(tdata[i][0]):
+			recolor = true                       # a town changed hands — repaint its colours/flag
+		t["owner"] = int(tdata[i][0])
+		t["cap_t"] = float(tdata[i][1])
+		t["cap_team"] = int(tdata[i][2])
+	if recolor:
+		_color_towns()
+
 # client -> host: my officer's position + any order I just gave.
 func _net_send_input(delta: float) -> void:
 	_net_cd -= delta
@@ -14137,7 +15962,7 @@ func _net_send_input(delta: float) -> void:
 
 # host: a client sent its officer + order; apply to that client's battalion.
 func net_apply_input(slot: int, c_off_pos: Vector3, c_off_facing: float, order: Dictionary) -> void:
-	var b := _batt_by_idx(slot)
+	var b := _batt_for_slot(slot)
 	if b == null:
 		return
 	b.off_pos = c_off_pos
@@ -14148,10 +15973,11 @@ func net_apply_input(slot: int, c_off_pos: Vector3, c_off_facing: float, order: 
 # host: a player dropped — hand his orphaned battalion to the AI so the line keeps fighting
 # instead of standing frozen for want of orders. (Called by Net on peer_disconnected.)
 func net_player_left(slot: int) -> void:
-	var b := _batt_by_idx(slot)
+	var b := _batt_for_slot(slot)
 	if b == null:
 		return
 	b.human = false
+	b.human_slot = -1
 	if b != player:
 		b.is_player = false
 	b.order = Order.IDLE
@@ -14176,6 +16002,8 @@ func _apply_fx(events: Array) -> void:
 					_client_volley(b)
 			FX_MELEE:
 				_client_melee(Vector3(e[1], 1.0, e[2]))
+			FX_GUN:
+				_gun_muzzle_fx(Vector3(e[1], e[2], e[3]), Vector3(e[4], 0.0, e[5]))
 
 func _client_volley(b: Batt) -> void:
 	var fwd := Vector3(sin(b.facing), 0, cos(b.facing))
@@ -14188,7 +16016,7 @@ func _client_volley(b: Batt) -> void:
 	for f in b.figs:
 		if (f["slot"] as Vector2).y >= fire_band:
 			var w: Vector3 = f["wpos"]
-			var mp := w + Vector3(0, 1.35, 0) + right * 0.14 + fwd * 1.1   # musket muzzle tip
+			var mp := w + Vector3(0, 1.35 + _gh(w.x, w.z), 0) + right * 0.14 + fwd * 1.1   # musket muzzle tip (on the slope)
 			_emit_flash(mp)
 			_emit_smoke(mp, fwd)
 			_emit_smoke(mp, fwd)
@@ -14239,7 +16067,7 @@ func _client_firing_fx(b: Batt, delta: float) -> void:
 		# loaded — musket levelled (the render reads reload <= AIM_LEAD)
 		if atwill:
 			var w: Vector3 = f["wpos"]
-			var mp := w + Vector3(0, 1.35, 0) + right * 0.14 + fwd * 1.1   # musket muzzle tip
+			var mp := w + Vector3(0, 1.35 + _gh(w.x, w.z), 0) + right * 0.14 + fwd * 1.1   # musket muzzle tip (on the slope)
 			_emit_flash(mp)
 			_emit_smoke(mp, fwd)
 			_emit_muzzle_bloom(mp, fwd)

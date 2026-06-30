@@ -1,19 +1,30 @@
 # Commander — project context
 
-A multiplayer-capable **Napoleonic-era battle & campaign simulator** in **Godot 4.6.3 / GDScript**.
-You command a battalion as a **mounted officer in third person**; battles of up to ~140k men render
-through a handful of MultiMeshes. The campaign world and the tactical battle are now **one scene**
-(`game.tscn` / `game.gd`) — you ride a living province and battles inflate in place.
+A multiplayer-capable **historical-battle simulator** in **Godot 4.6.3 / GDScript**. You command in
+the saddle as a **mounted officer in third person**, at any echelon — battalion, brigade, division,
+corps or the whole army — issuing orders that subordinate AI commanders interpret in their own way.
+Battles of up to ~140k men render through a handful of MultiMeshes, all in one scene (`game.tscn` /
+`game.gd`). The aim is to recreate set-piece battles across eras, which means **maps, soldiers, army
+composition and weapons are becoming editable DATA** (a Brown Bess must behave unlike a Sharps rifle).
 
 ## Vision / goals
-- **MP-first living-world campaign** (colonial North America), no time acceleration in multiplayer.
-- **Third-person always**: the player is the mounted officer; ride the world in 3rd person, battles
-  inflate in place; the overhead map (`M`) is a dev/read-out aid, not the main view.
-- Operational depth (brigades garrison towns, march, give battle), tactical drama, musketry realism.
+- **Historical-battle recreations** — pick a battle, take command at any echelon, fight it out.
+  Napoleonic first; ACW, the American War of Independence, the Franco-Prussian War (1870) and the Zulu
+  War follow as content once the data layer lands.
+- **Command, don't micro** — orders flow down a real chain (army → corps → division → brigade →
+  battalion); subordinate AI commanders interpret them with their own doctrine and temperament.
+- **Third-person always**: the player is the mounted officer; the overhead map (`M`) is a read-out aid.
+- **Data-driven** — weapons, units, army composition and maps authored as editable data, not hard-coded.
+- **MP fits the vision**: each player can command a different formation in the same battle (kept).
+- Tactical drama and musketry realism are the heart of it.
+- **The dynamic living-world campaign is DISABLED (dormant), not deleted** (Jun 2026 pivot) — its code
+  still sits in `game.gd` behind the `GameConfig.historical==""` / `_inflated` gates, reachable again by
+  restoring the removed menu buttons (their handlers are kept in `menu.gd`). It can come back.
 
 ## Layout
-- Main scene: `menu.tscn` → `game.tscn`. (`world.tscn`/`world.gd` is the **deprecated** old campaign
-  scene — no longer used; everything is one scene in `game.gd` now.)
+- Main scene: `menu.tscn` → `game.tscn` (everything is one scene in `game.gd`). The old `world.tscn`/
+  `world.gd` campaign scene and the `spike_3d`/`spike_officer`/`oob.gd` prototypes were **deleted** in
+  the Jun 2026 cleanup.
 - Key scripts: **`scripts/game.gd`** (the whole sim — very large), `scripts/menu.gd` (menu +
   character creation), `scripts/game_config.gd` (autoload), `scripts/net.gd`, `scripts/battle_setup.gd`.
 - `.godot/` import cache is gitignored (Godot regenerates it).

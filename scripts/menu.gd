@@ -6,10 +6,15 @@ extends Control
 var root: VBoxContainer
 var ip_edit: LineEdit
 var status: Label
+var _use_upnp := false   # set by the --upnp launch flag: open the router port for internet play
 var lobby_box: VBoxContainer
 var slots_grid: GridContainer
 var start_btn: Button
 var in_lobby := false
+# historical battle — picking your command (which side, which battalion)
+var _hist_setup = null      # the built BattleSetup, kept while the player chooses a unit
+var _hist_key := ""         # the battle key (e.g. "waterloo")
+var _hist_side := 1         # which side's roster is shown (0 French, 1 Anglo-Allied/Prussian)
 # character creation (raise your militia)
 var _ci_uniform := 2
 var _ci_facing := 0
@@ -98,6 +103,7 @@ func _ready() -> void:
 	Net.lobby_updated.connect(_refresh_lobby)
 
 	var args := OS.get_cmdline_user_args()
+	_use_upnp = "--upnp" in args               # open the router port for internet play
 	if "--server" in args or "--dedicated" in args:
 		_on_dedicated()                       # headless dedicated server: host, wait, auto-start
 	elif "--auto-host" in args:
@@ -105,6 +111,8 @@ func _ready() -> void:
 		get_tree().create_timer(3.0).timeout.connect(_on_start)
 	elif "--auto-join" in args:
 		_on_join()
+	elif "--test-soldiers" in args:
+		get_tree().change_scene_to_file.call_deferred("res://test_soldiers.tscn")   # defer past _ready so the tree isn't mid-swap
 
 # ------------------------------------------------------------------ main screen
 
@@ -115,9 +123,10 @@ func _build_main() -> void:
 	root.add_child(main)
 	root.move_child(main, 3)
 
-	_btn(main, "New Game", _on_world)             # raise your militia and take the field
-	if FileAccess.file_exists("user://commander_save.dat"):
-		_btn(main, "Continue Campaign", _on_continue)   # resume the saved campaign
+	# FOCUS: historical battles. (The dynamic campaign — New Game / Continue / campaign hosting — is
+	# disabled for now; its _on_world/_on_continue/_on_host/_on_dedicated handlers are kept below so a
+	# button can be re-added when the campaign returns.)
+	_btn(main, "Historical Battles", _on_historical)    # set-piece battles, authored to history (single-player + MP host)
 
 	var mp_lbl := Label.new()
 	mp_lbl.text = "MULTIPLAYER"
@@ -127,8 +136,7 @@ func _build_main() -> void:
 	var mp_top := Control.new(); mp_top.custom_minimum_size = Vector2(0, 8); main.add_child(mp_top)
 	main.add_child(mp_lbl)
 
-	_btn(main, "Host Game", _on_host)
-	_btn(main, "Dedicated Server", _on_dedicated)   # host + simulate, command no battalion yourself
+	# Host a battle from the Historical Battles screen ("Host Multiplayer"); clients join below.
 	var iprow := HBoxContainer.new()
 	iprow.add_theme_constant_override("separation", 6)
 	ip_edit = LineEdit.new()
@@ -144,6 +152,7 @@ func _build_main() -> void:
 	main.add_child(iprow)
 
 	var q_top := Control.new(); q_top.custom_minimum_size = Vector2(0, 8); main.add_child(q_top)
+	_btn(main, "Animation Test", func(): get_tree().change_scene_to_file("res://test_soldiers.tscn"))   # soldier mesh/anim bench
 	_btn(main, "Quit", func(): get_tree().quit())
 
 # ------------------------------------------------------------------ lobby
@@ -226,6 +235,178 @@ func _on_world() -> void:
 	GameConfig.has_militia = false
 	GameConfig.load_requested = false
 	_enter_campaign_intro()
+
+# Historical Battles: a screen listing the set-piece battles, each authored into a BattleSetup.
+func _on_historical() -> void:
+	var main := root.get_node_or_null("Main")
+	if main:
+		main.queue_free()
+	var box := VBoxContainer.new()
+	box.name = "Historical"
+	box.add_theme_constant_override("separation", 10)
+	root.add_child(box)
+	root.move_child(box, 3)
+	var hdr := Label.new()
+	hdr.text = "HISTORICAL BATTLES"
+	hdr.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	hdr.add_theme_font_size_override("font_size", 15)
+	hdr.add_theme_color_override("font_color", Color(0.85, 0.88, 0.95))
+	box.add_child(hdr)
+	_btn(box, "Waterloo — 18 June 1815", func(): box.queue_free(); _choose_command("waterloo"))
+	_btn(box, "Waterloo — Host Multiplayer", func(): box.queue_free(); _host_historical("waterloo"))
+	var sp := Control.new(); sp.custom_minimum_size = Vector2(0, 8); box.add_child(sp)
+	_btn(box, "‹ Back", func(): box.queue_free(); _build_main())
+
+# Host a set-piece battle online: players claim a command (either side) in the shared lobby, then the
+# host starts. Reuses the campaign lobby — only the scenario flag differs.
+func _host_historical(key: String) -> void:
+	GameConfig.historical = key
+	var err := Net.host_game(false, _use_upnp)
+	if err != OK:
+		GameConfig.historical = ""
+		status.text = "Failed to host (error %d)" % err
+		_build_main()
+		return
+	_enter_lobby()
+	status.text = "Hosting %s on port %d — players claim a command and the host starts." % [key.capitalize(), Net.PORT]
+
+# Choose which command to take into the battle — either side, any battalion in the order of battle.
+func _choose_command(key: String) -> void:
+	_hist_setup = Historical.make(key)
+	if _hist_setup == null:
+		status.text = "Unknown battle: %s" % key
+		_build_main()
+		return
+	_hist_key = key
+	# default to the side the scenario's default player unit is on
+	_hist_side = 1
+	for u in _hist_setup.units:
+		if u.human_slot == 0:
+			_hist_side = u.team
+			break
+	_show_command_picker()
+
+func _show_command_picker() -> void:
+	var old := root.get_node_or_null("CommandPick")
+	if old:
+		old.queue_free()
+	var box := VBoxContainer.new()
+	box.name = "CommandPick"
+	box.add_theme_constant_override("separation", 8)
+	root.add_child(box)
+	root.move_child(box, 3)
+	var hdr := Label.new()
+	hdr.text = "CHOOSE YOUR COMMAND"
+	hdr.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	hdr.add_theme_font_size_override("font_size", 16)
+	hdr.add_theme_color_override("font_color", Color(1.0, 0.86, 0.45))
+	box.add_child(hdr)
+	# the side toggle
+	var srow := HBoxContainer.new()
+	srow.add_theme_constant_override("separation", 8)
+	srow.alignment = BoxContainer.ALIGNMENT_CENTER
+	box.add_child(srow)
+	_side_tab(srow, 0, "Armée du Nord")
+	_side_tab(srow, 1, "Anglo-Allied / Prussian")
+	# the roster for the chosen side, grouped by brigade
+	var sc := ScrollContainer.new()
+	sc.custom_minimum_size = Vector2(500, 380)
+	box.add_child(sc)
+	var col := VBoxContainer.new()
+	col.custom_minimum_size = Vector2(480, 0)
+	col.add_theme_constant_override("separation", 3)
+	sc.add_child(col)
+	var last_brig := -999
+	for i in range(_hist_setup.units.size()):
+		var u = _hist_setup.units[i]
+		if u.team != _hist_side:
+			continue
+		if u.brigade != last_brig:
+			last_brig = u.brigade
+			var gap := Control.new(); gap.custom_minimum_size = Vector2(0, 6); col.add_child(gap)
+			var bl := Label.new()
+			bl.text = "— Corps %s · Division %s · Brigade %s —" % [str(u.corps), str(u.division), str(u.brigade)]
+			bl.add_theme_font_size_override("font_size", 12)
+			bl.add_theme_color_override("font_color", Color(0.70, 0.78, 0.92))
+			col.add_child(bl)
+		_unit_btn(col, i, String(u.name), int(u.men))
+	var sp := Control.new(); sp.custom_minimum_size = Vector2(0, 8); box.add_child(sp)
+	_btn(box, "‹ Back", func(): box.queue_free(); _on_historical())
+
+# a side-selector tab; re-renders the picker for that side
+func _side_tab(row: HBoxContainer, side: int, text: String) -> void:
+	var b := Button.new()
+	b.text = text
+	b.custom_minimum_size = Vector2(215, 38)
+	b.add_theme_font_size_override("font_size", 15)
+	var on := (side == _hist_side)
+	b.add_theme_color_override("font_color", Color(1.0, 0.92, 0.62) if on else Color(0.78, 0.80, 0.86))
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.20, 0.17, 0.10, 0.95) if on else Color(0.10, 0.12, 0.16, 0.82)
+	sb.border_color = Color(1.0, 0.84, 0.42, 0.9) if on else Color(1.0, 0.84, 0.42, 0.35)
+	sb.set_border_width_all(1)
+	sb.set_corner_radius_all(6)
+	sb.set_content_margin_all(7)
+	b.add_theme_stylebox_override("normal", sb)
+	b.add_theme_stylebox_override("hover", sb)
+	b.add_theme_stylebox_override("pressed", sb)
+	b.pressed.connect(func():
+		if _hist_side != side:
+			_hist_side = side
+			_show_command_picker())
+	row.add_child(b)
+
+# a compact roster button: take command of this battalion
+func _unit_btn(col: VBoxContainer, idx: int, name: String, men: int) -> void:
+	var b := Button.new()
+	b.text = "   %s   (%d men)" % [name, men]
+	b.custom_minimum_size = Vector2(470, 30)
+	b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	b.add_theme_font_size_override("font_size", 14)
+	b.add_theme_color_override("font_color", Color(0.93, 0.91, 0.84))
+	b.add_theme_color_override("font_hover_color", Color(1.0, 0.92, 0.62))
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.10, 0.12, 0.16, 0.70)
+	sb.border_color = Color(1.0, 0.84, 0.42, 0.25)
+	sb.set_border_width_all(1)
+	sb.set_corner_radius_all(4)
+	sb.set_content_margin_all(5)
+	b.add_theme_stylebox_override("normal", sb)
+	var sbh: StyleBoxFlat = sb.duplicate()
+	sbh.bg_color = Color(0.17, 0.19, 0.25, 0.92)
+	sbh.border_color = Color(1.0, 0.88, 0.5, 0.9)
+	b.add_theme_stylebox_override("hover", sbh)
+	b.pressed.connect(func(): _pick_unit(idx))
+	col.add_child(b)
+
+func _pick_unit(idx: int) -> void:
+	if _hist_setup == null or idx < 0 or idx >= _hist_setup.units.size():
+		return
+	for u in _hist_setup.units:
+		u.human_slot = -1           # clear the scenario default
+	_hist_setup.units[idx].human_slot = 0
+	_launch_hist_setup(_hist_key, _hist_setup)
+
+# launch a (possibly already-built) historical setup
+func _launch_hist_setup(key: String, setup) -> void:
+	GameConfig.world_state = {}
+	GameConfig.return_to_world = false
+	GameConfig.battle_tokens = []
+	GameConfig.has_militia = false
+	GameConfig.load_requested = false
+	GameConfig.mode = "single"
+	GameConfig.historical = key
+	GameConfig.setup = setup
+	GameConfig.match_seed = setup.seed_value
+	GameConfig.local_slot = 0
+	get_tree().change_scene_to_file("res://game.tscn")
+
+func _launch_historical(key: String) -> void:
+	var setup := Historical.make(key)
+	if setup == null:
+		status.text = "Unknown battle: %s" % key
+		return
+	_launch_hist_setup(key, setup)
 
 # Resume the saved campaign: game.gd reads the save on start (seed, militia, towns, units).
 func _on_continue() -> void:
@@ -472,7 +653,8 @@ func _start_with(slot: int) -> void:
 	get_tree().change_scene_to_file("res://game.tscn")
 
 func _on_host() -> void:
-	var err := Net.host_game()
+	GameConfig.historical = ""        # a campaign host is the living province, not a set-piece battle
+	var err := Net.host_game(false, _use_upnp)
 	if err != OK:
 		status.text = "Failed to host (error %d)" % err
 		return
@@ -482,7 +664,8 @@ func _on_host() -> void:
 # Headless/standalone dedicated server: host the match, command no battalion, and let Net
 # auto-start the battle a short while after the first player joins.
 func _on_dedicated() -> void:
-	var err := Net.host_game(true)
+	GameConfig.historical = ""        # the dedicated campaign server, not a set-piece battle
+	var err := Net.host_game(true, _use_upnp)
 	if err != OK:
 		status.text = "Failed to start server (error %d)" % err
 		print("[NET] dedicated host failed: error %d" % err)

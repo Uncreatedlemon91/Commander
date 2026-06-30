@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="Weapon" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/weapon.gd" id="1_weapon"]
+
+[resource]
+script = ExtResource("1_weapon")
+id = "brown_bess"
+display_name = "Brown Bess (smoothbore musket)"
+max_range = 82.0
+reload_time = 30.0
+hit_point_blank = 0.24
+hit_falloff = 1.0
+yaw_sd = 0.022
+pitch_sd = 0.015
+aim_lead = 0.7
