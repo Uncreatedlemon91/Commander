@@ -14742,7 +14742,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		_sight_yaw -= event.relative.x * gs
 		_sight_pitch = clampf(_sight_pitch - event.relative.y * gs * 0.3, deg_to_rad(-14.0), deg_to_rad(3.0))
 		return
-	if event is InputEventMouseMotion and _mouse_captured and not ui_modal:
+	if event is InputEventMouseMotion and _mouse_captured and not ui_modal and not _cmd_mode:
 		var s := MOUSE_SENS * (1.0 - 0.65 * _scope_amt)   # finer aim through the glass
 		_cam_yaw -= event.relative.x * s
 		if _scoped:
@@ -15669,9 +15669,12 @@ func _toggle_command_view() -> void:
 			_toggle_rts_cam()
 		var c := _player_hq()
 		_rts_focus = Vector3(c.x, 0, c.z)         # centre the view on the formation you command
-		_send_player_despatch("[color=#ffd773]Command view.[/color] Click a subordinate to select it, then click ground to [b]move[/b] it or the enemy to [b]attack[/b].  [b]H[/b] hold · [b]Tab[/b] back to the saddle.", {})
-	elif _rts_cam:
-		_toggle_rts_cam()
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE   # free the cursor to point and click at your subordinates
+		_send_player_despatch("[color=#ffd773]Command view.[/color] [b]Click[/b] a subordinate to select, then click ground to [b]move[/b] it or the enemy to [b]attack[/b].  [b]WASD[/b] pan · [b]wheel[/b] zoom · [b]H[/b] hold · [b]Tab[/b] back to the saddle.", {})
+	else:
+		if _rts_cam:
+			_toggle_rts_cam()
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if _mouse_captured else Input.MOUSE_MODE_VISIBLE   # recapture for the saddle
 
 # the formations you may order — the tier directly below your echelon
 func _player_subordinates() -> Array:
