@@ -447,6 +447,7 @@ class Brigade:
 	var is_player: bool = false    # contains the human-led battalion
 	var player_led: bool = false   # the PLAYER commands this brigade in person — he sets its battalions' orders (skip the tactical AI)
 	var mission_locked: bool = false   # the player (as div/corps/army cmdr) sets THIS brigade's mission — the AI must not reassign it
+	var move_to: Vector3 = Vector3.INF   # a player MOVE order: march to this point, then hold (INF = none)
 	var commander_pos: Vector3     # where the brigadier rides (behind the centre)
 	var commander_down: bool = false   # the brigadier is shot — the brigade is leaderless
 	var confuse_t: float = 0.0     # how long it stays confused before a colonel takes over
@@ -693,6 +694,9 @@ var _player_brigade = null               # the Brigade you command (echelon >= b
 var _player_division = null              # the Division you command (echelon >= division)
 var _player_corps: int = -1              # the corps you command (echelon == corps)
 var _player_army = null                  # the Army you command (echelon == army)
+var _cmd_mode: bool = false              # in the overhead COMMAND VIEW, issuing orders to subordinates
+var _cmd_sel = null                      # the subordinate formation currently selected
+var _cmd_marker: MeshInstance3D = null   # a ring drawn under the selected subordinate
 # --- which arm you command in person (chosen at the step-off) ---
 var player_arm: String = "infantry"       # infantry | artillery | cavalry
 var player_guns: Array = []               # the battery you lay and fire yourself
@@ -11086,20 +11090,24 @@ func _resolve_player_command() -> void:
 		return
 	var dv = _division_for(br)
 	match _player_echelon:
-		1:   # BRIGADE — you order this brigade's battalions in person
+		1:   # BRIGADE — you command this brigade
 			_player_brigade = br
 			br.player_led = true
+			br.mission = "refuse"                 # holds its ground until you order it
 		2:   # DIVISION — you order this division's brigades
 			_player_division = dv
 			if dv != null:
 				dv.player_led = true
 				for b2 in _division_brigades(dv):
 					b2.mission_locked = true      # the army AI must not reassign these brigades' missions
+					b2.mission = "refuse"         # each holds until you order it
 		3:   # CORPS — you order the divisions of your corps
 			_player_corps = br.corps
 			for dv2 in divisions:
 				if dv2.team == player.team and dv2.corps == br.corps:
 					dv2.dir_locked = true
+					for b3 in _division_brigades(dv2):
+						b3.mission = "refuse"
 		4:   # ARMY — you order every division of your army
 			for a in armies:
 				if a.team == player.team:
@@ -11107,6 +11115,8 @@ func _resolve_player_command() -> void:
 			for dv3 in divisions:
 				if dv3.team == player.team:
 					dv3.dir_locked = true
+					for b4 in _division_brigades(dv3):
+						b4.mission = "refuse"
 
 func _resolve_doctrine() -> void:
 	var rng := RandomNumberGenerator.new()
@@ -12009,8 +12019,8 @@ func _brigade_pursue_task(br, center: Vector3) -> void:
 		br.face_want = atan2((br.objective - center).x, (br.objective - center).z)
 
 func _brigade_decide(br) -> void:
-	if br.player_led:
-		return               # MULTI-ECHELON: the PLAYER commands this brigade — his orders set the battalions' posture/objective, not the tactical AI
+	# MULTI-ECHELON: a player-commanded brigade still runs this loop — it EXECUTES the mission/objective the
+	# player's couriers set (march there, fight on contact); the army just never RE-PLANS it (mine-filter).
 	var center := _brigade_center(br)
 	# historical script (Waterloo): a brigade ordered to hold stands fast; one given a scripted
 	# objective marches to it, then reverts to the tactical AI once arrived.
@@ -12035,6 +12045,16 @@ func _brigade_decide(br) -> void:
 		br.objective = br.anchor
 		br.fire_mission = null
 		return
+	# MULTI-ECHELON: a player MOVE order — march to the point, then hold there (the "refuse" mission takes over)
+	if br.move_to != Vector3.INF:
+		if center.distance_to(br.move_to) < 60.0:
+			br.move_to = Vector3.INF
+		else:
+			br.posture = "advance"
+			br.objective = br.move_to
+			br.face_want = atan2((br.move_to - center).x, (br.move_to - center).z)
+			br.fire_mission = _brigade_fire_mission(br)   # still fires if an enemy comes into range on the march
+			return
 	# OPERATIONAL: give battle to an enemy brigade only when it is KNOWN and in CONTACT; otherwise
 	# pursue the strategic task (defend / assault / screen a town). With fog, an unscouted column
 	# isn't reacted to until your own forces sight it — so feints and flank marches go unseen, and a
@@ -14602,6 +14622,7 @@ func _charge_score(p: Vector3, heading: Vector3) -> float:
 func _update_cam(delta: float) -> void:
 	if _rts_cam:
 		_update_rts_cam(delta)
+		_update_command_view(delta)   # draw the selection ring while commanding
 		return
 	# down the barrel: put the eye behind the breech of the sighted gun and look along
 	# the piece, the mouse laying it; the whole battery is laid on the same ground
@@ -14733,7 +14754,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		if event.button_index == MOUSE_BUTTON_RIGHT:
 			_scoped = event.pressed                       # hold RMB to raise the spyglass
 		elif event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
-			if player_arm == "artillery":
+			if _cmd_mode:
+				_cmd_click()                              # command view: click a subordinate to select, or ground/enemy to order it
+			elif player_arm == "artillery":
 				_fire_player_battery()                    # give the word — the battery speaks
 			else:
 				_swing_sabre()                            # cut at whatever you're facing
@@ -14883,7 +14906,13 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_B:
 				_send_scouts()            # send the nearest light horse forward to scout the front
 			KEY_TAB:
-				_help_on = not _help_on
+				if _player_echelon >= 1:
+					_toggle_command_view()   # you command a formation: open the overhead command view
+				else:
+					_help_on = not _help_on
+			KEY_H:
+				if _cmd_mode:
+					_cmd_hold()              # hold the selected subordinate on its ground
 			KEY_F3:
 				_aidbg_on = not _aidbg_on   # dev: show what the AI commanders are thinking
 				_map_reveal = _aidbg_on     # ...and lift the fog of the province map
@@ -15528,8 +15557,10 @@ func _update_couriers(delta: float) -> void:
 	while i < couriers.size():
 		var c: Dictionary = couriers[i]
 		var sug := bool(c.get("suggest", false))
-		# a despatch from the commander rides to YOU; your own orders ride to the battalion
-		var dest: Vector3 = (off_pos if sug else player.pos) + Vector3(0, 0.0, 0)
+		var to_form = c.get("to_formation", null)
+		# a commander's despatch rides to YOU; your battalion order to the battalion; a FORMATION order
+		# rides to the subordinate you addressed it to (that ride time IS the courier friction)
+		var dest: Vector3 = (_formation_center(to_form) if to_form != null else (off_pos if sug else player.pos))
 		var from_p: Vector3 = c["pos"]
 		var p: Vector3 = from_p.move_toward(dest, COURIER_SPEED * delta)
 		var hd := p - from_p
@@ -15537,10 +15568,12 @@ func _update_couriers(delta: float) -> void:
 		if hd.length() > 0.001:
 			c["dir"] = hd.normalized()
 		if Vector2(p.x - dest.x, p.z - dest.z).length() < 3.0:
-			if sug:
+			if to_form != null:
+				_apply_formation_order(to_form, c["order"])                            # MULTI-ECHELON: the order reaches the subordinate
+			elif sug:
 				_send_player_despatch(String(c.get("text", "")), c.get("order", {}))   # informs you
 			else:
-				_apply_order(c["order"])                                               # your own order
+				_apply_order(c["order"])                                               # your own battalion order
 			couriers.remove_at(i)
 		else:
 			i += 1
@@ -15558,6 +15591,184 @@ func _update_couriers(delta: float) -> void:
 
 func _apply_order(order: Dictionary) -> void:
 	_apply_net_order(player, order)
+
+# MULTI-ECHELON: send an order to a SUBORDINATE formation (Brigade/Division). An aide rides from your HQ
+# to it — the ride time is the friction — and _apply_formation_order sets its mission on arrival.
+func _dispatch_formation_order(sub, order: Dictionary) -> void:
+	if sub == null:
+		return
+	couriers.append({ "pos": off_pos + Vector3(0, 0.9, 0), "order": order, "to_formation": sub })
+	if couriers.size() > COURIER_MAX:
+		couriers.pop_front()                 # buffer overflow — drop the oldest aide
+
+# The centre of any command node, for routing a courier to it.
+func _formation_center(sub) -> Vector3:
+	if sub is Brigade:
+		return _brigade_center(sub)
+	if sub is Division:
+		return _division_center(sub)
+	if sub is Batt:
+		return sub.pos
+	return off_pos
+
+# The courier has reached the subordinate — set its mission/objective from the order kind. Its own
+# commander (the AI) then interprets and executes it: marches to the ground, fights on contact, his way.
+func _apply_formation_order(sub, order: Dictionary) -> void:
+	if sub == null:
+		return
+	var kind := String(order.get("kind", "move"))
+	var pt := Vector3(float(order.get("x", 0.0)), 0.0, float(order.get("z", 0.0)))
+	if sub is Brigade:
+		_order_brigade(sub, kind, pt, _nearest_enemy_brigade_to(pt, sub.team))
+	elif sub is Division:
+		var tgt = _nearest_enemy_brigade_to(pt, sub.team)
+		for b in _division_brigades(sub):
+			_order_brigade(b, kind, pt, tgt)
+		sub.directive = ("hold" if kind in ["hold", "refuse"] else "main")
+		sub.target = tgt
+
+func _order_brigade(br, kind: String, pt: Vector3, tgt) -> void:
+	match kind:
+		"attack":
+			br.mission = "attack"
+			br.mission_target = tgt
+			br.move_to = Vector3.INF
+			br.scripted_obj = Vector3.ZERO
+		"hold", "refuse":
+			br.mission = "refuse"
+			br.move_to = Vector3.INF
+			br.scripted_obj = Vector3.ZERO
+		_:   # "move" — march to the point, then hold there
+			br.mission = "refuse"
+			br.move_to = pt
+			br.scripted_obj = Vector3.ZERO
+
+func _nearest_enemy_brigade_to(pt: Vector3, team: int):
+	var best = null
+	var bd := 1.0e18
+	for br in brigades:
+		if br.team == team or _brigade_live(br) == 0:
+			continue
+		var d := _brigade_center(br).distance_to(pt)
+		if d < bd:
+			bd = d
+			best = br
+	return best
+
+# ── MULTI-ECHELON COMMAND VIEW (Layer 3) ─────────────────────────────────────────────────────────
+# An overhead view of your sector where you SELECT a subordinate and CLICK to order it. Only offered
+# when you command a formation (echelon >= brigade); at battalion echelon you keep direct control.
+
+func _toggle_command_view() -> void:
+	if _player_echelon < 1 or player == null:
+		return
+	_cmd_mode = not _cmd_mode
+	_cmd_sel = null
+	if _cmd_mode:
+		if not _rts_cam:
+			_toggle_rts_cam()
+		var c := _player_hq()
+		_rts_focus = Vector3(c.x, 0, c.z)         # centre the view on the formation you command
+		_send_player_despatch("[color=#ffd773]Command view.[/color] Click a subordinate to select it, then click ground to [b]move[/b] it or the enemy to [b]attack[/b].  [b]H[/b] hold · [b]Tab[/b] back to the saddle.", {})
+	elif _rts_cam:
+		_toggle_rts_cam()
+
+# the formations you may order — the tier directly below your echelon
+func _player_subordinates() -> Array:
+	var subs: Array = []
+	match _player_echelon:
+		1:
+			if _player_brigade != null:
+				subs.append(_player_brigade)
+		2:
+			if _player_division != null:
+				subs = _division_brigades(_player_division)
+		3:
+			for dv in divisions:
+				if dv.team == player.team and dv.corps == _player_corps:
+					subs.append(dv)
+		4:
+			for dv in divisions:
+				if dv.team == player.team:
+					subs.append(dv)
+	return subs
+
+func _player_hq() -> Vector3:
+	if _player_division != null:
+		return _division_center(_player_division)
+	if _player_brigade != null:
+		return _brigade_center(_player_brigade)
+	return player.pos if player != null else Vector3.ZERO
+
+# raycast the mouse onto the ground plane (y = 0), for click-to-order
+func _cmd_ground_point():
+	if cam == null:
+		return null
+	var mp := get_viewport().get_mouse_position()
+	var o := cam.project_ray_origin(mp)
+	var d := cam.project_ray_normal(mp)
+	if absf(d.y) < 1.0e-4:
+		return null
+	var t := -o.y / d.y
+	if t < 0.0:
+		return null
+	var p := o + d * t
+	return Vector3(p.x, 0.0, p.z)
+
+func _subordinate_near(gp: Vector3, r: float):
+	var best = null
+	var bd := r
+	for s in _player_subordinates():
+		var c: Vector3 = _formation_center(s)
+		var dd := Vector2(c.x - gp.x, c.z - gp.z).length()
+		if dd < bd:
+			bd = dd
+			best = s
+	return best
+
+func _enemy_near(gp: Vector3, r: float) -> bool:
+	var e = _nearest_enemy_brigade_to(gp, player.team)
+	return e != null and _brigade_center(e).distance_to(gp) < r
+
+# a left-click in the command view: click a subordinate to SELECT it; then click ground = MOVE it there,
+# click on/near an enemy = ATTACK. The order rides to it by courier (Layer 2), it obeys in its own way.
+func _cmd_click() -> void:
+	var gp = _cmd_ground_point()
+	if gp == null:
+		return
+	var sub = _subordinate_near(gp, 90.0)
+	if sub != null:
+		_cmd_sel = sub
+		return
+	if _cmd_sel != null:
+		var kind := "attack" if _enemy_near(gp, 120.0) else "move"
+		_dispatch_formation_order(_cmd_sel, { "kind": kind, "x": gp.x, "z": gp.z })
+
+func _cmd_hold() -> void:
+	if _cmd_sel != null:
+		var c: Vector3 = _formation_center(_cmd_sel)
+		_dispatch_formation_order(_cmd_sel, { "kind": "hold", "x": c.x, "z": c.z })
+
+# per-frame: a glowing ring under the selected subordinate while in the command view
+func _update_command_view(_delta: float) -> void:
+	if _cmd_marker == null:
+		_cmd_marker = MeshInstance3D.new()
+		var tm := TorusMesh.new()
+		tm.inner_radius = 10.0
+		tm.outer_radius = 13.0
+		_cmd_marker.mesh = tm
+		var mat := StandardMaterial3D.new()
+		mat.albedo_color = Color(1.0, 0.9, 0.3)
+		mat.emission_enabled = true
+		mat.emission = Color(1.0, 0.85, 0.2)
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_cmd_marker.material_override = mat
+		add_child(_cmd_marker)
+	var showing := _cmd_mode and _cmd_sel != null
+	_cmd_marker.visible = showing
+	if showing:
+		var c: Vector3 = _formation_center(_cmd_sel)
+		_cmd_marker.position = Vector3(c.x, _gh(c.x, c.z) + 1.0, c.z)
 
 # Your brigade commander sends you his orders. You are told what is wanted — it is on
 # you to carry it out (or not). The despatch never executes anything for you.
