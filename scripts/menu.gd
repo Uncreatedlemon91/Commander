@@ -15,6 +15,7 @@ var in_lobby := false
 var _hist_setup = null      # the built BattleSetup, kept while the player chooses a unit
 var _hist_key := ""         # the battle key (e.g. "waterloo")
 var _hist_side := 1         # which side's roster is shown (0 French, 1 Anglo-Allied/Prussian)
+var _hist_echelon := 0      # what you command: 0 battalion · 1 brigade · 2 division · 3 corps · 4 army
 # character creation (raise your militia)
 var _ci_uniform := 2
 var _ci_facing := 0
@@ -301,6 +302,23 @@ func _show_command_picker() -> void:
 	hdr.add_theme_font_size_override("font_size", 16)
 	hdr.add_theme_color_override("font_color", Color(1.0, 0.86, 0.45))
 	box.add_child(hdr)
+	# the ECHELON selector — what LEVEL you command; the battalion you pick below is your seat/HQ
+	var erow := HBoxContainer.new()
+	erow.add_theme_constant_override("separation", 6)
+	erow.alignment = BoxContainer.ALIGNMENT_CENTER
+	box.add_child(erow)
+	var enames := ["Battalion", "Brigade", "Division", "Corps", "Army"]
+	for e in range(enames.size()):
+		_echelon_tab(erow, e, enames[e])
+	var ehint := Label.new()
+	ehint.text = ("You lead this battalion in person." if _hist_echelon == 0
+		else "You command the %s holding the battalion you pick; you order its subordinates (Tab = command view)." % enames[_hist_echelon].to_lower())
+	ehint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	ehint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	ehint.custom_minimum_size = Vector2(500, 0)
+	ehint.add_theme_font_size_override("font_size", 12)
+	ehint.add_theme_color_override("font_color", Color(0.72, 0.80, 0.92))
+	box.add_child(ehint)
 	# the side toggle
 	var srow := HBoxContainer.new()
 	srow.add_theme_constant_override("separation", 8)
@@ -356,6 +374,29 @@ func _side_tab(row: HBoxContainer, side: int, text: String) -> void:
 			_show_command_picker())
 	row.add_child(b)
 
+# an echelon-selector tab; re-renders the picker with that command level chosen
+func _echelon_tab(row: HBoxContainer, ech: int, text: String) -> void:
+	var b := Button.new()
+	b.text = text
+	b.custom_minimum_size = Vector2(92, 32)
+	b.add_theme_font_size_override("font_size", 13)
+	var on := (ech == _hist_echelon)
+	b.add_theme_color_override("font_color", Color(1.0, 0.92, 0.62) if on else Color(0.78, 0.80, 0.86))
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.20, 0.17, 0.10, 0.95) if on else Color(0.10, 0.12, 0.16, 0.82)
+	sb.border_color = Color(1.0, 0.84, 0.42, 0.9) if on else Color(1.0, 0.84, 0.42, 0.35)
+	sb.set_border_width_all(1)
+	sb.set_corner_radius_all(6)
+	sb.set_content_margin_all(6)
+	b.add_theme_stylebox_override("normal", sb)
+	b.add_theme_stylebox_override("hover", sb)
+	b.add_theme_stylebox_override("pressed", sb)
+	b.pressed.connect(func():
+		if _hist_echelon != ech:
+			_hist_echelon = ech
+			_show_command_picker())
+	row.add_child(b)
+
 # a compact roster button: take command of this battalion
 func _unit_btn(col: VBoxContainer, idx: int, name: String, men: int) -> void:
 	var b := Button.new()
@@ -399,6 +440,7 @@ func _launch_hist_setup(key: String, setup) -> void:
 	GameConfig.setup = setup
 	GameConfig.match_seed = setup.seed_value
 	GameConfig.local_slot = 0
+	GameConfig.command_echelon = _hist_echelon   # what level you command (0 = the battalion, as before)
 	get_tree().change_scene_to_file("res://game.tscn")
 
 func _launch_historical(key: String) -> void:
