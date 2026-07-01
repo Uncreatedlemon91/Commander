@@ -445,6 +445,8 @@ class Brigade:
 	var support_pos: Vector3 = Vector3.ZERO   # a flank/point we've been asked to shore up
 	var support_t: float = 0.0     # how long we keep honouring that task
 	var is_player: bool = false    # contains the human-led battalion
+	var player_led: bool = false   # the PLAYER commands this brigade in person — he sets its battalions' orders (skip the tactical AI)
+	var mission_locked: bool = false   # the player (as div/corps/army cmdr) sets THIS brigade's mission — the AI must not reassign it
 	var commander_pos: Vector3     # where the brigadier rides (behind the centre)
 	var commander_down: bool = false   # the brigadier is shot — the brigade is leaderless
 	var confuse_t: float = 0.0     # how long it stays confused before a colonel takes over
@@ -478,6 +480,8 @@ class Division:
 	var doctrine: Dictionary = {}  # the national doctrine (DOCTRINE entry)
 	var temper: Dictionary = {}    # the divisional general's temperament (TEMPERS entry)
 	var line2: bool = false
+	var player_led: bool = false   # the PLAYER commands this division — he sets its brigades' missions (skip the division AI)
+	var dir_locked: bool = false   # the player (as corps/army cmdr) sets THIS division's directive — the army AI must not reassign it
 	var directive: String = "hold"   # main | fix | reserve | hold — the army's order
 	var objective: Vector3           # the ground the army points the division at
 	var target = null                # the enemy Brigade the division is set against
@@ -683,6 +687,12 @@ const FACINGS_2 := [Color(0.78, 0.62, 0.30), Color(0.55, 0.10, 0.08), Color(0.85
 
 var battalions: Array[Batt] = []
 var player: Batt
+# --- MULTI-ECHELON COMMAND: which formation you command (0 = the battalion you ride, as before) ---
+var _player_echelon: int = 0              # GameConfig.command_echelon, resolved at spawn
+var _player_brigade = null               # the Brigade you command (echelon >= brigade)
+var _player_division = null              # the Division you command (echelon >= division)
+var _player_corps: int = -1              # the corps you command (echelon == corps)
+var _player_army = null                  # the Army you command (echelon == army)
 # --- which arm you command in person (chosen at the step-off) ---
 var player_arm: String = "infantry"       # infantry | artillery | cavalry
 var player_guns: Array = []               # the battery you lay and fire yourself
@@ -1089,6 +1099,7 @@ func _ready() -> void:
 	_build_guns()
 	_spawn_cavalry()
 	_assign_brigades()
+	_resolve_player_command()        # MULTI-ECHELON: flag the formation the player commands, so the AI defers to his orders there
 	# CONTINUE CAMPAIGN: now the meshes/pools exist, replace the fresh spawn with the saved state
 	if _loaded_save != null:
 		_apply_save(_loaded_save)
@@ -7158,8 +7169,8 @@ func _spawn_from_setup() -> void:
 		add_child(mp)
 		b.march_player = mp
 		_fill_figs(b, maxi(1, u.men))        # the battalion's REAL strength — not capped at the campaign 700
-		_assign_battalion_skills(b)
-		_apply_seam_skills(b, u)             # carry the regiment's real skills from the world
+		_assign_battalion_skills(b, _profile_skill_base(u))   # the unit type's drill base (Guards sharp, militia green)
+		_apply_seam_skills(b, u)             # ...then the per-brigade experience scales it
 		while b.figs.size() > u.men and b.figs.size() > 0:
 			b.figs.pop_back()                # trim to exact strength (no-op once filled to u.men)
 		b.start_men = b.figs.size()
@@ -7586,10 +7597,18 @@ func _roll_skills(base: float, spread: float) -> Dictionary:
 	return d
 
 # Assign a fresh battalion its skills (the standalone field rolls every regiment varied).
-func _assign_battalion_skills(b: Batt) -> void:
-	var base := randf_range(34.0, 82.0)
-	b.skill = _roll_skills(base, 13.0)
-	b.quality = _quality_label(base)
+# the unit-type profile's drill base for a spawned unit (−1 = no profile → random roll)
+func _profile_skill_base(u) -> float:
+	if u != null and String(u.profile) != "":
+		return UnitProfile.get_profile(u.profile).skill_base
+	return -1.0
+
+func _assign_battalion_skills(b: Batt, base: float = -1.0) -> void:
+	# base < 0 → a random roll (the standalone/campaign field); otherwise the unit PROFILE's skill_base
+	# drives it, so Guards come in sharp and militia green (the per-brigade experience then scales it).
+	var bs := base if base >= 0.0 else randf_range(34.0, 82.0)
+	b.skill = _roll_skills(bs, 13.0)
+	b.quality = _quality_label(bs)
 	b.exp_mul = _reload_factor(b)
 	b.cohesion = _disc_cohesion(b)
 	b.fatigue = 0.0
@@ -11051,6 +11070,44 @@ func _read_enemy_intent(army, mine: Array, foe: Array) -> void:
 
 # Resolve doctrine + temperament onto every brigade, division and army from the troops'
 # nationality, and set each army's boldness (doctrine + temper) and strategic role.
+# MULTI-ECHELON COMMAND: resolve which formation the player commands (from GameConfig.command_echelon and
+# the battalion he rides) and flag it + its subordinates, so the AI stops issuing the orders the player will.
+# Below the player's node the AI runs normally — subordinates interpret and execute his orders.
+func _resolve_player_command() -> void:
+	_player_echelon = GameConfig.command_echelon
+	_player_brigade = null
+	_player_division = null
+	_player_corps = -1
+	_player_army = null
+	if player == null or _player_echelon <= 0:
+		return                                   # battalion command — the direct control you already have
+	var br = player.brigade
+	if br == null:
+		return
+	var dv = _division_for(br)
+	match _player_echelon:
+		1:   # BRIGADE — you order this brigade's battalions in person
+			_player_brigade = br
+			br.player_led = true
+		2:   # DIVISION — you order this division's brigades
+			_player_division = dv
+			if dv != null:
+				dv.player_led = true
+				for b2 in _division_brigades(dv):
+					b2.mission_locked = true      # the army AI must not reassign these brigades' missions
+		3:   # CORPS — you order the divisions of your corps
+			_player_corps = br.corps
+			for dv2 in divisions:
+				if dv2.team == player.team and dv2.corps == br.corps:
+					dv2.dir_locked = true
+		4:   # ARMY — you order every division of your army
+			for a in armies:
+				if a.team == player.team:
+					_player_army = a
+			for dv3 in divisions:
+				if dv3.team == player.team:
+					dv3.dir_locked = true
+
 func _resolve_doctrine() -> void:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = (GameConfig.match_seed if GameConfig.match_seed != 0 else 1) ^ 0x5151d0c7
@@ -11210,6 +11267,8 @@ func _decide_divisions(army) -> void:
 		var brs := _division_brigades(dv)
 		if brs.is_empty():
 			continue
+		if dv.player_led or dv.dir_locked:
+			continue        # MULTI-ECHELON: the player commands this division — its directive/missions are his to set
 		if dv.general_down:
 			dv.directive = "hold"       # leaderless: the brigades fight their own duels
 			continue
@@ -11279,6 +11338,18 @@ func _army_decide(army) -> void:
 			mine.append(br)
 		else:
 			foe.append(br)
+	# MULTI-ECHELON: the army does NOT plan the formations the PLAYER commands — he issues their orders.
+	# Drop his brigade (brigade cmd), his division's brigades (division cmd), or his corps/army's divisions.
+	if _player_army != null or _player_corps >= 0 or _player_division != null or _player_brigade != null:
+		var kept: Array = []
+		for br in mine:
+			if br.player_led or br.mission_locked:
+				continue
+			var dvv = _division_for(br)
+			if dvv != null and dvv.dir_locked:
+				continue
+			kept.append(br)
+		mine = kept
 	if mine.is_empty():
 		return
 	if foe.is_empty():
@@ -11938,6 +12009,8 @@ func _brigade_pursue_task(br, center: Vector3) -> void:
 		br.face_want = atan2((br.objective - center).x, (br.objective - center).z)
 
 func _brigade_decide(br) -> void:
+	if br.player_led:
+		return               # MULTI-ECHELON: the PLAYER commands this brigade — his orders set the battalions' posture/objective, not the tactical AI
 	var center := _brigade_center(br)
 	# historical script (Waterloo): a brigade ordered to hold stands fast; one given a scripted
 	# objective marches to it, then reverts to the tactical AI once arrived.

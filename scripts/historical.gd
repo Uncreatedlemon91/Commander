@@ -24,24 +24,9 @@ const BRUNS    := Color(0.10, 0.10, 0.13)   # Brunswick — black
 const NASSAU   := Color(0.16, 0.30, 0.20)   # Nassau — green
 const PRUSS    := Color(0.14, 0.18, 0.34)   # Prussian — dark blue
 
-# Nationality → [coat_idx (slot into the side's 3-coat palette, COATS_W0/W1 in game.gd), facing trim
-# colour (collar/cuffs/lapels)]. The coat gives the national dress; the facing the regimental/national
-# distinction. France: all three slots are blues; the Allies: 0=British red, 1=Allied blue, 2=black.
-# Nationality → [coat_idx (slot into COATS_W0/W1), facing trim colour, belt_idx (0 white / 1 black / 2 brown)].
-# coat slot 3 is the green (rifles / jägers / Nassau). Rifle battalions are auto-detected by name in
-# _brig (green coat + black belts) regardless of their brigade's nationality.
-const NAT := {
-	"FR": [0, Color(0.72, 0.12, 0.12), 0],   # French line — blue coat, red facings, white belts
-	"FL": [1, Color(0.88, 0.78, 0.22), 0],   # French légère — blue, yellow trim
-	"FG": [2, Color(0.74, 0.12, 0.12), 0],   # Imperial Guard — deep blue, red facings (gold lace)
-	"BR": [0, Color(0.90, 0.86, 0.74), 0],   # British — red coat, buff facings, white belts
-	"KG": [0, Color(0.13, 0.22, 0.52), 0],   # King's German Legion — red, blue facings
-	"HA": [0, Color(0.90, 0.80, 0.22), 0],   # Hanoverian — red, yellow facings
-	"NL": [1, Color(0.93, 0.52, 0.12), 0],   # Dutch-Belgian — blue coat, orange (House of Orange) facings
-	"NA": [3, Color(0.88, 0.80, 0.20), 0],   # Nassau — GREEN coat, yellow facings
-	"BW": [2, Color(0.42, 0.62, 0.86), 1],   # Brunswick — black coat, light-blue facings, BLACK belts
-	"PR": [1, Color(0.80, 0.14, 0.14), 0],   # Prussian — blue coat, red facings
-}
+# Unit types are now EDITABLE DATA — units/<id>.tres (UnitProfile), carrying each type's nationality,
+# weapon, dress and drill quality. The order-of-battle below passes a profile id as the `nat` argument to
+# _brig(); the old hard-coded NAT dress table lived here and has moved into those .tres files.
 
 static func make(key: String) -> BattleSetup:
 	match key:
@@ -195,7 +180,9 @@ static func _prussian(s: BattleSetup) -> void:
 static func _brig(s: BattleSetup, team: int, corps: int, division: int, brigade: int, center: Vector3, face: float, nat: String, men: int, exp: float, btns: Array) -> void:
 	var fwd := Vector3(sin(face), 0, cos(face))
 	var right := Vector3(fwd.z, 0, -fwd.x)
-	var nd: Array = NAT[nat]
+	# `nat` is now a UNIT-PROFILE id (units/<nat>.tres): the editable template carrying this type's
+	# nationality (→ doctrine), weapon, dress and drill quality. It replaces the old hard-coded NAT table.
+	var p := UnitProfile.get_profile(nat)
 	var strength: int = men
 	for i in range(btns.size()):
 		var u := BattleSetup.BattUnit.new()
@@ -205,22 +192,28 @@ static func _brig(s: BattleSetup, team: int, corps: int, division: int, brigade:
 		u.brigade = brigade
 		var bn := String(btns[i])
 		u.name = bn
-		u.nation = nat            # carry the nationality through to the AI's national doctrine
 		u.men = strength
 		u.experience = exp
 		u.morale = 100.0
 		u.ammo = 50.0
 		u.facing = face
+		# stamp the profile onto the unit (nationality → doctrine, weapon, dress, and — via u.profile — its skill base)
+		u.profile = nat
+		u.nation = p.nation
+		u.weapon = p.weapon
+		u.coat_idx = p.coat_idx
+		u.facing_col = p.facing_col
+		u.belt_idx = p.belt_idx
+		u.pants_idx = p.pants_idx
+		u.hat_idx = p.hat_idx
 		if "Rifle" in bn:
-			# the 95th Rifles (and any rifle battalion): dark rifle green, black crossbelts, black facings,
-			# and a real RIFLE — longer range, deadlier at distance, but slow to reload (see weapons/baker_rifle.tres)
-			u.coat_idx = 3
-			u.facing_col = Color(0.07, 0.11, 0.07)
-			u.belt_idx = 1
-			u.weapon = "baker_rifle"
-		else:
-			u.coat_idx = int(nd[0])     # national coat (slot into the side's palette)
-			u.facing_col = nd[1]        # regimental/national facing trim
-			u.belt_idx = int(nd[2])     # crossbelt colour (white / black / brown)
+			# a rifle battalion within a line brigade: keep its parent nationality, but swap to the
+			# Rifles profile — dark green dress, black belts, the Baker rifle, and a crack skill base
+			var pr := UnitProfile.get_profile("RIFLES")
+			u.profile = "RIFLES"
+			u.weapon = pr.weapon
+			u.coat_idx = pr.coat_idx
+			u.facing_col = pr.facing_col
+			u.belt_idx = pr.belt_idx
 		u.pos = center + right * ((float(i) - (btns.size() - 1) * 0.5) * 46.0)
 		s.units.append(u)

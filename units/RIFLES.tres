@@ -1,0 +1,16 @@
+[gd_resource type="Resource" script_class="UnitProfile" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/unit_profile.gd" id="1_up"]
+
+[resource]
+script = ExtResource("1_up")
+id = "RIFLES"
+display_name = "Rifles (Baker)"
+nation = "BR"
+weapon = "baker_rifle"
+coat_idx = 3
+facing_col = Color(0.07, 0.11, 0.07, 1)
+belt_idx = 1
+pants_idx = -1
+hat_idx = -1
+skill_base = 64.0

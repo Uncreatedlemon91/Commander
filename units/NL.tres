@@ -1,0 +1,16 @@
+[gd_resource type="Resource" script_class="UnitProfile" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/unit_profile.gd" id="1_up"]
+
+[resource]
+script = ExtResource("1_up")
+id = "NL"
+display_name = "Dutch-Belgian"
+nation = "NL"
+weapon = "brown_bess"
+coat_idx = 1
+facing_col = Color(0.93, 0.52, 0.12, 1)
+belt_idx = 0
+pants_idx = -1
+hat_idx = -1
+skill_base = 44.0

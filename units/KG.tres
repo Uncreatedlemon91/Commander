@@ -1,0 +1,16 @@
+[gd_resource type="Resource" script_class="UnitProfile" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/unit_profile.gd" id="1_up"]
+
+[resource]
+script = ExtResource("1_up")
+id = "KG"
+display_name = "King's German Legion"
+nation = "KG"
+weapon = "brown_bess"
+coat_idx = 0
+facing_col = Color(0.13, 0.22, 0.52, 1)
+belt_idx = 0
+pants_idx = -1
+hat_idx = -1
+skill_base = 62.0
