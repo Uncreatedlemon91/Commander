@@ -5,6 +5,7 @@ extends Node
 
 var mode: String = "single"     # single | host | client
 var local_slot: int = 52        # which battalion index this player commands (centre, first line)
+var command_echelon: int = 0    # 0 battalion · 1 brigade · 2 division · 3 corps · 4 army — what you command
 var player_name: String = "Commander"
 var match_seed: int = 0          # shared RNG seed so every peer deploys identically
 # campaign hook: when set, the AI army's appreciation is DIRECTED to this goal

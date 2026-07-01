@@ -26,6 +26,7 @@ class BattUnit:
 	var hat_idx: int = -1           # headgear shape (−1 = default/hashed)
 	var nation: String = "GEN"      # nationality key (FR/BR/PR/… or GEN) — drives the AI's national doctrine
 	var weapon: String = "brown_bess"   # weapon id → weapons/<id>.tres (drives range/reload/accuracy)
+	var profile: String = ""            # unit-type id → units/<id>.tres (nation/weapon/dress/skill template)
 	var brigade: int = 0            # place in the order of battle
 	var division: int = 0
 	var corps: int = 0
@@ -38,7 +39,7 @@ class BattUnit:
 			"e": experience, "sk": skills, "ft": fatigue, "c": coat_idx,
 			"f": [facing_col.r, facing_col.g, facing_col.b],
 			"bl": belt_idx, "pt": pants_idx, "ht": hat_idx,
-			"nt": nation, "wp": weapon,
+			"nt": nation, "wp": weapon, "pf": profile,
 			"b": brigade, "d": division, "k": corps,
 			"p": [pos.x, pos.z], "fa": facing, "h": human_slot }
 
@@ -60,6 +61,7 @@ class BattUnit:
 		u.hat_idx = int(d.get("ht", -1))
 		u.nation = String(d.get("nt", "GEN"))
 		u.weapon = String(d.get("wp", "brown_bess"))
+		u.profile = String(d.get("pf", ""))
 		u.brigade = int(d.get("b", 0))
 		u.division = int(d.get("d", 0))
 		u.corps = int(d.get("k", 0))

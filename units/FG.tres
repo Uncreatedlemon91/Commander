@@ -1,0 +1,16 @@
+[gd_resource type="Resource" script_class="UnitProfile" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/unit_profile.gd" id="1_up"]
+
+[resource]
+script = ExtResource("1_up")
+id = "FG"
+display_name = "Imperial Guard"
+nation = "FG"
+weapon = "brown_bess"
+coat_idx = 2
+facing_col = Color(0.74, 0.12, 0.12, 1)
+belt_idx = 0
+pants_idx = -1
+hat_idx = -1
+skill_base = 72.0
